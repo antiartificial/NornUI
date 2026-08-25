@@ -10,7 +10,7 @@ struct NornUIApp: App {
         credentialVault = vault
         _appModel = State(initialValue: NornAppModel(
             clientFactory: { profile in
-                try NornClient(profile: profile, credentialVault: vault)
+                try await NornClient(profile: profile, credentialVault: vault)
             },
             credentialVault: vault
         ))

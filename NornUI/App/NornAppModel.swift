@@ -122,8 +122,8 @@ final class NornAppModel {
 			kind = "snapshot"; canonical = app
 		case let .pruneSnapshots(app, keep):
 			kind = "snapshot-prune"; canonical = "\(app)\u{1f}\(keep)"
-		case let .restoreSnapshot(app, timestamp):
-			kind = "snapshot-restore"; canonical = "\(app)\u{1f}\(timestamp)"
+		case let .restoreSnapshot(app, snapshot):
+			kind = "snapshot-restore"; canonical = "\(app)\u{1f}\(snapshot)"
 		case let .migrate(app, ref):
 			kind = "migrate"; canonical = "\(app)\u{1f}\(ref)"
 		case let .rollback(app, regions):

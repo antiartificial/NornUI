@@ -274,7 +274,7 @@ private struct AppRecoveryInspector: View {
 		guard let confirmation else { return }; self.confirmation = nil
 		switch confirmation {
 		case .prune: queue(.pruneSnapshots(app: app.id, keep: keep))
-		case let .restore(snapshot): queue(.restoreSnapshot(app: app.id, timestamp: snapshot.timestamp))
+		case let .restore(snapshot): queue(.restoreSnapshot(app: app.id, snapshot: snapshot.filename))
 		case .migrate: queue(.migrate(app: app.id, ref: migrationRef.trimmingCharacters(in: .whitespacesAndNewlines)))
 		case .rollback: queue(.rollback(app: app.id, regions: []))
 		}

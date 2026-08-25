@@ -17,7 +17,7 @@ enum NornFixtures {
                 "events": "/api/v1/events",
                 "hostMetrics": "/api/v1/host/metrics",
 				"appSnapshots": "/api/v1/apps/{id}/snapshots",
-				"appSnapshotRestore": "/api/v1/apps/{id}/snapshots/{ts}/restore",
+				"appSnapshotRestore": "/api/v1/apps/{id}/snapshots/{snapshot}/restore",
 				"appRollbacks": "/api/v1/apps/{id}/rollbacks",
                 "fleetNodePools": "/api/v1/fleet/node-pools",
                 "fleetPlans": "/api/v1/fleet/plans",

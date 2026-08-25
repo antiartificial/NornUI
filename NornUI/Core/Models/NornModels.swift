@@ -279,7 +279,7 @@ nonisolated struct NornAppSnapshot: Identifiable, Codable, Hashable, Sendable {
 nonisolated enum NornAppOperationRequest: Hashable, Sendable {
 	case snapshot(app: String)
 	case pruneSnapshots(app: String, keep: Int)
-	case restoreSnapshot(app: String, timestamp: String)
+	case restoreSnapshot(app: String, snapshot: String)
 	case migrate(app: String, ref: String)
 	case rollback(app: String, regions: [String])
 

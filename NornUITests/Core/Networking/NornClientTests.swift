@@ -221,6 +221,13 @@ final class NornClientTests: XCTestCase {
 		let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
 		XCTAssertEqual(payload["ref"] as? String, "main")
 		XCTAssertEqual(payload["confirm"] as? Bool, true)
+
+		_ = try await client.queueAppOperation(
+			.restoreSnapshot(app: "orders-api", snapshot: "orders_pre-migrate_20260825T140000.dump"),
+			idempotencyKey: "restore-retry-1"
+		)
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/snapshots/orders_pre-migrate_20260825T140000.dump/restore")
+		XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "restore-retry-1")
 	}
 
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {

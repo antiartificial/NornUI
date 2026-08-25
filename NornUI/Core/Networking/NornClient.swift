@@ -166,8 +166,8 @@ actor NornClient: NornClientProtocol {
 			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots", body: EmptyRequest(), idempotencyKey: key)
 		case let .pruneSnapshots(app, keep):
 			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots/retention", body: Retention(keep: keep), idempotencyKey: key)
-		case let .restoreSnapshot(app, timestamp):
-			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots/\(timestamp.pathComponentEncoded)/restore", body: Confirmation(), idempotencyKey: key)
+		case let .restoreSnapshot(app, snapshot):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots/\(snapshot.pathComponentEncoded)/restore", body: Confirmation(), idempotencyKey: key)
 		case let .migrate(app, ref):
 			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/migrations", body: Migration(ref: ref), idempotencyKey: key)
 		case let .rollback(app, regions):
