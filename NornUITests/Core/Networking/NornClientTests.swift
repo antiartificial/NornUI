@@ -193,6 +193,36 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(payload["port"] as? Int, 8080)
     }
 
+	func testDurableAppRecoveryUsesTypedSnapshotAndMigrationRoutes() async throws {
+		let recorder = RequestRecorder()
+		NornURLProtocol.setHandler { request in
+			recorder.record(request, body: NornURLProtocol.body(of: request))
+			if request.httpMethod == "GET" {
+				return Self.response(request, status: 200, body: """
+				[{"filename":"orders_pre-migrate_20260825T140000.dump","database":"orders","timestamp":"20260825T140000","createdAt":"2026-08-25T14:00:00Z","size":4096}]
+				""")
+			}
+			return Self.response(request, status: 202, body: """
+			{"id":"migration-1","kind":"app.migrate","app":"orders-api","status":"queued","startedAt":"2026-08-25T14:00:00Z","updatedAt":"2026-08-25T14:00:00Z"}
+			""")
+		}
+
+		let client = try await makeClient()
+		let snapshots = try await client.appSnapshots(app: "orders-api")
+		XCTAssertEqual(snapshots.first?.database, "orders")
+		XCTAssertEqual(snapshots.first?.size, 4096)
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/snapshots")
+
+		let operation = try await client.queueAppOperation(.migrate(app: "orders-api", ref: "main"), idempotencyKey: "migration-retry-1")
+		XCTAssertEqual(operation.kind, "app.migrate")
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/migrations")
+		XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "migration-retry-1")
+		let body = try XCTUnwrap(recorder.lastBody)
+		let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+		XCTAssertEqual(payload["ref"] as? String, "main")
+		XCTAssertEqual(payload["confirm"] as? Bool, true)
+	}
+
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in

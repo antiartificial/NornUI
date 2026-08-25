@@ -84,8 +84,9 @@ struct OperationsFeatureView: View {
     var body: some View {
         VStack(spacing: 0) {
             operationSummary
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+                .padding(.leading, 22)
+                .padding(.trailing, 24)
+                .padding(.vertical, 10)
 
             Divider()
 

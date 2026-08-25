@@ -87,6 +87,22 @@ final class NornAppModelTests: XCTestCase {
         let retry = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom")
         XCTAssertEqual(retry?.id, plan?.id, "the same intent must retain its idempotency key across an ambiguous retry")
     }
+
+    func testDurableAppIntentSurvivesAnInterruptedRequest() {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+
+        let first = store.durableIntentKey(scope: "profile:atlas:restore", requestDigest: "snapshot-a")
+        let retryAfterRelaunch = NornProfileStore(defaults: defaults)
+            .durableIntentKey(scope: "profile:atlas:restore", requestDigest: "snapshot-a")
+        XCTAssertEqual(first, retryAfterRelaunch)
+
+        store.clearDurableIntent(scope: "profile:atlas:restore", key: first)
+        let next = store.durableIntentKey(scope: "profile:atlas:restore", requestDigest: "snapshot-a")
+        XCTAssertNotEqual(first, next)
+    }
 }
 
 private struct MockNornClient: NornClientProtocol {

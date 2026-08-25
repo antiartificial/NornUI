@@ -12,6 +12,7 @@ struct FleetFeatureView: View {
     let onPlan: (String, Int, String, String) async -> Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
 
@@ -165,7 +166,8 @@ struct FleetFeatureView: View {
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
                             canUseGitHub: githubStatus.connected,
                             onOpenReview: onOpenReview,
-                            onDispatchApply: onDispatchApply
+                            onDispatchApply: onDispatchApply,
+							onOpenOperation: onOpenOperation
                         )
                     }
                 }
@@ -329,6 +331,7 @@ private struct FleetPlanJourney: View {
     let canUseGitHub: Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
     @State private var isWorking = false
@@ -382,6 +385,7 @@ private struct FleetPlanJourney: View {
                 HStack {
                     Text(plan.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
                     Spacer()
+					Button("View Receipt", systemImage: "doc.text.magnifyingglass") { onOpenOperation(plan) }
                     if canUseGitHub {
                         Button("Open Review", systemImage: "arrow.triangle.branch") { runOpenReview() }
                             .disabled(isWorking)
@@ -482,7 +486,8 @@ private extension JSONValue {
             onRefresh: {},
             onPlan: { _, _, _, _ in true },
             onOpenReview: { _ in nil },
-            onDispatchApply: { _, _ in nil }
+            onDispatchApply: { _, _ in nil },
+			onOpenOperation: { _ in }
         )
     }
     .frame(width: 980, height: 720)

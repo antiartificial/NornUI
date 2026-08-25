@@ -150,6 +150,31 @@ actor NornClient: NornClientProtocol {
 		return try await perform(path: "api/v1/apps/\(app.pathComponentEncoded)/deployment", method: "PUT", body: Self.encoder.encode(Body(enabled: enabled)))
 	}
 
+	func appSnapshots(app: String) async throws -> [NornAppSnapshot] {
+		try await get("api/v1/apps/\(app.pathComponentEncoded)/snapshots")
+	}
+
+	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation {
+		let key = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !key.isEmpty, key.count <= 200 else { throw NornClientError.invalidIdempotencyKey }
+		struct Confirmation: Encodable { let confirm = true }
+		struct Retention: Encodable { let keep: Int; let confirm = true }
+		struct Migration: Encodable { let ref: String; let confirm = true }
+		struct Rollback: Encodable { let regions: [String]; let confirm = true }
+		switch request {
+		case let .snapshot(app):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots", body: EmptyRequest(), idempotencyKey: key)
+		case let .pruneSnapshots(app, keep):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots/retention", body: Retention(keep: keep), idempotencyKey: key)
+		case let .restoreSnapshot(app, timestamp):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/snapshots/\(timestamp.pathComponentEncoded)/restore", body: Confirmation(), idempotencyKey: key)
+		case let .migrate(app, ref):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/migrations", body: Migration(ref: ref), idempotencyKey: key)
+		case let .rollback(app, regions):
+			return try await queue(path: "api/v1/apps/\(app.pathComponentEncoded)/rollbacks", body: Rollback(regions: regions), idempotencyKey: key)
+		}
+	}
+
     func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation {
         let key = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty, key.count <= 200 else {

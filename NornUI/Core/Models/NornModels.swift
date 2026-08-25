@@ -76,6 +76,13 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
 
 	var supportsAppCreation: Bool { features.contains("app-creation") && endpoints["appCreation"] != nil }
 
+    var supportsDurableAppRecovery: Bool {
+        features.contains("durable-app-recovery-v1") &&
+        endpoints["appSnapshots"] != nil &&
+        endpoints["appSnapshotRestore"] != nil &&
+        endpoints["appRollbacks"] != nil
+    }
+
     var supportsFleet: Bool {
         features.contains("fleet-v1") &&
         features.contains("fleet-inventory") &&
@@ -224,8 +231,21 @@ nonisolated struct NornCreateAppRequest: Codable, Hashable, Sendable {
 }
 
 nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
+	nonisolated struct Infrastructure: Codable, Hashable, Sendable {
+		nonisolated struct Postgres: Codable, Hashable, Sendable { var database: String }
+		var postgres: Postgres? = nil
+	}
+	nonisolated struct SnapshotPolicy: Codable, Hashable, Sendable {
+		var keep: Int? = nil
+		var preRestore: Bool? = nil
+		var retentionEnabled: Bool? = nil
+		var exportBucket: String? = nil
+	}
 	var name: String
 	var deploy: Bool?
+	var migrations: String? = nil
+	var infrastructure: Infrastructure? = nil
+	var snapshots: SnapshotPolicy? = nil
 }
 
 nonisolated struct NornAppMutationReceipt: Codable, Hashable, Sendable {
@@ -239,6 +259,35 @@ nonisolated struct NornAppStatus: Identifiable, Codable, Hashable, Sendable {
 	var nomadStatus: String?
 	var healthy: Bool
 	var id: String { spec.name }
+}
+
+nonisolated struct NornAppSnapshot: Identifiable, Codable, Hashable, Sendable {
+	var filename: String
+	var database: String
+	var commitSHA: String? = nil
+	var timestamp: String
+	var createdAt: Date?
+	var size: Int64
+	var id: String { filename }
+
+	enum CodingKeys: String, CodingKey {
+		case filename, database, timestamp, createdAt, size
+		case commitSHA = "commitSha"
+	}
+}
+
+nonisolated enum NornAppOperationRequest: Hashable, Sendable {
+	case snapshot(app: String)
+	case pruneSnapshots(app: String, keep: Int)
+	case restoreSnapshot(app: String, timestamp: String)
+	case migrate(app: String, ref: String)
+	case rollback(app: String, regions: [String])
+
+	var app: String {
+		switch self {
+		case let .snapshot(app), let .pruneSnapshots(app, _), let .restoreSnapshot(app, _), let .migrate(app, _), let .rollback(app, _): app
+		}
+	}
 }
 
 nonisolated struct NornHostMetrics: Codable, Hashable, Sendable {

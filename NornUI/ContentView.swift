@@ -104,8 +104,12 @@ struct ContentView: View {
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
 				canCreate: appModel.canPerformOperations && appModel.appCreationSupported,
+				supportsRecovery: appModel.canPerformOperations && appModel.durableAppRecoverySupported,
 				onCreate: { appModel.isShowingCreateApp = true },
-				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } }
+				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
+				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
+				onQueueOperation: { await appModel.queueAppOperation($0) },
+				onOpenOperation: openOperation
 			)
         case .operations:
             OperationsFeatureView(
@@ -150,7 +154,8 @@ struct ContentView: View {
                     ) != nil
                 },
                 onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
-                onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) }
+                onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
+				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }
             .onDisappear { appModel.setFleetVisible(false) }

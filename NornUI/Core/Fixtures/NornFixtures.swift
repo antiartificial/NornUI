@@ -7,7 +7,7 @@ enum NornFixtures {
         capabilities: NornCapabilities(
             protocolVersion: 1,
             serverVersion: "v2.16.2-control",
-            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-github-app-v1"],
+            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "durable-app-recovery-v1", "durable-snapshots", "standalone-migrations", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-github-app-v1"],
             auth: .init(
                 scopes: ["api:read", "events:read", "platform:operate", "host:operate"],
                 websocketBearerHeader: true,
@@ -16,6 +16,9 @@ enum NornFixtures {
             endpoints: [
                 "events": "/api/v1/events",
                 "hostMetrics": "/api/v1/host/metrics",
+				"appSnapshots": "/api/v1/apps/{id}/snapshots",
+				"appSnapshotRestore": "/api/v1/apps/{id}/snapshots/{ts}/restore",
+				"appRollbacks": "/api/v1/apps/{id}/rollbacks",
                 "fleetNodePools": "/api/v1/fleet/node-pools",
                 "fleetPlans": "/api/v1/fleet/plans",
                 "fleetReconciliations": "/api/v1/fleet/plans/{planID}/reconciliations",
@@ -58,8 +61,28 @@ enum NornFixtures {
                 current: false
             )
         ],
-        observedAt: now
+        observedAt: now,
+		apps: [
+			NornAppStatus(
+				spec: .init(
+					name: "mail-mcp",
+					deploy: true,
+					migrations: "./bin/migrate",
+					infrastructure: .init(postgres: .init(database: "mail_mcp")),
+					snapshots: .init(keep: 3, preRestore: true, retentionEnabled: true)
+				),
+				nomadStatus: "running",
+				healthy: true
+			)
+		]
     )
+
+	static let appSnapshots = [
+		NornAppSnapshot(filename: "mail_mcp_pre-migrate_20260825T140000.dump", database: "mail_mcp", timestamp: "20260825T140000", createdAt: now.addingTimeInterval(-3_600), size: 18_400_000),
+		NornAppSnapshot(filename: "mail_mcp_manual_20260824T140000.dump", database: "mail_mcp", timestamp: "20260824T140000", createdAt: now.addingTimeInterval(-90_000), size: 17_900_000),
+		NornAppSnapshot(filename: "mail_mcp_release_20260820T140000.dump", database: "mail_mcp", timestamp: "20260820T140000", createdAt: now.addingTimeInterval(-435_600), size: 16_800_000),
+		NornAppSnapshot(filename: "mail_mcp_release_20260812T140000.dump", database: "mail_mcp", timestamp: "20260812T140000", createdAt: now.addingTimeInterval(-1_126_800), size: 15_600_000),
+	]
 
     static let hostMetrics = NornHostMetrics(
         schemaVersion: "norn.host-metrics/v1",

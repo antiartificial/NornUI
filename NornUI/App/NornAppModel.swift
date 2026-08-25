@@ -83,6 +83,56 @@ final class NornAppModel {
     }
 
 	var appCreationSupported: Bool { snapshot.capabilities.supportsAppCreation }
+	var durableAppRecoverySupported: Bool { snapshot.capabilities.supportsDurableAppRecovery }
+
+	func appSnapshots(app: String) async -> [NornAppSnapshot]? {
+		guard let client, durableAppRecoverySupported else { return nil }
+		do { return try await client.appSnapshots(app: app) }
+		catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	@discardableResult
+	func queueAppOperation(_ request: NornAppOperationRequest) async -> NornOperation? {
+		guard let client, durableAppRecoverySupported else { return nil }
+		lastError = nil
+		let intent = appOperationIntent(request)
+		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
+		do {
+			let operation = try await client.queueAppOperation(request, idempotencyKey: idempotencyKey)
+			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
+			upsert(operation)
+			selectedOperationID = operation.id
+			navigation = .operations
+			return operation
+		} catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	private func appOperationIntent(_ request: NornAppOperationRequest) -> (scope: String, digest: String) {
+		let profile = selectedProfileID?.uuidString ?? "fixture"
+		let kind: String
+		let canonical: String
+		switch request {
+		case let .snapshot(app):
+			kind = "snapshot"; canonical = app
+		case let .pruneSnapshots(app, keep):
+			kind = "snapshot-prune"; canonical = "\(app)\u{1f}\(keep)"
+		case let .restoreSnapshot(app, timestamp):
+			kind = "snapshot-restore"; canonical = "\(app)\u{1f}\(timestamp)"
+		case let .migrate(app, ref):
+			kind = "migrate"; canonical = "\(app)\u{1f}\(ref)"
+		case let .rollback(app, regions):
+			kind = "rollback"; canonical = "\(app)\u{1f}\(regions.joined(separator: ","))"
+		}
+		let digest = SHA256.hash(data: Data("\(profile)\u{1f}\(kind)\u{1f}\(canonical)".utf8))
+			.map { String(format: "%02x", $0) }.joined()
+		return ("\(profile):\(request.app):\(kind)", digest)
+	}
 
     var fleetSupported: Bool { snapshot.capabilities.supportsFleet }
     var fleetReconciliationSupported: Bool { snapshot.capabilities.supportsFleetReconciliation }

@@ -18,6 +18,8 @@ protocol NornClientProtocol: Sendable {
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt
+	func appSnapshots(app: String) async throws -> [NornAppSnapshot]
+	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation
     func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation
     func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error>
 }
@@ -35,4 +37,6 @@ extension NornClientProtocol {
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
+	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
+	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 }
