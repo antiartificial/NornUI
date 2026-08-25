@@ -7,22 +7,32 @@ to the control-plane database or expose arbitrary shell execution.
 
 ## Current milestone
 
-The first working milestone includes:
+The current working milestone includes:
 
 - A native `NavigationSplitView` shell with Overview, Apps, Operations,
-  Releases, and Host surfaces.
+  Platform, Host, and Fleet surfaces.
 - Multiple Norn server profiles with scoped tokens stored device-only in
   Keychain.
 - HTTPS transport, authenticated WebSocket events, persisted replay cursors,
   exponential reconnect, and authoritative refresh after reconnect.
 - Durable preflight, upgrade, rollback, smoke, and host-assurance actions with
   idempotency keys and visible receipts.
+- Fleet inventory, node-pool capacity planning, reconciliation checkpoints,
+  GitHub review creation, and protected apply dispatch.
+- Safe app creation with deployment disabled by default, followed by an
+  explicit deployment-enable action.
+- Durable app snapshots, retention pruning, exact-snapshot restore, standalone
+  schema migrations, and regional application rollback. Retry-safe intents are
+  retained locally until Norn accepts the operation and returns its receipt.
+- Periodically refreshed host CPU, memory, storage, process, and container
+  metrics when the connected server advertises that capability.
 - Offline cached state, explicit request errors, fixture-backed Explore Mode,
   keyboard navigation, context menus, VoiceOver labels, semantic status, and
   Reduce Motion/Reduce Transparency support.
 
 See [Docs/PROJECT_PLAN.md](Docs/PROJECT_PLAN.md) for the product principles,
-architecture, and later protocol milestones.
+architecture, server/client capability boundary, and remaining native-client
+work.
 
 ## Run locally
 
@@ -32,8 +42,10 @@ architecture, and later protocol milestones.
 4. Choose **Add Server** and enter an HTTPS Norn URL plus a scoped access
    token. Plain HTTP is accepted only for a loopback address.
 
-For observation, provision `api:read,events:read`. Add `platform:operate` or
-`host:operate` only for Macs that should be allowed to queue those workflows.
+For observation, provision `api:read,events:read`. Add `api:write` for Macs that
+may create apps, manage app recovery, or prepare and hand off fleet changes.
+Add `platform:operate` or `host:operate` only for Macs that should be allowed to
+queue those workflows.
 
 ## Verification
 
@@ -57,6 +69,8 @@ Xcode build.
 - WebSocket authentication uses the bearer header, not a query parameter.
 - Mutating work is limited to typed Norn operations and survives app/API
   restarts on the server.
+- App and fleet retries reuse a durable intent key until Norn acknowledges the
+  request, preventing an interrupted client from creating duplicate work.
 - Upgrade and rollback paths require an explicit review and acknowledgement.
 - Removing a server confirms before deleting both its profile and Keychain
   token.

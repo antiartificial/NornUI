@@ -21,6 +21,13 @@ the repository intentionally contains no server address or credential.
 - Multiple server profiles with Keychain-backed scoped tokens.
 - Capability negotiation and explicit connection state.
 - Fleet overview backed by health, service manifest, releases, and operations.
+- Fleet inventory, capacity plans, reconciliation checkpoints, GitHub review,
+  and protected apply handoff.
+- Safe app creation, explicit deployment enablement, snapshots, retention
+  pruning, exact-snapshot restore, standalone migrations, and regional
+  application rollback.
+- Host CPU, memory, storage, process, and container metrics with periodic
+  refresh while the Host surface is visible.
 - Operations timeline with durable status and receipts.
 - Platform release, preflight, upgrade, rollback, smoke, and host-assurance
   workflows using the versioned control protocol.
@@ -49,7 +56,7 @@ the repository intentionally contains no server address or credential.
 - `Core/Security`: Keychain credential storage.
 - `App`: profile selection, orchestration, reconciliation, and navigation.
 - `DesignSystem`: semantic status, cards, motion, empty/error states, and icons.
-- `Features`: Overview, Operations, Platform, Host, Apps, and Settings.
+- `Features`: Overview, Apps, Operations, Platform, Host, Fleet, and Settings.
 
 ## Parallel ownership
 
@@ -60,11 +67,31 @@ the repository intentionally contains no server address or credential.
 - **Orchestrator lane:** shared models, app state, navigation shell, settings,
   menus, integration, accessibility, and end-to-end verification.
 
-## Later protocol milestones
+## Server capabilities and native-client work
 
-- Pairing, refresh, revocation, and device management instead of manually
-  provisioning a long-lived administrative credential.
-- Standard problem details and typed operation receipts.
-- Event stream heartbeat, retention bounds, gap signaling, and subscriptions.
-- A formal exec-session protocol with resize, exit, audit, and step-up auth.
-- Optional same-host XPC recovery helper, strictly limited to bootstrap actions.
+Norn's server contract has advanced beyond the app's current integration. The
+following are server-supported capabilities, not missing control-plane
+infrastructure. Native product work remains before they become first-class Mac
+experiences:
+
+- **Device onboarding:** the server supports pairing enrollment, refresh,
+  rotation, revocation, and device listing. The Mac app still asks an operator
+  to paste a scoped access token when adding a server.
+- **Typed failures and receipts:** the server publishes stable problem codes,
+  stronger operation receipts, and explicit operation-cancellation semantics.
+  The app currently preserves safe error text and request IDs, and strongly
+  models the workflows it exposes; it does not yet present the complete typed
+  problem, receipt, or cancellation vocabulary.
+- **Event continuity:** the server publishes retention bounds, oldest/latest
+  cursors, heartbeat and gap signals, and subscription filters. The app
+  currently persists a replay cursor, reconnects exponentially, and performs an
+  authoritative refresh, but it does not yet expose filter controls or explicit
+  retention-gap recovery UI.
+- **Exec sessions:** the server offers framed stdout, stderr, input, resize,
+  exit, expiry, audit, cancellation, and explicit step-up authorization. The Mac
+  app intentionally exposes no terminal until a native session, approval, and
+  audit experience is designed and reviewed.
+
+An optional same-host XPC recovery helper remains a future architecture option.
+If introduced, it must be limited to narrowly defined bootstrap actions and
+must not become an arbitrary privileged shell.
