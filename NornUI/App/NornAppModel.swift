@@ -1,0 +1,538 @@
+import Foundation
+import CryptoKit
+import Observation
+
+typealias NornClientFactory = @Sendable (NornServerProfile) async throws -> any NornClientProtocol
+
+@MainActor
+@Observable
+final class NornAppModel {
+    var navigation: NornNavigation = .overview
+    var profiles: [NornServerProfile]
+    var selectedProfileID: UUID?
+    var connectionState: NornConnectionState = .idle
+    var snapshot: NornDashboardSnapshot
+    var hostMetrics: NornHostMetrics?
+    var fleetInventory: NornFleetInventory
+    var fleetPlans: [NornOperation]
+    var fleetReconciliations: [String: [NornOperation]] = [:]
+    var fleetGitHubStatus: NornFleetGitHubStatus
+    var isFleetRefreshing = false
+    var selectedOperationID: String?
+    var isRefreshing = false
+    var isShowingProfileEditor = false
+	var isShowingCreateApp = false
+    var lastError: String?
+    var isFixtureMode: Bool
+
+    @ObservationIgnored private let profileStore: NornProfileStore
+    @ObservationIgnored private let clientFactory: NornClientFactory?
+    @ObservationIgnored private let credentialVault: (any NornCredentialVault)?
+    @ObservationIgnored private var client: (any NornClientProtocol)?
+    @ObservationIgnored private var eventTask: Task<Void, Never>?
+    @ObservationIgnored private var hostMetricsTask: Task<Void, Never>?
+    @ObservationIgnored private var fleetTask: Task<Void, Never>?
+    @ObservationIgnored private var isHostMetricsVisible = false
+    @ObservationIgnored private var isFleetVisible = false
+
+    init(
+        profileStore: NornProfileStore? = nil,
+        clientFactory: NornClientFactory? = nil,
+        credentialVault: (any NornCredentialVault)? = nil,
+        fixture: NornDashboardSnapshot? = nil
+    ) {
+        let profileStore = profileStore ?? NornProfileStore()
+        let storedProfiles = profileStore.loadProfiles()
+        self.profileStore = profileStore
+        self.clientFactory = clientFactory
+        self.credentialVault = credentialVault
+        self.profiles = storedProfiles
+        self.selectedProfileID = profileStore.loadSelection()
+        self.snapshot = fixture ?? NornFixtures.snapshot
+        self.hostMetrics = (fixture != nil || storedProfiles.isEmpty) ? NornFixtures.hostMetrics : nil
+        self.fleetInventory = (fixture != nil || storedProfiles.isEmpty) ? NornFixtures.fleetInventory : .unconfigured
+        self.fleetPlans = []
+        self.fleetGitHubStatus = (fixture != nil || storedProfiles.isEmpty) ? .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet") : .unconfigured
+        self.isFixtureMode = storedProfiles.isEmpty || clientFactory == nil
+
+        if selectedProfileID == nil {
+            selectedProfileID = profiles.first?.id
+        }
+    }
+
+    deinit {
+        eventTask?.cancel()
+        hostMetricsTask?.cancel()
+        fleetTask?.cancel()
+    }
+
+    var selectedProfile: NornServerProfile? {
+        profiles.first { $0.id == selectedProfileID }
+    }
+
+    var selectedOperation: NornOperation? {
+        snapshot.operations.first { $0.id == selectedOperationID }
+    }
+
+    var canPerformOperations: Bool {
+        connectionState == .online && client != nil
+    }
+
+    var hostMetricsSupported: Bool {
+        snapshot.capabilities.supportsHostMetrics
+    }
+
+	var appCreationSupported: Bool { snapshot.capabilities.supportsAppCreation }
+
+    var fleetSupported: Bool { snapshot.capabilities.supportsFleet }
+    var fleetReconciliationSupported: Bool { snapshot.capabilities.supportsFleetReconciliation }
+    var fleetGitHubSupported: Bool { snapshot.capabilities.supportsFleetGitHub }
+
+	@discardableResult
+	func createApp(_ request: NornCreateAppRequest) async -> NornAppMutationReceipt? {
+		guard let client else { return nil }
+		lastError = nil
+		do {
+			let receipt = try await client.createApp(request)
+			try await refreshAuthoritativeState()
+			isShowingCreateApp = false
+			navigation = .apps
+			return receipt
+		} catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	func setAppDeployment(app: String, enabled: Bool) async {
+		guard let client else { return }
+		lastError = nil
+		do {
+			_ = try await client.setAppDeployment(app: app, enabled: enabled)
+			try await refreshAuthoritativeState()
+		} catch { lastError = error.localizedDescription }
+	}
+
+    func start() async {
+        guard !profiles.isEmpty, clientFactory != nil else {
+            connectionState = .online
+            isFixtureMode = true
+            return
+        }
+        await connect()
+    }
+
+    func connect() async {
+        eventTask?.cancel()
+        stopHostMetricsPolling()
+        stopFleetPolling()
+        hostMetrics = nil
+        fleetReconciliations = [:]
+        guard let profile = selectedProfile, let clientFactory else {
+            client = nil
+            isFixtureMode = true
+            connectionState = .idle
+            return
+        }
+
+        connectionState = .connecting
+        do {
+            client = try await clientFactory(profile)
+            isFixtureMode = false
+            try await refreshAuthoritativeState()
+            connectionState = .online
+            listenForEvents(profile: profile)
+            startHostMetricsPollingIfNeeded()
+            startFleetPollingIfNeeded()
+        } catch {
+            connectionState = .offline(error.localizedDescription)
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refresh() async {
+        guard client != nil else {
+            snapshot.observedAt = .now
+            return
+        }
+        isRefreshing = true
+        defer { isRefreshing = false }
+        do {
+            try await refreshAuthoritativeState()
+            connectionState = .online
+            lastError = nil
+            startHostMetricsPollingIfNeeded()
+            startFleetPollingIfNeeded()
+        } catch {
+            connectionState = .offline(error.localizedDescription)
+            lastError = error.localizedDescription
+            stopHostMetricsPolling()
+            stopFleetPolling()
+        }
+    }
+
+    /// Begins or stops the optional metrics poller as the Host view enters and
+    /// leaves the navigation hierarchy. Metrics have their own failure domain:
+    /// a failed optional sample never changes the control-plane connection state.
+    func setHostMetricsVisible(_ isVisible: Bool) {
+        isHostMetricsVisible = isVisible
+        if isVisible {
+            startHostMetricsPollingIfNeeded()
+        } else {
+            stopHostMetricsPolling()
+        }
+    }
+
+    func refreshHostMetrics() async {
+        guard let client, connectionState == .online, hostMetricsSupported else { return }
+        do {
+            hostMetrics = try await client.hostMetrics()
+        } catch is CancellationError {
+            return
+        } catch {
+            // Preserve the most recent good sample. Host metrics are an optional
+            // observational endpoint and must not take the whole UI offline.
+            // A retained value is explicitly marked stale rather than displayed
+            // as indefinitely current.
+            hostMetrics?.stale = true
+        }
+    }
+
+    func refreshHost() async {
+        await refresh()
+        await refreshHostMetrics()
+    }
+
+    func setFleetVisible(_ isVisible: Bool) {
+        isFleetVisible = isVisible
+        if isVisible {
+            startFleetPollingIfNeeded()
+        } else {
+            stopFleetPolling()
+        }
+    }
+
+    func refreshFleet() async {
+        guard let client, connectionState == .online, fleetSupported else { return }
+        isFleetRefreshing = true
+        defer { isFleetRefreshing = false }
+        do {
+            async let inventory = client.fleetInventory()
+            async let plans = client.fleetPlans()
+            async let githubStatus: NornFleetGitHubStatus = fleetGitHubSupported ? client.fleetGitHubStatus() : .unconfigured
+            fleetInventory = try await inventory
+            fleetPlans = try await plans
+            fleetGitHubStatus = try await githubStatus
+            for plan in fleetPlans where fleetReconciliationSupported {
+                if let result = try? await client.fleetReconciliations(planID: plan.id) {
+                    fleetReconciliations[plan.id] = result.reconciliations
+                }
+            }
+            lastError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func createFleetPullRequest(planID: String) async -> URL? {
+        guard let client, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        lastError = nil
+        do {
+            let operation = try await client.createFleetPullRequest(planID: planID)
+            upsert(operation)
+            return operation.payload?["url"]?.stringValue.flatMap(URL.init(string:))
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func dispatchFleetApply(planID: String, allowDestructive: Bool) async -> URL? {
+        guard let client, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        lastError = nil
+        do {
+            let operation = try await client.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive)
+            upsert(operation)
+            return operation.payload?["url"]?.stringValue.flatMap(URL.init(string:))
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func planFleetCapacity(pool: String, desired: Int, size: String, reason: String) async -> NornOperation? {
+        guard let client else { return nil }
+        guard let current = fleetInventory.nodePools[pool] else {
+            lastError = "The selected fleet pool is no longer available."
+            return nil
+        }
+        lastError = nil
+        do {
+            let request = NornFleetPlanRequest(
+                desired: desired,
+                size: size.trimmingCharacters(in: .whitespacesAndNewlines),
+                strategy: size == current.size ? nil : "blueGreen",
+                reason: reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            let operation = try await client.planFleetCapacity(
+                pool: pool,
+                request: request,
+                idempotencyKey: fleetPlanIdempotencyKey(pool: pool, request: request)
+            )
+            fleetPlans.removeAll { $0.id == operation.id }
+            fleetPlans.insert(operation, at: 0)
+            if fleetReconciliationSupported {
+                fleetReconciliations[operation.id] = []
+            }
+            return operation
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    /// A retry after a process, network, or runner interruption must identify the
+    /// same intent. The fleet document digest changes after a successful apply,
+    /// so an identical future change against new desired state receives a new key.
+    private func fleetPlanIdempotencyKey(pool: String, request: NornFleetPlanRequest) -> String {
+        let canonical = [
+            selectedProfileID?.uuidString ?? "fixture",
+            fleetInventory.digest ?? "unversioned",
+            pool,
+            String(request.desired),
+            request.size,
+            request.strategy ?? "",
+            request.reason
+        ].joined(separator: "\u{1f}")
+        let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "fleet-plan-\(digest)"
+    }
+
+    @discardableResult
+    func queue(_ request: NornMaintenanceRequest) async -> NornOperation? {
+        guard let client else { return nil }
+        lastError = nil
+        do {
+            let operation = try await client.queue(request, idempotencyKey: UUID().uuidString)
+            upsert(operation)
+            selectedOperationID = operation.id
+            navigation = .operations
+            connectionState = .online
+            return operation
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func addProfile(_ profile: NornServerProfile) {
+        profiles.removeAll { $0.id == profile.id }
+        profiles.append(profile)
+        selectedProfileID = profile.id
+        persistProfiles()
+    }
+
+    func saveProfile(_ profile: NornServerProfile, token: String) async throws {
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedToken.isEmpty {
+            guard let credentialVault else { throw NornCredentialVaultError.invalidCredential }
+            try await credentialVault.store(
+                NornCredential(accessToken: trimmedToken),
+                for: profile.credentialID
+            )
+        }
+        addProfile(profile)
+        await selectProfile(id: profile.id)
+    }
+
+    func removeProfile(id: UUID) {
+        profiles.removeAll { $0.id == id }
+        if selectedProfileID == id {
+            selectedProfileID = profiles.first?.id
+        }
+        persistProfiles()
+    }
+
+    func removeProfileAndCredential(id: UUID) async {
+        let profile = profiles.first { $0.id == id }
+        let wasSelected = selectedProfileID == id
+        removeProfile(id: id)
+        if let profile, let credentialVault {
+            try? await credentialVault.removeCredential(for: profile.credentialID)
+        }
+        if wasSelected {
+            await connect()
+        }
+    }
+
+    func selectProfile(id: UUID?) async {
+        selectedProfileID = id
+        profileStore.saveSelection(id)
+        await connect()
+    }
+
+    private func persistProfiles() {
+        profileStore.saveProfiles(profiles)
+        profileStore.saveSelection(selectedProfileID)
+    }
+
+    private func refreshAuthoritativeState() async throws {
+        guard let client else { return }
+        let capabilities = try await client.capabilities()
+        async let health = client.health()
+        async let manifest = client.serviceManifest()
+		async let apps = client.apps()
+        async let operations = client.operations(activeOnly: false, limit: 100)
+        async let releases = client.releases()
+
+        async let fleetInventoryResult: NornFleetInventory = capabilities.supportsFleet ? client.fleetInventory() : .unconfigured
+        async let fleetPlansResult: [NornOperation] = capabilities.supportsFleet ? client.fleetPlans() : []
+        async let fleetGitHubResult: NornFleetGitHubStatus = capabilities.supportsFleetGitHub ? client.fleetGitHubStatus() : .unconfigured
+        let result = try await (health, manifest, operations, releases, apps, fleetInventoryResult, fleetPlansResult, fleetGitHubResult)
+        snapshot = NornDashboardSnapshot(
+            capabilities: capabilities,
+            health: result.0,
+            services: result.1.services,
+            operations: result.2,
+            releases: result.3.releases,
+            observedAt: .now
+			, apps: result.4
+        )
+        fleetInventory = result.5
+        fleetPlans = result.6
+        fleetGitHubStatus = result.7
+    }
+
+    private func listenForEvents(profile: NornServerProfile) {
+        guard let client else { return }
+        eventTask = Task { [weak self] in
+            var retry = 0
+            while !Task.isCancelled {
+                guard let self, self.selectedProfileID == profile.id else { return }
+                let cursor = self.profileStore.loadCursor(profileID: profile.id)
+                do {
+                    for try await event in client.events(after: cursor) {
+                        guard !Task.isCancelled else { return }
+                        await self.receive(event, profileID: profile.id)
+                    }
+                    guard !Task.isCancelled else { return }
+                    self.connectionState = .reconnecting
+                    self.stopHostMetricsPolling()
+                    self.stopFleetPolling()
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.connectionState = .reconnecting
+                    self.lastError = error.localizedDescription
+                    self.stopHostMetricsPolling()
+                    self.stopFleetPolling()
+                }
+
+                retry += 1
+                let delaySeconds = min(pow(2.0, Double(retry - 1)), 30)
+                do {
+                    try await Task.sleep(for: .seconds(delaySeconds))
+                    try await self.refreshAuthoritativeState()
+                    self.connectionState = .online
+                    self.lastError = nil
+                    self.startHostMetricsPollingIfNeeded()
+                    self.startFleetPollingIfNeeded()
+                    retry = 0
+                } catch is CancellationError {
+                    return
+                } catch {
+                    self.connectionState = .offline(error.localizedDescription)
+                    self.lastError = error.localizedDescription
+                    self.stopHostMetricsPolling()
+                    self.stopFleetPolling()
+                }
+            }
+        }
+    }
+
+    private func receive(_ event: NornControlEvent, profileID: UUID) async {
+        profileStore.saveCursor(event.id, profileID: profileID)
+        if let object = event.payload.objectValue,
+           let operationID = object["operationId"]?.stringValue,
+           let client,
+           let updated = try? await client.operation(id: operationID) {
+            upsert(updated)
+        }
+    }
+
+    private func upsert(_ operation: NornOperation) {
+        snapshot.operations.removeAll { $0.id == operation.id }
+        snapshot.operations.insert(operation, at: 0)
+        snapshot.observedAt = .now
+    }
+
+    private func startHostMetricsPollingIfNeeded() {
+        guard isHostMetricsVisible,
+              connectionState == .online,
+              client != nil,
+              hostMetricsSupported,
+              hostMetricsTask == nil else { return }
+
+        hostMetricsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard self != nil else { return }
+                await self?.refreshHostMetrics()
+
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopHostMetricsPolling() {
+        hostMetricsTask?.cancel()
+        hostMetricsTask = nil
+    }
+
+    private func startFleetPollingIfNeeded() {
+        guard isFleetVisible,
+              connectionState == .online,
+              client != nil,
+              fleetSupported,
+              fleetTask == nil else { return }
+
+        fleetTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard self != nil else { return }
+                await self?.refreshFleet()
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch {
+                    return
+                }
+            }
+        }
+    }
+
+    private func stopFleetPolling() {
+        fleetTask?.cancel()
+        fleetTask = nil
+    }
+}
+
+private extension JSONValue {
+    var objectValue: [String: JSONValue]? {
+        guard case let .object(value) = self else { return nil }
+        return value
+    }
+
+    var stringValue: String? {
+        guard case let .string(value) = self else { return nil }
+        return value
+    }
+}
