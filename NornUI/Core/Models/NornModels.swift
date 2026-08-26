@@ -100,6 +100,13 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         endpoints["fleetGitHubPullRequest"] != nil &&
         endpoints["fleetGitHubDispatch"] != nil
     }
+
+    /// Deployment history and step checkpoints currently remain on the
+    /// authenticated compatibility surface. The regional-deployments feature
+    /// is the server's only advertised gate for that representation.
+    var supportsDeploymentVisibility: Bool {
+        features.contains("regional-deployments")
+    }
 }
 
 nonisolated struct NornFleetNodePool: Codable, Hashable, Sendable {
@@ -216,6 +223,171 @@ nonisolated struct NornFleetReconciliationList: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion, reconciliations, count
         case planID = "planId"
+    }
+}
+
+nonisolated enum NornDeploymentStatus: String, Codable, Hashable, Sendable {
+    case queued
+    case building
+    case testing
+    case migrating
+    case submitting
+    case healthy
+    case deployed
+    case failed
+
+    var isActive: Bool {
+        switch self {
+        case .queued, .building, .testing, .migrating, .submitting: true
+        case .healthy, .deployed, .failed: false
+        }
+    }
+}
+
+nonisolated struct NornDeployment: Identifiable, Codable, Hashable, Sendable {
+    nonisolated struct Region: Codable, Hashable, Sendable {
+        var deploymentID: String?
+        var region: String
+        var nomadRegion: String
+        var status: NornDeploymentStatus
+        var desiredWeight: Int
+        var activeWeight: Int
+        var evalID: String?
+        var lastError: String?
+        var updatedAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case deploymentID = "deploymentId"
+            case region, nomadRegion, status, desiredWeight, activeWeight, lastError, updatedAt
+            case evalID = "evalId"
+        }
+    }
+
+    var id: String
+    var app: String
+    var commitSHA: String
+    var imageTag: String
+    var sagaID: String
+    var status: NornDeploymentStatus
+    var sourceKind: String?
+    var sourceRef: String?
+    var sourceDirty: Bool?
+    var sourceChanges: [String]?
+    var startedAt: Date
+    var finishedAt: Date?
+    var regions: [Region]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, app, imageTag, status, sourceKind, sourceRef, sourceDirty, sourceChanges, startedAt, finishedAt, regions
+        case commitSHA = "commitSha"
+        case sagaID = "sagaId"
+    }
+}
+
+nonisolated enum NornDeploymentStepStatus: String, Codable, Hashable, Sendable {
+    case running
+    case complete
+    case failed
+}
+
+nonisolated enum NornDeploymentStepKind: String, Codable, Hashable, Sendable {
+    case readonly
+    case mutable
+}
+
+nonisolated struct NornDeploymentStep: Identifiable, Codable, Hashable, Sendable {
+    var deploymentID: String
+    var app: String
+    var sagaID: String
+    var step: String
+    var status: NornDeploymentStepStatus
+    var kind: NornDeploymentStepKind?
+    var attempt: Int?
+    var startedAt: Date
+    var finishedAt: Date?
+    var durationMs: Int64?
+    var message: String?
+    var metadata: [String: JSONValue]?
+
+    var id: String { "\(deploymentID):\(step)" }
+
+    enum CodingKeys: String, CodingKey {
+        case app, step, status, kind, attempt, startedAt, finishedAt, durationMs, message, metadata
+        case deploymentID = "deploymentId"
+        case sagaID = "sagaId"
+    }
+}
+
+nonisolated struct NornDeploymentStepList: Codable, Hashable, Sendable {
+    var steps: [NornDeploymentStep]
+    var count: Int
+}
+
+nonisolated enum NornExecutionCheckpointState: String, Hashable, Sendable {
+    case completed
+    case pending
+    case active
+    case failed
+    case blocked
+}
+
+nonisolated struct NornFleetCheckpoint: Identifiable, Hashable, Sendable {
+    var phase: String
+    var state: NornExecutionCheckpointState
+    var operation: NornOperation?
+
+    var id: String { phase }
+}
+
+/// A contract-only projection of append-only runner evidence. It never assumes
+/// that a protected workflow is running merely because it was dispatched.
+nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
+    static let orderedPhases = [
+        "infrastructure_applied", "inventory_generated", "nodes_configured",
+        "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
+    ]
+
+    var checkpoints: [NornFleetCheckpoint]
+    var state: NornExecutionCheckpointState
+
+    init(plan: NornOperation, reconciliations: [NornOperation]) {
+        let payload = plan.payload ?? [:]
+        let action = payload["action"]?.stringValue
+        let currentDesired = payload["current"]?.objectValue?["desired"]?.intValue
+        let proposedDesired = payload["proposed"]?.objectValue?["desired"]?.intValue
+        let requiresDrain = action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0))
+        let phases = Self.orderedPhases.filter { requiresDrain || $0 != "old_nodes_drained" }
+        let newestByPhase = Dictionary(grouping: reconciliations) { $0.payload?["phase"]?.stringValue ?? "" }
+            .mapValues { $0.max(by: { $0.updatedAt < $1.updatedAt })! }
+
+        var failureSeen = false
+        checkpoints = phases.map { phase in
+            let operation = newestByPhase[phase]
+            let checkpointState: NornExecutionCheckpointState
+            if failureSeen {
+                checkpointState = .blocked
+            } else {
+                switch operation?.status {
+                case .succeeded: checkpointState = .completed
+                case .failed, .canceled:
+                    checkpointState = .failed
+                    failureSeen = true
+                case .queued, .running: checkpointState = .active
+                case nil: checkpointState = .pending
+                }
+            }
+            return NornFleetCheckpoint(phase: phase, state: checkpointState, operation: operation)
+        }
+
+        if checkpoints.last?.state == .completed {
+            state = .completed
+        } else if checkpoints.contains(where: { $0.state == .failed }) {
+            state = .blocked
+        } else if checkpoints.contains(where: { $0.state == .active }) {
+            state = .active
+        } else {
+            state = .pending
+        }
     }
 }
 
@@ -474,6 +646,21 @@ nonisolated enum JSONValue: Codable, Hashable, Sendable {
         case let .array(value): try container.encode(value)
         case .null: try container.encodeNil()
         }
+    }
+
+    var stringValue: String? {
+        guard case let .string(value) = self else { return nil }
+        return value
+    }
+
+    var objectValue: [String: JSONValue]? {
+        guard case let .object(value) = self else { return nil }
+        return value
+    }
+
+    var intValue: Int? {
+        guard case let .number(value) = self else { return nil }
+        return Int(value)
     }
 }
 

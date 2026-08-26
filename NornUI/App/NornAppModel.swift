@@ -17,6 +17,8 @@ final class NornAppModel {
     var fleetPlans: [NornOperation]
     var fleetReconciliations: [String: [NornOperation]] = [:]
     var fleetGitHubStatus: NornFleetGitHubStatus
+    var deployments: [NornDeployment]
+    var deploymentSteps: [String: [NornDeploymentStep]]
     var isFleetRefreshing = false
     var selectedOperationID: String?
     var isRefreshing = false
@@ -53,6 +55,8 @@ final class NornAppModel {
         self.fleetInventory = (fixture != nil || storedProfiles.isEmpty) ? NornFixtures.fleetInventory : .unconfigured
         self.fleetPlans = []
         self.fleetGitHubStatus = (fixture != nil || storedProfiles.isEmpty) ? .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet") : .unconfigured
+        self.deployments = (fixture != nil || storedProfiles.isEmpty) ? NornFixtures.deployments : []
+        self.deploymentSteps = (fixture != nil || storedProfiles.isEmpty) ? NornFixtures.deploymentSteps : [:]
         self.isFixtureMode = storedProfiles.isEmpty || clientFactory == nil
 
         if selectedProfileID == nil {
@@ -137,6 +141,7 @@ final class NornAppModel {
     var fleetSupported: Bool { snapshot.capabilities.supportsFleet }
     var fleetReconciliationSupported: Bool { snapshot.capabilities.supportsFleetReconciliation }
     var fleetGitHubSupported: Bool { snapshot.capabilities.supportsFleetGitHub }
+    var deploymentVisibilitySupported: Bool { snapshot.capabilities.supportsDeploymentVisibility }
 
 	@discardableResult
 	func createApp(_ request: NornCreateAppRequest) async -> NornAppMutationReceipt? {
@@ -278,6 +283,7 @@ final class NornAppModel {
                     fleetReconciliations[plan.id] = result.reconciliations
                 }
             }
+            await refreshDeploymentVisibility(using: client)
             lastError = nil
         } catch is CancellationError {
             return
@@ -450,12 +456,36 @@ final class NornAppModel {
             services: result.1.services,
             operations: result.2,
             releases: result.3.releases,
-            observedAt: .now
-			, apps: result.4
+            observedAt: .now,
+            apps: result.4
         )
         fleetInventory = result.5
         fleetPlans = result.6
         fleetGitHubStatus = result.7
+        await refreshDeploymentVisibility(using: client)
+    }
+
+    /// Deployment checkpoints are an optional compatibility lane. A failure
+    /// must not discard the last known execution picture or take v1 offline.
+    private func refreshDeploymentVisibility(using client: any NornClientProtocol) async {
+        guard snapshot.capabilities.supportsDeploymentVisibility else {
+            deployments = []
+            deploymentSteps = [:]
+            return
+        }
+        do {
+            let current = try await client.deployments()
+            var steps: [String: [NornDeploymentStep]] = [:]
+            for deployment in current.prefix(12) {
+                steps[deployment.id] = (try? await client.deploymentSteps(deploymentID: deployment.id)) ?? []
+            }
+            deployments = current
+            deploymentSteps = steps
+        } catch is CancellationError {
+            return
+        } catch {
+            // Preserve cached compatibility data. The main v1 refresh remains authoritative.
+        }
     }
 
     private func listenForEvents(profile: NornServerProfile) {
@@ -572,17 +602,5 @@ final class NornAppModel {
     private func stopFleetPolling() {
         fleetTask?.cancel()
         fleetTask = nil
-    }
-}
-
-private extension JSONValue {
-    var objectValue: [String: JSONValue]? {
-        guard case let .object(value) = self else { return nil }
-        return value
-    }
-
-    var stringValue: String? {
-        guard case let .string(value) = self else { return nil }
-        return value
     }
 }

@@ -19,6 +19,10 @@ The current working milestone includes:
   idempotency keys and visible receipts.
 - Fleet inventory, node-pool capacity planning, reconciliation checkpoints,
   GitHub review creation, and protected apply dispatch.
+- A responsive provisioning view with explicit fleet checkpoint states,
+  current platform/deployment execution, and an observed ingress-to-allocation
+  topology assembled from Norn's fleet, deployment, health, and service
+  manifest responses.
 - Safe app creation with deployment disabled by default, followed by an
   explicit deployment-enable action.
 - Durable app snapshots, retention pruning, exact-snapshot restore, standalone
@@ -46,6 +50,27 @@ For observation, provision `api:read,events:read`. Add `api:write` for Macs that
 may create apps, manage app recovery, or prepare and hand off fleet changes.
 Add `platform:operate` or `host:operate` only for Macs that should be allowed to
 queue those workflows.
+
+## Provisioning contract boundaries
+
+- Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.
+  The Mac only offers the next GitHub handoff that the server supports: recover
+  the deterministic review, then dispatch the reviewed apply. Runner phases are
+  evidence-only because Norn exposes no native operator transition to advance
+  or retry them.
+- A successful GitHub dispatch is handoff proof only. It does not mark the
+  first missing reconciliation phase active. The current contract has no
+  durable runner-attempt, heartbeat, or current-phase record, so missing phases
+  remain pending unless an actual queued/running operation is returned.
+- Deployment history and stage checkpoints currently come from authenticated
+  compatibility routes (`/api/deployments` and
+  `/api/deployments/{id}/steps`). They are fetched only when the server
+  advertises `regional-deployments`; failures preserve cached visibility and do
+  not take the versioned control connection offline.
+- The current service-manifest instance model has no region or node-pool field.
+  The topology therefore shows observed ingress, desired regions/pools,
+  observed allocations, and supporting platform services without claiming an
+  allocation-to-pool edge the API cannot prove.
 
 ## Verification
 

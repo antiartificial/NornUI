@@ -5,8 +5,13 @@ struct FleetFeatureView: View {
     let plans: [NornOperation]
     let reconciliations: [String: [NornOperation]]
     let githubStatus: NornFleetGitHubStatus
+    let snapshot: NornDashboardSnapshot
+    let deployments: [NornDeployment]
+    let deploymentSteps: [String: [NornDeploymentStep]]
+    let deploymentVisibilitySupported: Bool
     let isSupported: Bool
     let canPlan: Bool
+    let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     let onPlan: (String, Int, String, String) async -> Bool
@@ -15,6 +20,7 @@ struct FleetFeatureView: View {
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var pools: [PoolSelection] {
         inventory.nodePools
@@ -39,8 +45,22 @@ struct FleetFeatureView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
+                        if isStale { staleBanner }
                         fleetHeader
                         findings
+                        InfrastructureTopologyView(
+                            inventory: inventory,
+                            services: snapshot.services,
+                            deployments: deployments,
+                            health: snapshot.health
+                        )
+                        ProvisioningExecutionView(
+                            snapshot: snapshot,
+                            deployments: deployments,
+                            steps: deploymentSteps,
+                            isSupported: deploymentVisibilitySupported,
+                            isStale: isStale
+                        )
                         poolGrid
                         planHistory
                     }
@@ -65,6 +85,19 @@ struct FleetFeatureView: View {
                 return succeeded
             }
         }
+    }
+
+    private var staleBanner: some View {
+        Label(
+            "Showing the last observation from \(snapshot.observedAt.formatted(date: .abbreviated, time: .standard)). Mutating actions are unavailable until Norn reconnects.",
+            systemImage: "wifi.slash"
+        )
+        .font(.callout)
+        .foregroundStyle(.orange)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityLabel("Offline. Showing cached fleet data observed \(snapshot.observedAt.formatted(date: .abbreviated, time: .standard)). Actions unavailable.")
     }
 
     private var fleetHeader: some View {
@@ -96,7 +129,12 @@ struct FleetFeatureView: View {
             }
         }
         .padding(18)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(reduceTransparency
+                      ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
+                      : AnyShapeStyle(.regularMaterial))
+        }
     }
 
     @ViewBuilder
@@ -163,8 +201,9 @@ struct FleetFeatureView: View {
                         FleetPlanJourney(
                             plan: plan,
                             checkpoints: reconciliations[plan.id] ?? [],
+                            operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
-                            canUseGitHub: githubStatus.connected,
+                            canUseGitHub: canPlan && githubStatus.connected,
                             onOpenReview: onOpenReview,
                             onDispatchApply: onDispatchApply,
 							onOpenOperation: onOpenOperation
@@ -327,6 +366,7 @@ private struct FleetCapacitySheet: View {
 private struct FleetPlanJourney: View {
     let plan: NornOperation
     let checkpoints: [NornOperation]
+    let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
     let onOpenReview: (String) async -> URL?
@@ -339,69 +379,76 @@ private struct FleetPlanJourney: View {
     @State private var applyURL: URL?
     @State private var confirmingDestructiveApply = false
 
-    private let phases = [
-        "infrastructure_applied", "inventory_generated", "nodes_configured",
-        "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
-    ]
-
     private var payload: [String: JSONValue] { plan.payload ?? [:] }
     private var pool: String { payload["pool"]?.stringValue ?? "pool" }
     private var action: String { payload["action"]?.stringValue ?? "reconcile" }
     private var currentDesired: Int? { payload["current"]?.objectValue?["desired"]?.intValue }
     private var proposedDesired: Int? { payload["proposed"]?.objectValue?["desired"]?.intValue }
     private var workflowURL: URL? { URL(string: payload["workflowUrl"]?.stringValue ?? fallbackWorkflowURL ?? "") }
-    private var completedPhases: Set<String> {
-        Set(checkpoints.compactMap { checkpoint in
-            guard checkpoint.status == .succeeded else { return nil }
-            return checkpoint.payload?["phase"]?.stringValue
-        })
-    }
-    private var isComplete: Bool { completedPhases.contains("complete") }
+    private var progress: NornFleetPlanProgress { .init(plan: plan, reconciliations: checkpoints) }
+    private var isComplete: Bool { progress.state == .completed }
     private var isDestructive: Bool { action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0)) }
+    private var linkedOperations: [NornOperation] {
+        operations.filter { $0.payload?["planId"]?.stringValue == plan.id }
+    }
+    private var reviewOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.pull-request" } }
+    private var applyOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.apply-dispatch" } }
+    private var recordedReviewURL: URL? { URL(string: reviewOperation?.payload?["url"]?.stringValue ?? "") }
+    private var recordedApplyURL: URL? { URL(string: applyOperation?.payload?["url"]?.stringValue ?? "") }
+    private var mayCreateReview: Bool {
+        canUseGitHub && reviewOperation == nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
+    }
+    private var mayDispatchApply: Bool {
+        canUseGitHub && reviewOperation != nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
+    }
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 12) {
-                if checkpoints.isEmpty {
-                    Label("Awaiting the protected runner", systemImage: "clock")
-                        .foregroundStyle(.secondary)
-                    Text("You can close Norn now. This plan ID is the resume key for the repository workflow.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    ForEach(phases, id: \.self) { phase in
-                        let succeeded = completedPhases.contains(phase)
-                        HStack(spacing: 10) {
-                            Image(systemName: succeeded ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(succeeded ? Color.green : Color.secondary.opacity(0.45))
-                                .accessibilityHidden(true)
-                            Text(phase.replacingOccurrences(of: "_", with: " ").capitalized)
-                            Spacer()
-                            if succeeded { Text("Proven").font(.caption).foregroundStyle(.secondary) }
+                ForEach(progress.checkpoints) { checkpoint in
+                    HStack(spacing: 10) {
+                        ExecutionStateIcon(state: checkpoint.state)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(checkpoint.phase.replacingOccurrences(of: "_", with: " ").capitalized)
+                            if let message = checkpoint.operation?.lastError ?? checkpoint.operation?.message,
+                               !message.isEmpty {
+                                Text(message).font(.caption).foregroundStyle(checkpoint.state == .failed ? .red : .secondary)
+                            }
                         }
-                        .accessibilityLabel("\(phase.replacingOccurrences(of: "_", with: " ")), \(succeeded ? "proven" : "pending")")
+                        Spacer()
+                        ExecutionStateBadge(state: checkpoint.state)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(checkpoint.phase.replacingOccurrences(of: "_", with: " ")), \(checkpoint.state.title)")
                 }
                 Divider()
                 HStack {
                     Text(plan.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
                     Spacer()
 					Button("View Receipt", systemImage: "doc.text.magnifyingglass") { onOpenOperation(plan) }
-                    if canUseGitHub {
-                        Button("Open Review", systemImage: "arrow.triangle.branch") { runOpenReview() }
+					if mayCreateReview {
+                        Button("Create or Recover Review", systemImage: "arrow.triangle.branch") { runOpenReview() }
+                            .buttonStyle(.borderedProminent)
                             .disabled(isWorking)
-                        Button("Apply After Review", systemImage: "play.circle.fill") {
+                    } else if mayDispatchApply {
+                        Button("Dispatch Reviewed Apply", systemImage: "play.circle.fill") {
                             if isDestructive { confirmingDestructiveApply = true } else { runApply() }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(isWorking)
                     } else if let workflowURL {
-                        Link(destination: workflowURL) { Label("Continue in Protected Runner", systemImage: "arrow.up.right.square") }
+                        Link(destination: workflowURL) { Label("View Protected Runner", systemImage: "arrow.up.right.square") }
                     }
                 }
-                if let reviewURL { Link("View Pull Request", destination: reviewURL) }
-                if let applyURL { Link("View Apply Run", destination: applyURL) }
-                Text("Repeating either action safely recovers the existing GitHub review or plan-named workflow run.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let url = reviewURL ?? recordedReviewURL { Link("View Pull Request", destination: url) }
+                if let url = applyURL ?? recordedApplyURL { Link("View Apply Run", destination: url) }
+                if applyOperation != nil && !isComplete {
+                    Text("Dispatch is durable handoff proof, not proof that the runner is active. The next phase remains pending until Norn receives phase evidence.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if progress.state == .blocked {
+                    Text("A failed checkpoint blocks later phases. The current API exposes evidence but no native retry transition.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
             .padding(.top, 10)
         } label: {
@@ -418,17 +465,19 @@ private struct FleetPlanJourney: View {
                     }
                 }
                 Spacer()
-                Text(isComplete ? "Complete" : checkpoints.isEmpty ? "Planned" : "In progress")
-                    .font(.caption.weight(.semibold))
+                ExecutionStateBadge(state: progress.state)
             }
         }
         .padding(14)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contextMenu {
-            Button("Open Fleet Review", systemImage: "arrow.triangle.branch") { runOpenReview() }.disabled(!canUseGitHub || isWorking)
-            Button("Apply Reviewed Change", systemImage: "play.circle.fill") {
+            Button("View Receipt", systemImage: "doc.text.magnifyingglass") { onOpenOperation(plan) }
+            Button("Copy Plan ID") { copyPlanID() }
+            Divider()
+            Button("Create or Recover Review", systemImage: "arrow.triangle.branch") { runOpenReview() }.disabled(!mayCreateReview || isWorking)
+            Button("Dispatch Reviewed Apply", systemImage: "play.circle.fill") {
                 if isDestructive { confirmingDestructiveApply = true } else { runApply() }
-            }.disabled(!canUseGitHub || isWorking)
+            }.disabled(!mayDispatchApply || isWorking)
         }
         .confirmationDialog(
             "Apply reviewed destructive fleet change?",
@@ -459,18 +508,17 @@ private struct FleetPlanJourney: View {
             isWorking = false
         }
     }
+
+    private func copyPlanID() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(plan.id, forType: .string)
+    }
 }
 
 private struct PoolSelection: Identifiable {
     let name: String
     let pool: NornFleetNodePool
     var id: String { name }
-}
-
-private extension JSONValue {
-    var stringValue: String? { if case let .string(value) = self { value } else { nil } }
-    var objectValue: [String: JSONValue]? { if case let .object(value) = self { value } else { nil } }
-    var intValue: Int? { if case let .number(value) = self { Int(value) } else { nil } }
 }
 
 #Preview {
@@ -480,8 +528,13 @@ private extension JSONValue {
             plans: [],
             reconciliations: [:],
             githubStatus: .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet"),
+            snapshot: NornFixtures.snapshot,
+            deployments: NornFixtures.deployments,
+            deploymentSteps: NornFixtures.deploymentSteps,
+            deploymentVisibilitySupported: true,
             isSupported: true,
             canPlan: true,
+            isStale: false,
             isRefreshing: false,
             onRefresh: {},
             onPlan: { _, _, _, _ in true },

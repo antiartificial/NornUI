@@ -141,6 +141,17 @@ actor NornClient: NornClientProtocol {
 		return try await perform(path: "api/v1/fleet/plans/\(value.pathComponentEncoded)/github/dispatch", method: "POST", body: Self.encoder.encode(Body(allowDestructive: allowDestructive)))
 	}
 
+	func deployments() async throws -> [NornDeployment] {
+		try await get("api/deployments")
+	}
+
+	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] {
+		let value = deploymentID.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		let result: NornDeploymentStepList = try await get("api/deployments/\(value.pathComponentEncoded)/steps")
+		return result.steps
+	}
+
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt {
 		try await perform(path: "api/v1/apps", method: "POST", body: Self.encoder.encode(request))
 	}

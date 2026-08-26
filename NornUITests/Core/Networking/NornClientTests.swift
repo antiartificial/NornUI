@@ -205,7 +205,7 @@ final class NornClientTests: XCTestCase {
 			return Self.response(request, status: 202, body: """
 			{"id":"migration-1","kind":"app.migrate","app":"orders-api","status":"queued","startedAt":"2026-08-25T14:00:00Z","updatedAt":"2026-08-25T14:00:00Z"}
 			""")
-		}
+	}
 
 		let client = try await makeClient()
 		let snapshots = try await client.appSnapshots(app: "orders-api")
@@ -228,7 +228,34 @@ final class NornClientTests: XCTestCase {
 		)
 		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/snapshots/orders_pre-migrate_20260825T140000.dump/restore")
 		XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "restore-retry-1")
-	}
+		}
+
+    func testDeploymentVisibilityDecodesCompatibilityHistoryAndStageCheckpoints() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            if request.url?.path.hasSuffix("/steps") == true {
+                return Self.response(request, status: 200, body: """
+                {"steps":[{"deploymentId":"deploy-1","app":"orders-api","sagaId":"saga-1","step":"submit","status":"running","kind":"mutable","attempt":1,"startedAt":"2026-08-25T14:00:02Z"}],"count":1}
+                """)
+            }
+            return Self.response(request, status: 200, body: """
+            [{"id":"deploy-1","app":"orders-api","commitSha":"0123456789012345678901234567890123456789","imageTag":"orders:0123456","sagaId":"saga-1","status":"submitting","startedAt":"2026-08-25T14:00:00Z","regions":[{"region":"nyc3","nomadRegion":"global","status":"submitting","desiredWeight":100,"activeWeight":0,"updatedAt":"2026-08-25T14:00:02Z"}]}]
+            """)
+        }
+
+        let client = try await makeClient()
+        let deployments = try await client.deployments()
+        XCTAssertEqual(deployments.first?.status, .submitting)
+        XCTAssertEqual(deployments.first?.regions?.first?.region, "nyc3")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/deployments")
+
+        let steps = try await client.deploymentSteps(deploymentID: "deploy-1")
+        XCTAssertEqual(steps.first?.step, "submit")
+        XCTAssertEqual(steps.first?.kind, .mutable)
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/deployments/deploy-1/steps")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+    }
 
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {
         let recorder = RequestRecorder()

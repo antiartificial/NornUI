@@ -141,8 +141,13 @@ struct ContentView: View {
                 plans: appModel.fleetPlans,
                 reconciliations: appModel.fleetReconciliations,
                 githubStatus: appModel.fleetGitHubStatus,
+                snapshot: appModel.snapshot,
+                deployments: appModel.deployments,
+                deploymentSteps: appModel.deploymentSteps,
+                deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canPerformOperations,
+                isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
                 onPlan: { pool, desired, size, reason in
@@ -171,7 +176,13 @@ struct ContentView: View {
     }
 
     private func refreshFleet() {
-        Task { await appModel.refreshFleet() }
+        Task {
+            if appModel.connectionState == .online {
+                await appModel.refreshFleet()
+            } else {
+                await appModel.refresh()
+            }
+        }
     }
 
     private func queue(_ request: NornMaintenanceRequest) {

@@ -125,6 +125,47 @@ enum NornFixtures {
         ]
     )
 
+    static let deployments: [NornDeployment] = [
+        NornDeployment(
+            id: "deploy-mail-mcp-20260825",
+            app: "mail-mcp",
+            commitSHA: "b3a3958019be2655b3a3958019be2655b3a39580",
+            imageTag: "mail-mcp:b3a3958",
+            sagaID: "saga-mail-mcp-20260825",
+            status: .healthy,
+            sourceKind: "git",
+            sourceRef: "main",
+            sourceDirty: false,
+            sourceChanges: nil,
+            startedAt: now.addingTimeInterval(-3_260),
+            finishedAt: now.addingTimeInterval(-3_200),
+            regions: [
+                .init(
+                    deploymentID: "deploy-mail-mcp-20260825",
+                    region: "nyc3",
+                    nomadRegion: "global",
+                    status: .healthy,
+                    desiredWeight: 100,
+                    activeWeight: 100,
+                    evalID: "eval-mail-mcp",
+                    lastError: nil,
+                    updatedAt: now.addingTimeInterval(-3_200)
+                )
+            ]
+        )
+    ]
+
+    static let deploymentSteps: [String: [NornDeploymentStep]] = [
+        "deploy-mail-mcp-20260825": [
+            deploymentStep("clone", kind: .readonly, offset: -3_260, durationMs: 1_400),
+            deploymentStep("admission", kind: .readonly, offset: -3_258, durationMs: 320),
+            deploymentStep("build", kind: .readonly, offset: -3_257, durationMs: 18_200),
+            deploymentStep("test", kind: .readonly, offset: -3_238, durationMs: 7_900),
+            deploymentStep("submit", kind: .mutable, offset: -3_229, durationMs: 2_100),
+            deploymentStep("healthy", kind: .mutable, offset: -3_226, durationMs: 24_000)
+        ]
+    ]
+
     private static func service(
         _ app: String,
         process: String,
@@ -144,8 +185,33 @@ enum NornFixtures {
                 exposure: exposure,
                 routable: status == "passing"
             ),
-            endpoints: [],
-            instances: []
+            endpoints: exposure == "public" ? [.init(url: "https://\(app).example.test", region: "nyc3")] : [],
+            instances: [
+                .init(id: "\(app)-\(process)-alloc", node: "node-app-1", address: "10.0.1.12", port: 8080, status: status)
+            ]
+        )
+    }
+
+    private static func deploymentStep(
+        _ name: String,
+        kind: NornDeploymentStepKind,
+        offset: TimeInterval,
+        durationMs: Int64
+    ) -> NornDeploymentStep {
+        let startedAt = now.addingTimeInterval(offset)
+        return NornDeploymentStep(
+            deploymentID: "deploy-mail-mcp-20260825",
+            app: "mail-mcp",
+            sagaID: "saga-mail-mcp-20260825",
+            step: name,
+            status: .complete,
+            kind: kind,
+            attempt: 1,
+            startedAt: startedAt,
+            finishedAt: startedAt.addingTimeInterval(Double(durationMs) / 1_000),
+            durationMs: durationMs,
+            message: nil,
+            metadata: nil
         )
     }
 

@@ -16,6 +16,8 @@ protocol NornClientProtocol: Sendable {
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus
 	func createFleetPullRequest(planID: String) async throws -> NornOperation
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation
+	func deployments() async throws -> [NornDeployment]
+	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep]
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot]
@@ -35,6 +37,8 @@ extension NornClientProtocol {
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus { .unconfigured }
 	func createFleetPullRequest(planID: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation { throw NornClientError.invalidResponse }
+	func deployments() async throws -> [NornDeployment] { [] }
+	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] { [] }
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
