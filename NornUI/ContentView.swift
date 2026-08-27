@@ -43,9 +43,17 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $appModel.isShowingProfileEditor) {
-            ServerProfileEditor { profile, token in
-                try await appModel.saveProfile(profile, token: token)
-            }
+            ServerProfileEditor(
+                onManualSave: { profile, token in
+                    try await appModel.saveProfile(profile, token: token)
+                },
+                onStartEnrollment: { profile, scopes in
+                    try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
+                },
+                onCompleteEnrollment: { profile, enrollment in
+                    try await appModel.completeDeviceEnrollment(profile: profile, enrollment: enrollment)
+                }
+            )
         }
 		.sheet(isPresented: $appModel.isShowingCreateApp) {
 			CreateAppSheet { request in await appModel.createApp(request) != nil }
@@ -91,13 +99,14 @@ struct ContentView: View {
         switch appModel.navigation {
         case .overview:
             OverviewView(
-                snapshot: appModel.snapshot,
+                snapshot: appModel.selectedProfile == nil && !appModel.isFixtureMode ? nil : appModel.snapshot,
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
                 onShowServices: { appModel.navigation = .apps },
                 onShowOperations: { appModel.navigation = .operations },
-                onShowReleases: { appModel.navigation = .platform }
+                onShowReleases: { appModel.navigation = .platform },
+                onShowHost: { appModel.navigation = .host }
             )
         case .apps:
 			AppsView(
@@ -140,6 +149,7 @@ struct ContentView: View {
                 inventory: appModel.fleetInventory,
                 plans: appModel.fleetPlans,
                 reconciliations: appModel.fleetReconciliations,
+                runnerAttempts: appModel.fleetRunnerAttempts,
                 githubStatus: appModel.fleetGitHubStatus,
                 snapshot: appModel.snapshot,
                 deployments: appModel.deployments,
@@ -147,6 +157,7 @@ struct ContentView: View {
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canPerformOperations,
+                canOperateFleet: appModel.canOperateFleet,
                 isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
@@ -160,6 +171,7 @@ struct ContentView: View {
                 },
                 onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
                 onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
+				onAdvanceRunner: { await appModel.advanceFleetRunnerAttempt(planID: $0, attempt: $1) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }

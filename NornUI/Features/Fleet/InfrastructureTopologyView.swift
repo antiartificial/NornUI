@@ -47,6 +47,10 @@ struct InfrastructureTopologyView: View {
                 let identity = instance.id ?? instance.node ?? "instance-\(index)"
                 var details = [instance.node, instance.address].compactMap { $0 }
                 if let port = instance.port { details.append(String(port)) }
+                if let region = instance.region { details.append("region \(region)") }
+                if let nodePool = instance.nodePool { details.append("pool \(nodePool)") }
+                if let allocationID = instance.allocationID { details.append("alloc \(allocationID.prefix(8))") }
+                details.append(instance.placementVerified ? "placement verified" : "placement unverified")
                 items.append(TopologyItem(
                     id: service.id + ":" + identity,
                     title: service.name,
@@ -82,7 +86,7 @@ struct InfrastructureTopologyView: View {
                     stage("Ingress", symbol: "network", items: ingress)
                     connector("can route to", vertical: false)
                     stage("Regions & Pools", symbol: "server.rack", items: placements)
-                    connector("placement intent", vertical: false)
+                    connector("verified placement", vertical: false)
                     stage("Allocations", symbol: "shippingbox", items: allocations)
                     connector("can depend on", vertical: false)
                     stage("Platform", symbol: "gearshape.2", items: dependencies)
@@ -91,7 +95,7 @@ struct InfrastructureTopologyView: View {
                     stage("Ingress", symbol: "network", items: ingress)
                     connector("can route to", vertical: true)
                     stage("Regions & Pools", symbol: "server.rack", items: placements)
-                    connector("placement intent", vertical: true)
+                    connector("verified placement", vertical: true)
                     stage("Allocations", symbol: "shippingbox", items: allocations)
                     connector("can depend on", vertical: true)
                     stage("Platform", symbol: "gearshape.2", items: dependencies)
@@ -100,7 +104,7 @@ struct InfrastructureTopologyView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Label(
-                "The current API does not bind service-manifest allocations to a node pool or report provider resources, so those edges remain intentionally unclaimed.",
+                placementEvidenceSummary,
                 systemImage: "info.circle"
             )
             .font(.caption)
@@ -108,6 +112,16 @@ struct InfrastructureTopologyView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Platform infrastructure topology")
+    }
+
+    private var placementEvidenceSummary: String {
+        let instances = services.flatMap { $0.instances ?? [] }
+        let verified = instances.filter(\.placementVerified).count
+        let unverified = instances.count - verified
+        if unverified == 0 {
+            return "\(verified) allocation placement records bind region and node pool. Provider VM identity remains outside the service manifest."
+        }
+        return "\(verified) allocation placements are verified; \(unverified) remain unclaimed because region, node pool, or allocation provenance is missing."
     }
 
     private func stage(_ title: String, symbol: String, items: [TopologyItem]) -> some View {

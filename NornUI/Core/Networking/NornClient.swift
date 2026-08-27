@@ -66,8 +66,12 @@ actor NornClient: NornClientProtocol {
         try await get("api/health")
     }
 
+    func hostStatus() async throws -> NornHostStatus {
+        try await get("api/v1/host/status")
+    }
+
     func serviceManifest() async throws -> NornServiceManifest {
-        try await get("api/services/manifest")
+        try await get("api/v1/services/manifest")
     }
 
 	func apps() async throws -> [NornAppStatus] { try await get("api/v1/apps") }
@@ -95,7 +99,43 @@ actor NornClient: NornClientProtocol {
     }
 
     func releases() async throws -> NornReleaseList {
-        try await get("api/platform/releases")
+        do {
+            return try await get("api/v1/releases")
+        } catch let NornClientError.http(status, _, _) where status == 404 {
+            // Older servers exposed only the compatibility route. Keep the
+            // fallback narrow so authorization and decoding failures remain
+            // visible instead of being silently masked.
+            return try await get("api/platform/releases")
+        }
+    }
+
+    /// Rotates a managed device token and writes the replacement to Keychain
+    /// before returning metadata to the app model. The server revokes the old
+    /// token atomically; a storage failure therefore requires re-enrollment.
+    func rotateCredential() async throws -> NornIssuedToken {
+        let issued: NornIssuedToken = try await perform(
+            path: "api/v1/auth/rotate",
+            method: "POST",
+            body: Data("{}".utf8)
+        )
+        do {
+            try await credentialVault.store(
+                NornCredential(accessToken: issued.token),
+                for: profile.credentialID
+            )
+        } catch {
+            throw NornClientError.transport(message: "The replacement token could not be saved. Re-enroll this Mac.")
+        }
+        return issued
+    }
+
+    func revokeCredential() async throws {
+        try await performEmpty(
+            path: "api/v1/auth/revoke",
+            method: "POST",
+            body: Data("{}".utf8)
+        )
+        try await credentialVault.removeCredential(for: profile.credentialID)
     }
 
 	func fleetInventory() async throws -> NornFleetInventory {
@@ -124,6 +164,25 @@ actor NornClient: NornClientProtocol {
 		return try await get("api/v1/fleet/plans/\(value.pathComponentEncoded)/reconciliations")
 	}
 
+	func fleetRunnerAttempts(planID: String) async throws -> NornFleetRunnerAttemptList {
+		let value = planID.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		return try await get("api/v1/fleet/plans/\(value.pathComponentEncoded)/attempts")
+	}
+
+	func advanceFleetRunnerAttempt(planID: String, attempt: NornFleetRunnerAttempt) async throws -> NornFleetRunnerAttempt {
+		struct Body: Encodable {
+			let schemaVersion = "norn.fleet-runner-attempt/v1"
+			let expectedPhase: String
+			let revision: Int64
+		}
+		return try await perform(
+			path: "api/v1/fleet/plans/\(planID.pathComponentEncoded)/attempts/\(attempt.id.pathComponentEncoded)/advance",
+			method: "POST",
+			body: Self.encoder.encode(Body(expectedPhase: attempt.currentPhase, revision: attempt.revision))
+		)
+	}
+
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus {
 		try await get("api/v1/fleet/github")
 	}
@@ -142,13 +201,14 @@ actor NornClient: NornClientProtocol {
 	}
 
 	func deployments() async throws -> [NornDeployment] {
-		try await get("api/deployments")
+		let result: NornDeploymentList = try await get("api/v1/deployments")
+		return result.deployments
 	}
 
 	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] {
 		let value = deploymentID.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !value.isEmpty else { throw NornClientError.invalidResponse }
-		let result: NornDeploymentStepList = try await get("api/deployments/\(value.pathComponentEncoded)/steps")
+		let result: NornDeploymentStepList = try await get("api/v1/deployments/\(value.pathComponentEncoded)/steps")
 		return result.steps
 	}
 
@@ -249,7 +309,12 @@ actor NornClient: NornClientProtocol {
         body: Data? = nil,
         idempotencyKey: String? = nil
     ) async throws -> Value {
-        try await perform(url: url(path: path), method: method, body: body, idempotencyKey: idempotencyKey)
+        try await perform(
+            url: url(path: path),
+            method: method,
+            body: body,
+            idempotencyKey: idempotencyKey
+        )
     }
 
     private func perform<Value: Decodable>(
@@ -266,7 +331,24 @@ actor NornClient: NornClientProtocol {
         if let idempotencyKey {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         }
+        let data = try await responseData(for: request)
+        do {
+            return try Self.decoder.decode(Value.self, from: data)
+        } catch {
+            throw NornClientError.decoding(message: String(describing: error))
+        }
+    }
 
+    private func performEmpty(path: String, method: String, body: Data? = nil) async throws {
+        var request = try await authorizedRequest(url: url(path: path), method: method)
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        _ = try await responseData(for: request)
+    }
+
+    private func responseData(for request: URLRequest) async throws -> Data {
         let data: Data
         let response: URLResponse
         do {
@@ -282,11 +364,7 @@ actor NornClient: NornClientProtocol {
         guard 200 ... 299 ~= http.statusCode else {
             throw Self.httpError(response: http, body: data)
         }
-        do {
-            return try Self.decoder.decode(Value.self, from: data)
-        } catch {
-            throw NornClientError.decoding(message: String(describing: error))
-        }
+        return data
     }
 
     private func receiveEvents(
@@ -392,24 +470,7 @@ actor NornClient: NornClientProtocol {
 
     private nonisolated static let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let container = try decoder.singleValueContainer()
-            if let seconds = try? container.decode(Double.self) {
-                return Date(timeIntervalSince1970: seconds)
-            }
-            let value = try container.decode(String.self)
-            let withFractionalSeconds = ISO8601DateFormatter()
-            withFractionalSeconds.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = withFractionalSeconds.date(from: value) {
-                return date
-            }
-            let standard = ISO8601DateFormatter()
-            standard.formatOptions = [.withInternetDateTime]
-            if let date = standard.date(from: value) {
-                return date
-            }
-            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Expected an ISO-8601 date.")
-        }
+        decoder.dateDecodingStrategy = .nornISO8601
         return decoder
     }()
 

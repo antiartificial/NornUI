@@ -1,18 +1,31 @@
+import Foundation
 import SwiftUI
 
 @main
 struct NornUIApp: App {
     private let credentialVault: KeychainCredentialVault
+    private let deviceIdentityVault: KeychainDeviceIdentityVault
     @State private var appModel: NornAppModel
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         let vault = KeychainCredentialVault()
+        let identityVault = KeychainDeviceIdentityVault()
+        let fixture = ProcessInfo.processInfo.environment["NORN_UI_FIXTURES"] == "1"
+            ? NornFixtures.snapshot
+            : nil
         credentialVault = vault
+        deviceIdentityVault = identityVault
         _appModel = State(initialValue: NornAppModel(
             clientFactory: { profile in
                 try await NornClient(profile: profile, credentialVault: vault)
             },
-            credentialVault: vault
+            credentialVault: vault,
+            deviceIdentityVault: identityVault,
+            enrollmentClientFactory: { baseURL in
+                try await NornEnrollmentClient(baseURL: baseURL)
+            },
+            fixture: fixture
         ))
     }
 
@@ -20,6 +33,10 @@ struct NornUIApp: App {
         WindowGroup {
             ContentView(appModel: appModel)
                 .frame(minWidth: 900, minHeight: 600)
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    Task { await appModel.refreshManagedCredentialIfNeeded() }
+                }
         }
         .defaultSize(width: 1_180, height: 760)
         .windowStyle(.automatic)
@@ -32,7 +49,14 @@ struct NornUIApp: App {
                 profiles: appModel.profiles,
                 selectedProfileID: appModel.selectedProfileID,
                 onSelect: { await appModel.selectProfile(id: $0) },
-                onAdd: { try await appModel.saveProfile($0, token: $1) },
+                onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onStartEnrollment: { profile, scopes in
+                    try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
+                },
+                onCompleteEnrollment: { profile, enrollment in
+                    try await appModel.completeDeviceEnrollment(profile: profile, enrollment: enrollment)
+                },
+                onRotate: { await appModel.rotateManagedCredentialNow() },
                 onRemove: { id in
                     Task { await appModel.removeProfileAndCredential(id: id) }
                 }

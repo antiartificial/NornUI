@@ -46,20 +46,91 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
     var name: String
     var baseURL: URL
     var credentialID: String
+    var deviceID: String?
+    var tokenID: String?
+    var grantedScopes: [String]?
+    var tokenExpiresAt: Date?
+    var lastRotatedAt: Date?
 
-    init(id: UUID = UUID(), name: String, baseURL: URL, credentialID: String? = nil) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        baseURL: URL,
+        credentialID: String? = nil,
+        deviceID: String? = nil,
+        tokenID: String? = nil,
+        grantedScopes: [String]? = nil,
+        tokenExpiresAt: Date? = nil,
+        lastRotatedAt: Date? = nil
+    ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.credentialID = credentialID ?? id.uuidString
+        self.deviceID = deviceID
+        self.tokenID = tokenID
+        self.grantedScopes = grantedScopes
+        self.tokenExpiresAt = tokenExpiresAt
+        self.lastRotatedAt = lastRotatedAt
+    }
+
+    var isManagedDevice: Bool { deviceID != nil && tokenID != nil }
+}
+
+nonisolated struct NornEnrollmentStartRequest: Encodable, Sendable {
+    var deviceName: String
+    var platform: String
+    var model: String
+    var appVersion: String
+    var publicKey: String
+    var requestedScopes: [String]
+}
+
+nonisolated struct NornEnrollmentSession: Decodable, Sendable, Identifiable {
+    var id: String
+    var userCode: String
+    var verifier: String
+    var expiresAt: Date
+    var verificationPath: String
+    var pollPath: String
+}
+
+/// A token-bearing response. Keep instances short-lived and never persist or log
+/// `token`; only the credential vault may store it.
+nonisolated struct NornIssuedToken: Decodable, Sendable {
+    var token: String
+    var tokenID: String
+    var deviceID: String
+    var scopes: [String]
+    var expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case token, scopes, expiresAt
+        case tokenID = "tokenId"
+        case deviceID = "deviceId"
     }
 }
 
 nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     struct Authentication: Codable, Hashable, Sendable {
+        struct Principal: Codable, Hashable, Sendable {
+            var authenticated: Bool
+            var subject: String?
+            var deviceID: String?
+            var scopes: [String]
+            var expiresAt: Date?
+            var legacy: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case authenticated, subject, scopes, expiresAt, legacy
+                case deviceID = "deviceId"
+            }
+        }
+
         var scopes: [String]
         var websocketBearerHeader: Bool
         var websocketQueryToken: Bool
+        var principal: Principal? = nil
     }
 
     var protocolVersion: Int
@@ -94,6 +165,16 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("fleet-reconciliation-v1") && endpoints["fleetReconciliations"] != nil
     }
 
+    var supportsFleetRunnerAttempts: Bool {
+        features.contains("fleet-runner-attempts-v1") && endpoints["fleetRunnerAttempts"] != nil
+    }
+
+    var grantedScopes: Set<String> { Set(auth.principal?.scopes ?? []) }
+
+    var canOperateFleet: Bool {
+        !grantedScopes.isDisjoint(with: ["fleet:operate", "api:write", "admin"])
+    }
+
     var supportsFleetGitHub: Bool {
         features.contains("fleet-github-app-v1") &&
         endpoints["fleetGitHub"] != nil &&
@@ -101,11 +182,9 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         endpoints["fleetGitHubDispatch"] != nil
     }
 
-    /// Deployment history and step checkpoints currently remain on the
-    /// authenticated compatibility surface. The regional-deployments feature
-    /// is the server's only advertised gate for that representation.
     var supportsDeploymentVisibility: Bool {
-        features.contains("regional-deployments")
+        features.contains("versioned-deployment-history-v1") &&
+        endpoints["deployments"] != nil && endpoints["deploymentSteps"] != nil
     }
 }
 
@@ -226,6 +305,57 @@ nonisolated struct NornFleetReconciliationList: Codable, Hashable, Sendable {
     }
 }
 
+nonisolated enum NornFleetRunnerAttemptStatus: String, Codable, Hashable, Sendable {
+    case queued, running, succeeded, failed, canceled, abandoned
+    var isActive: Bool { self == .queued || self == .running }
+}
+
+nonisolated struct NornFleetRunnerAttempt: Identifiable, Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var id: String
+    var planID: String
+    var attempt: Int
+    var runnerAttemptID: String?
+    var status: NornFleetRunnerAttemptStatus
+    var currentPhase: String
+    var commitSHA: String
+    var planSHA256: String
+    var workflowURL: URL?
+    var retryOf: String?
+    var heartbeatSequence: Int64
+    var heartbeatTimeoutSeconds: Int
+    var revision: Int64
+    var startedAt: Date
+    var heartbeatAt: Date
+    var heartbeatExpiresAt: Date
+    var updatedAt: Date
+    var finishedAt: Date?
+    var lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, attempt, status, currentPhase, retryOf, heartbeatSequence
+        case heartbeatTimeoutSeconds, revision, startedAt, heartbeatAt, heartbeatExpiresAt, updatedAt, finishedAt, lastError
+        case planID = "planId"
+        case runnerAttemptID = "runnerAttemptId"
+        case commitSHA = "commitSha"
+        case planSHA256 = "planSha256"
+        case workflowURL = "workflowUrl"
+    }
+}
+
+nonisolated struct NornFleetRunnerAttemptList: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var planID: String
+    var attempts: [NornFleetRunnerAttempt]
+    var count: Int
+    var serverTime: Date
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, attempts, count, serverTime
+        case planID = "planId"
+    }
+}
+
 nonisolated enum NornDeploymentStatus: String, Codable, Hashable, Sendable {
     case queued
     case building
@@ -284,6 +414,13 @@ nonisolated struct NornDeployment: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+nonisolated struct NornDeploymentList: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var deployments: [NornDeployment]
+    var count: Int
+    var offset: Int?
+}
+
 nonisolated enum NornDeploymentStepStatus: String, Codable, Hashable, Sendable {
     case running
     case complete
@@ -319,8 +456,15 @@ nonisolated struct NornDeploymentStep: Identifiable, Codable, Hashable, Sendable
 }
 
 nonisolated struct NornDeploymentStepList: Codable, Hashable, Sendable {
+    var schemaVersion: String?
+    var deploymentID: String?
     var steps: [NornDeploymentStep]
     var count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, steps, count
+        case deploymentID = "deploymentId"
+    }
 }
 
 nonisolated enum NornExecutionCheckpointState: String, Hashable, Sendable {
@@ -335,6 +479,7 @@ nonisolated struct NornFleetCheckpoint: Identifiable, Hashable, Sendable {
     var phase: String
     var state: NornExecutionCheckpointState
     var operation: NornOperation?
+    var runnerAttempt: NornFleetRunnerAttempt?
 
     var id: String { phase }
 }
@@ -350,7 +495,7 @@ nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
     var checkpoints: [NornFleetCheckpoint]
     var state: NornExecutionCheckpointState
 
-    init(plan: NornOperation, reconciliations: [NornOperation]) {
+    init(plan: NornOperation, reconciliations: [NornOperation], runnerAttempt: NornFleetRunnerAttempt? = nil) {
         let payload = plan.payload ?? [:]
         let action = payload["action"]?.stringValue
         let currentDesired = payload["current"]?.objectValue?["desired"]?.intValue
@@ -366,6 +511,11 @@ nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
             let checkpointState: NornExecutionCheckpointState
             if failureSeen {
                 checkpointState = .blocked
+            } else if runnerAttempt?.currentPhase == phase && runnerAttempt?.status.isActive == true {
+                checkpointState = .active
+            } else if runnerAttempt?.currentPhase == phase && [.failed, .canceled, .abandoned].contains(runnerAttempt?.status) {
+                checkpointState = .failed
+                failureSeen = true
             } else {
                 switch operation?.status {
                 case .succeeded: checkpointState = .completed
@@ -376,7 +526,7 @@ nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
                 case nil: checkpointState = .pending
                 }
             }
-            return NornFleetCheckpoint(phase: phase, state: checkpointState, operation: operation)
+            return NornFleetCheckpoint(phase: phase, state: checkpointState, operation: operation, runnerAttempt: runnerAttempt?.currentPhase == phase ? runnerAttempt : nil)
         }
 
         if checkpoints.last?.state == .completed {
@@ -495,6 +645,17 @@ nonisolated struct NornHealth: Codable, Hashable, Sendable {
     var network: Network?
 }
 
+/// Versioned host state. Unlike the compatibility health response, this
+/// resource carries the latest durable assurance receipt even when that
+/// receipt has fallen outside the general operation-history page.
+nonisolated struct NornHostStatus: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var status: String
+    var services: [String: String]
+    var latestAssurance: NornOperation?
+    var observedAt: Date
+}
+
 nonisolated struct NornServiceManifest: Codable, Hashable, Sendable {
     var version: Int
     var generatedAt: Date
@@ -517,10 +678,20 @@ nonisolated struct NornService: Identifiable, Codable, Hashable, Sendable {
 
     struct Instance: Codable, Hashable, Sendable {
         var id: String?
+        var allocationID: String?
         var node: String?
         var address: String?
         var port: Int?
         var status: String?
+        var region: String?
+        var nodePool: String?
+        var placementSource: String?
+        var placementVerified: Bool = false
+
+        enum CodingKeys: String, CodingKey {
+            case id, node, address, port, status, region, nodePool, placementSource, placementVerified
+            case allocationID = "allocationId"
+        }
     }
 
     var name: String

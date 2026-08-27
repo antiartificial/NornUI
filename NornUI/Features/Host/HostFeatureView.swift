@@ -138,6 +138,7 @@ struct HostFeatureView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Host assurance. \(headerSubtitle)")
+        .accessibilityIdentifier("host.header")
     }
 
     private var readinessCard: some View {

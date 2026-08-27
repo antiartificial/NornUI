@@ -18,7 +18,8 @@ and the fixture-backed experience has been visually verified at the default and
 minimum window sizes. Live-server acceptance remains a deployment step because
 the repository intentionally contains no server address or credential.
 
-- Multiple server profiles with Keychain-backed scoped tokens.
+- Multiple server profiles with native pairing, Secure Enclave/Keychain device
+  identities, Keychain-backed credentials, renewal, and manual-token fallback.
 - Capability negotiation and explicit connection state.
 - Fleet overview backed by health, service manifest, releases, and operations.
 - Fleet inventory, capacity plans, reconciliation checkpoints, GitHub review,
@@ -32,7 +33,8 @@ the repository intentionally contains no server address or credential.
 - Platform release, preflight, upgrade, rollback, smoke, and host-assurance
   workflows using the versioned control protocol.
 - Cursor-persisted event reconnect and state reconciliation.
-- A rich fixture mode for previews, UI tests, and offline exploration.
+- A rich, explicitly enabled fixture mode for previews and UI tests; normal
+  launches without a server show onboarding rather than sample history.
 - Native menus, keyboard commands, resizable windows, reduced-motion support,
   VoiceOver descriptions, and semantic light/dark materials.
 
@@ -69,14 +71,18 @@ the repository intentionally contains no server address or credential.
 
 ## Server capabilities and native-client work
 
-Norn's server contract has advanced beyond the app's current integration. The
-following are server-supported capabilities, not missing control-plane
-infrastructure. Native product work remains before they become first-class Mac
-experiences:
+Norn's server contract continues to advance. Device onboarding is now a
+first-class Mac experience; the remaining items below are server-supported
+capabilities that still need broader native presentation:
 
-- **Device onboarding:** the server supports pairing enrollment, refresh,
-  rotation, revocation, and device listing. The Mac app still asks an operator
-  to paste a scoped access token when adding a server.
+- **Device onboarding — delivered:** pairing is the default Add Server path.
+  The app creates a P-256 identity in Secure Enclave or a device-only Keychain
+  fallback, keeps the pairing verifier in memory, polls for administrator
+  approval, stores the one-time bearer in Keychain, and rotates it while active
+  within seven days of its 30-day expiry. Settings exposes granted scopes,
+  expiry, manual rotation, migration from a pasted token, and local removal.
+  Server-wide device inventory and revocation remain administrator CLI/API
+  actions.
 - **Typed failures and receipts:** the server publishes stable problem codes,
   stronger operation receipts, and explicit operation-cancellation semantics.
   The app currently preserves safe error text and request IDs, and strongly

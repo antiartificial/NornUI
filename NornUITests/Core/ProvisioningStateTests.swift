@@ -69,8 +69,43 @@ final class ProvisioningStateTests: XCTestCase {
         XCTAssertEqual(progress.checkpoints.first?.state, .pending)
     }
 
+    func testLiveRunnerMakesOnlyItsDurablePhaseActive() {
+        let plan = operation(id: "plan-4", status: .succeeded, payload: ["action": .string("replace")])
+        let attempt = runnerAttempt(status: .running, phase: "nodes_configured")
+
+        let progress = NornFleetPlanProgress(plan: plan, reconciliations: [], runnerAttempt: attempt)
+
+        XCTAssertEqual(progress.state, .active)
+        XCTAssertEqual(progress.checkpoints.first { $0.phase == "nodes_configured" }?.state, .active)
+        XCTAssertEqual(progress.checkpoints.filter { $0.state == .active }.count, 1)
+    }
+
+    func testAbandonedRunnerBlocksLaterPhases() {
+        let plan = operation(id: "plan-5", status: .succeeded, payload: ["action": .string("replace")])
+        let attempt = runnerAttempt(status: .abandoned, phase: "inventory_generated")
+
+        let progress = NornFleetPlanProgress(plan: plan, reconciliations: [], runnerAttempt: attempt)
+
+        XCTAssertEqual(progress.state, .blocked)
+        XCTAssertEqual(progress.checkpoints.first { $0.phase == "inventory_generated" }?.state, .failed)
+        XCTAssertEqual(progress.checkpoints.first { $0.phase == "nodes_configured" }?.state, .blocked)
+    }
+
     private func checkpoint(phase: String, status: NornOperationStatus, offset: TimeInterval) -> NornOperation {
         operation(id: "checkpoint-\(phase)", status: status, payload: ["phase": .string(phase)], offset: offset)
+    }
+
+    private func runnerAttempt(status: NornFleetRunnerAttemptStatus, phase: String) -> NornFleetRunnerAttempt {
+        let date = Date(timeIntervalSince1970: 1_786_140_000)
+        return .init(
+            schemaVersion: "norn.fleet-runner-attempt/v1", id: "attempt-1", planID: "plan-1", attempt: 1,
+            runnerAttemptID: "runner-1", status: status, currentPhase: phase,
+            commitSHA: String(repeating: "a", count: 40), planSHA256: String(repeating: "b", count: 64),
+            workflowURL: URL(string: "https://github.com/acme/fleet/actions/runs/1"), retryOf: nil,
+            heartbeatSequence: 1, heartbeatTimeoutSeconds: 120, revision: 2,
+            startedAt: date, heartbeatAt: date, heartbeatExpiresAt: date.addingTimeInterval(120),
+            updatedAt: date, finishedAt: status.isActive ? nil : date, lastError: status == .abandoned ? "runner heartbeat expired" : nil
+        )
     }
 
     private func operation(

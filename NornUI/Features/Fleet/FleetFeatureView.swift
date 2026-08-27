@@ -4,6 +4,7 @@ struct FleetFeatureView: View {
     let inventory: NornFleetInventory
     let plans: [NornOperation]
     let reconciliations: [String: [NornOperation]]
+    let runnerAttempts: [String: [NornFleetRunnerAttempt]]
     let githubStatus: NornFleetGitHubStatus
     let snapshot: NornDashboardSnapshot
     let deployments: [NornDeployment]
@@ -11,12 +12,14 @@ struct FleetFeatureView: View {
     let deploymentVisibilitySupported: Bool
     let isSupported: Bool
     let canPlan: Bool
+    let canOperateFleet: Bool
     let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     let onPlan: (String, Int, String, String) async -> Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
@@ -201,11 +204,14 @@ struct FleetFeatureView: View {
                         FleetPlanJourney(
                             plan: plan,
                             checkpoints: reconciliations[plan.id] ?? [],
+                            runnerAttempt: runnerAttempts[plan.id]?.sorted { $0.attempt > $1.attempt }.first,
                             operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
                             canUseGitHub: canPlan && githubStatus.connected,
+                            canOperateFleet: canOperateFleet,
                             onOpenReview: onOpenReview,
                             onDispatchApply: onDispatchApply,
+							onAdvanceRunner: onAdvanceRunner,
 							onOpenOperation: onOpenOperation
                         )
                     }
@@ -366,11 +372,14 @@ private struct FleetCapacitySheet: View {
 private struct FleetPlanJourney: View {
     let plan: NornOperation
     let checkpoints: [NornOperation]
+    let runnerAttempt: NornFleetRunnerAttempt?
     let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
+    let canOperateFleet: Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
@@ -384,8 +393,8 @@ private struct FleetPlanJourney: View {
     private var action: String { payload["action"]?.stringValue ?? "reconcile" }
     private var currentDesired: Int? { payload["current"]?.objectValue?["desired"]?.intValue }
     private var proposedDesired: Int? { payload["proposed"]?.objectValue?["desired"]?.intValue }
-    private var workflowURL: URL? { URL(string: payload["workflowUrl"]?.stringValue ?? fallbackWorkflowURL ?? "") }
-    private var progress: NornFleetPlanProgress { .init(plan: plan, reconciliations: checkpoints) }
+    private var workflowURL: URL? { safeFleetRunnerURL(payload["workflowUrl"]?.stringValue ?? fallbackWorkflowURL) }
+    private var progress: NornFleetPlanProgress { .init(plan: plan, reconciliations: checkpoints, runnerAttempt: runnerAttempt) }
     private var isComplete: Bool { progress.state == .completed }
     private var isDestructive: Bool { action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0)) }
     private var linkedOperations: [NornOperation] {
@@ -393,13 +402,22 @@ private struct FleetPlanJourney: View {
     }
     private var reviewOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.pull-request" } }
     private var applyOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.apply-dispatch" } }
-    private var recordedReviewURL: URL? { URL(string: reviewOperation?.payload?["url"]?.stringValue ?? "") }
-    private var recordedApplyURL: URL? { URL(string: applyOperation?.payload?["url"]?.stringValue ?? "") }
+    private var recordedReviewURL: URL? { safeFleetRunnerURL(reviewOperation?.payload?["url"]?.stringValue) }
+    private var recordedApplyURL: URL? { safeFleetRunnerURL(applyOperation?.payload?["url"]?.stringValue) }
     private var mayCreateReview: Bool {
         canUseGitHub && reviewOperation == nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
     }
     private var mayDispatchApply: Bool {
         canUseGitHub && reviewOperation != nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
+    }
+    private var currentCheckpoint: NornFleetCheckpoint? {
+        progress.checkpoints.first { $0.state == .failed } ?? progress.checkpoints.first { $0.state == .active } ?? progress.checkpoints.first { $0.state == .pending }
+    }
+    private var mayAdvanceRunner: Bool {
+        runnerAttempt?.status.isActive == true && currentCheckpoint?.runnerAttempt?.id == runnerAttempt?.id && currentCheckpoint?.operation?.status == .succeeded && canOperateFleet
+    }
+    private var safeRunnerURL: URL? {
+        safeFleetRunnerURL(runnerAttempt?.workflowURL?.absoluteString)
     }
 
     var body: some View {
@@ -413,6 +431,10 @@ private struct FleetPlanJourney: View {
                             if let message = checkpoint.operation?.lastError ?? checkpoint.operation?.message,
                                !message.isEmpty {
                                 Text(message).font(.caption).foregroundStyle(checkpoint.state == .failed ? .red : .secondary)
+                            } else if let attempt = checkpoint.runnerAttempt {
+                                Text(runnerMessage(attempt, operation: checkpoint.operation))
+                                    .font(.caption)
+                                    .foregroundStyle(checkpoint.state == .failed ? .red : .secondary)
                             }
                         }
                         Spacer()
@@ -439,15 +461,28 @@ private struct FleetPlanJourney: View {
                     } else if let workflowURL {
                         Link(destination: workflowURL) { Label("View Protected Runner", systemImage: "arrow.up.right.square") }
                     }
+					if mayAdvanceRunner, let runnerAttempt {
+						Button("Advance Proven Phase", systemImage: "checkmark.arrow.trianglehead.counterclockwise") { runAdvance(runnerAttempt) }
+							.buttonStyle(.borderedProminent)
+							.disabled(isWorking)
+							.help("Advance only after Norn has durable successful evidence for this attempt and phase")
+					} else if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
+						Link(destination: safeRunnerURL) { Label("Retry in Protected Runner", systemImage: "arrow.clockwise.circle") }
+					} else if let safeRunnerURL, runnerAttempt?.status.isActive == true {
+						Link(destination: safeRunnerURL) { Label("View Active Runner", systemImage: "arrow.up.right.square") }
+					}
                 }
                 if let url = reviewURL ?? recordedReviewURL { Link("View Pull Request", destination: url) }
                 if let url = applyURL ?? recordedApplyURL { Link("View Apply Run", destination: url) }
-                if applyOperation != nil && !isComplete {
-                    Text("Dispatch is durable handoff proof, not proof that the runner is active. The next phase remains pending until Norn receives phase evidence.")
+                if applyOperation != nil && runnerAttempt == nil && !isComplete {
+                    Text("Dispatch is durable handoff proof, not proof that the runner is active. The next phase remains pending until a protected runner registers and heartbeats.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else if progress.state == .blocked {
-                    Text("A failed checkpoint blocks later phases. The current API exposes evidence but no native retry transition.")
+                    Text("A failed or abandoned attempt blocks later phases. Retry launches in the protected runner, which registers the next numbered attempt without moving provider credentials into Norn.")
                         .font(.caption).foregroundStyle(.orange)
+                } else if runnerAttempt?.status.isActive == true && !canOperateFleet {
+                    Text("This principal can observe runner liveness but lacks fleet:operate permission to advance proven phases.")
+						.font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(.top, 10)
@@ -509,6 +544,29 @@ private struct FleetPlanJourney: View {
         }
     }
 
+    private func runAdvance(_ attempt: NornFleetRunnerAttempt) {
+        guard !isWorking else { return }
+        isWorking = true
+        Task {
+            _ = await onAdvanceRunner(plan.id, attempt)
+            isWorking = false
+        }
+    }
+
+    private func runnerMessage(_ attempt: NornFleetRunnerAttempt, operation: NornOperation?) -> String {
+        switch attempt.status {
+        case .abandoned: return "Attempt \(attempt.attempt) stopped heartbeating and was durably marked abandoned."
+        case .failed: return attempt.lastError ?? "Attempt \(attempt.attempt) failed in this phase."
+        case .canceled: return attempt.lastError ?? "Attempt \(attempt.attempt) was canceled."
+        case .queued where operation?.status == .succeeded,
+             .running where operation?.status == .succeeded:
+            return "Attempt \(attempt.attempt) recorded proof and is ready for an evidence-gated advance."
+        case .queued, .running:
+            return "Attempt \(attempt.attempt) heartbeat \(attempt.heartbeatAt.formatted(date: .omitted, time: .standard))."
+        case .succeeded: return "Attempt \(attempt.attempt) completed."
+        }
+    }
+
     private func copyPlanID() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(plan.id, forType: .string)
@@ -521,12 +579,23 @@ private struct PoolSelection: Identifiable {
     var id: String { name }
 }
 
+private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
+    guard let rawValue,
+          let url = URL(string: rawValue),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          components.scheme == "https", components.host != nil,
+          components.user == nil, components.password == nil,
+          components.query == nil, components.fragment == nil else { return nil }
+    return url
+}
+
 #Preview {
     NavigationStack {
         FleetFeatureView(
             inventory: NornFixtures.fleetInventory,
             plans: [],
             reconciliations: [:],
+            runnerAttempts: [:],
             githubStatus: .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet"),
             snapshot: NornFixtures.snapshot,
             deployments: NornFixtures.deployments,
@@ -534,12 +603,14 @@ private struct PoolSelection: Identifiable {
             deploymentVisibilitySupported: true,
             isSupported: true,
             canPlan: true,
+            canOperateFleet: true,
             isStale: false,
             isRefreshing: false,
             onRefresh: {},
             onPlan: { _, _, _, _ in true },
             onOpenReview: { _ in nil },
             onDispatchApply: { _, _ in nil },
+			onAdvanceRunner: { _, _ in true },
 			onOpenOperation: { _ in }
         )
     }

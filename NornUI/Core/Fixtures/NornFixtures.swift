@@ -7,11 +7,12 @@ enum NornFixtures {
         capabilities: NornCapabilities(
             protocolVersion: 1,
             serverVersion: "v2.16.2-control",
-            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "durable-app-recovery-v1", "durable-snapshots", "standalone-migrations", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-github-app-v1"],
+            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "durable-app-recovery-v1", "durable-snapshots", "standalone-migrations", "regional-deployments", "versioned-deployment-history-v1", "service-instance-placement-v2", "principal-scope-discovery-v1", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-runner-attempts-v1", "fleet-github-app-v1"],
             auth: .init(
                 scopes: ["api:read", "events:read", "platform:operate", "host:operate"],
                 websocketBearerHeader: true,
-                websocketQueryToken: false
+                websocketQueryToken: false,
+                principal: .init(authenticated: true, subject: "fixture-operator", scopes: ["api:read", "fleet:operate"])
             ),
             endpoints: [
                 "events": "/api/v1/events",
@@ -22,9 +23,13 @@ enum NornFixtures {
                 "fleetNodePools": "/api/v1/fleet/node-pools",
                 "fleetPlans": "/api/v1/fleet/plans",
                 "fleetReconciliations": "/api/v1/fleet/plans/{planID}/reconciliations",
+                "fleetRunnerAttempts": "/api/v1/fleet/plans/{planID}/attempts",
                 "fleetGitHub": "/api/v1/fleet/github",
                 "fleetGitHubPullRequest": "/api/v1/fleet/plans/{planID}/github/pull-request",
-                "fleetGitHubDispatch": "/api/v1/fleet/plans/{planID}/github/dispatch"
+                "fleetGitHubDispatch": "/api/v1/fleet/plans/{planID}/github/dispatch",
+                "deployments": "/api/v1/deployments",
+                "deploymentSteps": "/api/v1/deployments/{id}/steps",
+                "serviceManifest": "/api/v1/services/manifest"
             ]
         ),
         health: NornHealth(
@@ -187,7 +192,7 @@ enum NornFixtures {
             ),
             endpoints: exposure == "public" ? [.init(url: "https://\(app).example.test", region: "nyc3")] : [],
             instances: [
-                .init(id: "\(app)-\(process)-alloc", node: "node-app-1", address: "10.0.1.12", port: 8080, status: status)
+                .init(id: "\(app)-\(process)-service", allocationID: "\(app)-\(process)-alloc", node: "node-app-1", address: "10.0.1.12", port: 8080, status: status, region: "nyc3", nodePool: "app", placementSource: "consul-tags", placementVerified: true)
             ]
         )
     }
