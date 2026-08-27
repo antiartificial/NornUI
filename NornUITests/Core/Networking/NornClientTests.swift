@@ -90,6 +90,20 @@ final class NornClientTests: XCTestCase {
 
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/releases")
         XCTAssertEqual(releases.releases.first?.version, "v2.21.0")
+        XCTAssertNil(releases.releases.first?.displayVersion)
+    }
+
+    func testReleasesDecodeServerDisplayVersion() async throws {
+        NornURLProtocol.setHandler { request in
+            Self.response(request, status: 200, body: """
+            {"releases":[{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version":"platform-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","displayVersion":"v2.21.0-platform-2-gbbbbbbb","createdAt":"2026-08-26T19:00:00Z","path":"/releases/new","current":true}]}
+            """)
+        }
+
+        let releases = try await makeClient().releases()
+
+        XCTAssertEqual(releases.releases.first?.displayVersion, "v2.21.0-platform-2-gbbbbbbb")
+        XCTAssertEqual(releases.releases.first?.displayLabel(in: releases.releases), "v2.21.0-platform-2-gbbbbbbb")
     }
 
     func testFleetInventoryUsesAuthenticatedV1RouteAndDecodesNodePools() async throws {

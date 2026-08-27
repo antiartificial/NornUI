@@ -21,7 +21,9 @@ The current working milestone includes:
 - HTTPS transport, authenticated WebSocket events, persisted replay cursors,
   exponential reconnect, and authoritative refresh after reconnect.
 - Durable preflight, upgrade, rollback, smoke, and host-assurance actions with
-  idempotency keys and visible receipts.
+  idempotency keys and visible receipts. Release history leads with the
+  version-first `v<major>.<minor>.<patch>-platform` label while preserving the
+  exact artifact SHA for provenance and rollback.
 - Fleet inventory, node-pool capacity planning, reconciliation checkpoints,
   GitHub review creation, and protected apply dispatch.
 - A responsive provisioning view with explicit fleet checkpoint states,

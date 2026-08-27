@@ -73,7 +73,7 @@ struct ProvisioningExecutionView: View {
                 Text(activePlatformOperation == nil ? "Platform steady" : "Platform change active")
                     .font(.headline)
                 Text(activePlatformOperation?.kind.replacingOccurrences(of: ".", with: " ").capitalized
-                     ?? currentRelease.map { "Current release \($0.version) · \($0.sha.prefix(8))" }
+                     ?? currentRelease.map { "Current release \($0.displayLabel(in: snapshot.releases)) · \($0.sha.prefix(8))" }
                      ?? "No current release marker reported")
                     .font(.caption)
                     .foregroundStyle(.secondary)

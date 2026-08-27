@@ -169,7 +169,7 @@ struct PlatformFeatureView: View {
                 Text("Platform releases")
                     .font(.title2.weight(.semibold))
                 if let currentRelease {
-                    Text("Current: \(currentRelease.version) · \(currentRelease.shortSHA)")
+                    Text("Current: \(currentRelease.displayLabel(in: releases)) · \(currentRelease.shortSHA)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
@@ -278,7 +278,10 @@ struct PlatformFeatureView: View {
             } else {
                 List(selection: $selectedReleaseID) {
                     ForEach(releases) { release in
-                        ReleaseRow(release: release)
+                        ReleaseRow(
+                            release: release,
+                            displayLabel: release.displayLabel(in: releases)
+                        )
                             .tag(release.id)
                             .contextMenu {
                                 Button("Copy SHA") { copyRelease(release) }
@@ -336,6 +339,7 @@ struct PlatformFeatureView: View {
 
 private struct ReleaseRow: View {
     let release: NornRelease
+    let displayLabel: String
 
     var body: some View {
         HStack(spacing: 9) {
@@ -344,7 +348,7 @@ private struct ReleaseRow: View {
                 .symbolRenderingMode(.hierarchical)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(release.version)
+                    Text(displayLabel)
                         .font(.body.weight(.medium))
                     if release.current {
                         Text("CURRENT")
@@ -352,13 +356,14 @@ private struct ReleaseRow: View {
                             .foregroundStyle(.green)
                     }
                 }
-                Text("\(release.shortSHA) · \(release.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                Text("SHA \(release.shortSHA) · \(release.createdAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(release.current ? "Current " : "")release \(release.version), \(release.sha)")
+        .accessibilityLabel("\(release.current ? "Current " : "")release \(displayLabel), artifact SHA \(release.sha)")
+        .help("Artifact SHA: \(release.sha)\nPath: \(release.path)")
     }
 }
 
@@ -418,10 +423,6 @@ private struct ActionReviewCard: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Action review: \(action.title)")
     }
-}
-
-private extension NornRelease {
-    var shortSHA: String { String(sha.prefix(8)) }
 }
 
 #Preview("Release Desk") {

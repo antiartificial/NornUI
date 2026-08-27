@@ -767,8 +767,132 @@ nonisolated struct NornRelease: Identifiable, Codable, Hashable, Sendable {
     var createdAt: Date
     var path: String
     var current: Bool
+    var displayVersion: String? = nil
 
     var id: String { sha }
+
+    /// The best label this receipt can prove without consulting release history.
+    ///
+    /// New servers send `displayVersion`. Older servers may wrap a semantic
+    /// version in an artifact name, so prefer the semantic portion when present.
+    var directDisplayLabel: String? {
+        if let displayVersion = displayVersion?.nornNonempty {
+            return displayVersion.nornSemanticVersion ?? displayVersion
+        }
+        return version.nornSemanticVersion
+    }
+
+    /// A human-readable, version-first label with compatibility for older APIs.
+    ///
+    /// Legacy `platform-<sha>...` values can identify an earlier release receipt.
+    /// Follow only those exact SHA links and reuse a semantic label that the list
+    /// actually contains. The suffix remains the current immutable SHA rather
+    /// than an inferred (and potentially misleading) commit distance.
+    func displayLabel(in releases: [NornRelease]) -> String {
+        if let directDisplayLabel {
+            return directDisplayLabel
+        }
+
+        if let siblingLabel = releases.lazy
+            .filter({ $0.sha == sha && $0 != self })
+            .compactMap(\.directDisplayLabel)
+            .first {
+            return siblingLabel
+        }
+
+        var visited = Set<String>()
+        if let semanticBase = inheritedSemanticBase(in: releases, visited: &visited) {
+            return "\(semanticBase) · \(shortSHA)"
+        }
+
+        let rawVersion = version.nornNonempty
+        if rawVersion?.lowercased().hasPrefix("platform-") == true {
+            return "Platform \(shortSHA)"
+        }
+        if rawVersion?.nornLooksLikeSHA == true || rawVersion == nil {
+            return "Release \(shortSHA)"
+        }
+        return rawVersion ?? "Release \(shortSHA)"
+    }
+
+    var shortSHA: String { String(sha.prefix(8)) }
+
+    private var legacyAncestorSHA: String? {
+        let value = version.lowercased()
+        let prefix = "platform-"
+        guard value.hasPrefix(prefix) else { return nil }
+        let remainder = value.dropFirst(prefix.count)
+        guard remainder.count >= 40 else { return nil }
+        let candidate = String(remainder.prefix(40))
+        guard candidate.nornLooksLikeSHA else { return nil }
+        return candidate
+    }
+
+    private var semanticPlatformBase: String? {
+        (displayVersion?.nornNonempty ?? version).nornSemanticBase.map { "\($0)-platform" }
+    }
+
+    private func inheritedSemanticBase(
+        in releases: [NornRelease],
+        visited: inout Set<String>
+    ) -> String? {
+        let recordKey = "\(sha.lowercased())|\(version)|\(displayVersion ?? "")"
+        guard visited.insert(recordKey).inserted else { return nil }
+
+        if let ancestorSHA = legacyAncestorSHA {
+            for ancestor in releases where ancestor.sha.lowercased() == ancestorSHA {
+                if let base = ancestor.semanticPlatformBase {
+                    return base
+                }
+                if let base = ancestor.inheritedSemanticBase(in: releases, visited: &visited) {
+                    return base
+                }
+            }
+        }
+
+        for sibling in releases where sibling.sha == sha && sibling != self {
+            if let base = sibling.semanticPlatformBase {
+                return base
+            }
+            if let base = sibling.inheritedSemanticBase(in: releases, visited: &visited) {
+                return base
+            }
+        }
+        return nil
+    }
+}
+
+private extension String {
+    nonisolated var nornNonempty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    nonisolated var nornSemanticVersion: String? {
+        guard let range = range(
+            of: #"v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        let label = String(self[range])
+        return label.replacingOccurrences(
+            of: #"^(v[0-9]+\.[0-9]+\.[0-9]+)-control"#,
+            with: "$1-platform",
+            options: [.regularExpression, .caseInsensitive]
+        )
+    }
+
+    nonisolated var nornSemanticBase: String? {
+        guard let range = range(
+            of: #"v[0-9]+\.[0-9]+\.[0-9]+"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else { return nil }
+        return String(self[range])
+    }
+
+    nonisolated var nornLooksLikeSHA: Bool {
+        guard (7...64).contains(count) else { return false }
+        return allSatisfy { $0.isHexDigit }
+    }
 }
 
 nonisolated struct NornControlEvent: Identifiable, Codable, Hashable, Sendable {

@@ -221,7 +221,7 @@ struct OverviewView: View {
                             .foregroundStyle(.green)
                         Text("Current release")
                             .foregroundStyle(.secondary)
-                        Text(current.version)
+                        Text(current.displayLabel(in: snapshot.releases))
                             .font(.system(.subheadline, design: .monospaced).weight(.medium))
                         Spacer()
                         Image(systemName: "chevron.right")
