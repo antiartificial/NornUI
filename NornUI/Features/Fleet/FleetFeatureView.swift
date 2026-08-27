@@ -4,16 +4,26 @@ struct FleetFeatureView: View {
     let inventory: NornFleetInventory
     let plans: [NornOperation]
     let reconciliations: [String: [NornOperation]]
+    let runnerAttempts: [String: [NornFleetRunnerAttempt]]
     let githubStatus: NornFleetGitHubStatus
+    let snapshot: NornDashboardSnapshot
+    let deployments: [NornDeployment]
+    let deploymentSteps: [String: [NornDeploymentStep]]
+    let deploymentVisibilitySupported: Bool
     let isSupported: Bool
     let canPlan: Bool
+    let canOperateFleet: Bool
+    let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     let onPlan: (String, Int, String, String) async -> Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
+	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var pools: [PoolSelection] {
         inventory.nodePools
@@ -38,8 +48,22 @@ struct FleetFeatureView: View {
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
+                        if isStale { staleBanner }
                         fleetHeader
                         findings
+                        InfrastructureTopologyView(
+                            inventory: inventory,
+                            services: snapshot.services,
+                            deployments: deployments,
+                            health: snapshot.health
+                        )
+                        ProvisioningExecutionView(
+                            snapshot: snapshot,
+                            deployments: deployments,
+                            steps: deploymentSteps,
+                            isSupported: deploymentVisibilitySupported,
+                            isStale: isStale
+                        )
                         poolGrid
                         planHistory
                     }
@@ -64,6 +88,19 @@ struct FleetFeatureView: View {
                 return succeeded
             }
         }
+    }
+
+    private var staleBanner: some View {
+        Label(
+            "Showing the last observation from \(snapshot.observedAt.formatted(date: .abbreviated, time: .standard)). Mutating actions are unavailable until Norn reconnects.",
+            systemImage: "wifi.slash"
+        )
+        .font(.callout)
+        .foregroundStyle(.orange)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityLabel("Offline. Showing cached fleet data observed \(snapshot.observedAt.formatted(date: .abbreviated, time: .standard)). Actions unavailable.")
     }
 
     private var fleetHeader: some View {
@@ -95,7 +132,12 @@ struct FleetFeatureView: View {
             }
         }
         .padding(18)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(reduceTransparency
+                      ? AnyShapeStyle(Color(nsColor: .windowBackgroundColor))
+                      : AnyShapeStyle(.regularMaterial))
+        }
     }
 
     @ViewBuilder
@@ -162,10 +204,15 @@ struct FleetFeatureView: View {
                         FleetPlanJourney(
                             plan: plan,
                             checkpoints: reconciliations[plan.id] ?? [],
+                            runnerAttempt: runnerAttempts[plan.id]?.sorted { $0.attempt > $1.attempt }.first,
+                            operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
-                            canUseGitHub: githubStatus.connected,
+                            canUseGitHub: canPlan && githubStatus.connected,
+                            canOperateFleet: canOperateFleet,
                             onOpenReview: onOpenReview,
-                            onDispatchApply: onDispatchApply
+                            onDispatchApply: onDispatchApply,
+							onAdvanceRunner: onAdvanceRunner,
+							onOpenOperation: onOpenOperation
                         )
                     }
                 }
@@ -325,10 +372,15 @@ private struct FleetCapacitySheet: View {
 private struct FleetPlanJourney: View {
     let plan: NornOperation
     let checkpoints: [NornOperation]
+    let runnerAttempt: NornFleetRunnerAttempt?
+    let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
+    let canOperateFleet: Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
+	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
+	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
     @State private var isWorking = false
@@ -336,68 +388,102 @@ private struct FleetPlanJourney: View {
     @State private var applyURL: URL?
     @State private var confirmingDestructiveApply = false
 
-    private let phases = [
-        "infrastructure_applied", "inventory_generated", "nodes_configured",
-        "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
-    ]
-
     private var payload: [String: JSONValue] { plan.payload ?? [:] }
     private var pool: String { payload["pool"]?.stringValue ?? "pool" }
     private var action: String { payload["action"]?.stringValue ?? "reconcile" }
     private var currentDesired: Int? { payload["current"]?.objectValue?["desired"]?.intValue }
     private var proposedDesired: Int? { payload["proposed"]?.objectValue?["desired"]?.intValue }
-    private var workflowURL: URL? { URL(string: payload["workflowUrl"]?.stringValue ?? fallbackWorkflowURL ?? "") }
-    private var completedPhases: Set<String> {
-        Set(checkpoints.compactMap { checkpoint in
-            guard checkpoint.status == .succeeded else { return nil }
-            return checkpoint.payload?["phase"]?.stringValue
-        })
-    }
-    private var isComplete: Bool { completedPhases.contains("complete") }
+    private var workflowURL: URL? { safeFleetRunnerURL(payload["workflowUrl"]?.stringValue ?? fallbackWorkflowURL) }
+    private var progress: NornFleetPlanProgress { .init(plan: plan, reconciliations: checkpoints, runnerAttempt: runnerAttempt) }
+    private var isComplete: Bool { progress.state == .completed }
     private var isDestructive: Bool { action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0)) }
+    private var linkedOperations: [NornOperation] {
+        operations.filter { $0.payload?["planId"]?.stringValue == plan.id }
+    }
+    private var reviewOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.pull-request" } }
+    private var applyOperation: NornOperation? { linkedOperations.first { $0.kind == "fleet.github.apply-dispatch" } }
+    private var recordedReviewURL: URL? { safeFleetRunnerURL(reviewOperation?.payload?["url"]?.stringValue) }
+    private var recordedApplyURL: URL? { safeFleetRunnerURL(applyOperation?.payload?["url"]?.stringValue) }
+    private var mayCreateReview: Bool {
+        canUseGitHub && reviewOperation == nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
+    }
+    private var mayDispatchApply: Bool {
+        canUseGitHub && reviewOperation != nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
+    }
+    private var currentCheckpoint: NornFleetCheckpoint? {
+        progress.checkpoints.first { $0.state == .failed } ?? progress.checkpoints.first { $0.state == .active } ?? progress.checkpoints.first { $0.state == .pending }
+    }
+    private var mayAdvanceRunner: Bool {
+        runnerAttempt?.status.isActive == true && currentCheckpoint?.runnerAttempt?.id == runnerAttempt?.id && currentCheckpoint?.operation?.status == .succeeded && canOperateFleet
+    }
+    private var safeRunnerURL: URL? {
+        safeFleetRunnerURL(runnerAttempt?.workflowURL?.absoluteString)
+    }
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 12) {
-                if checkpoints.isEmpty {
-                    Label("Awaiting the protected runner", systemImage: "clock")
-                        .foregroundStyle(.secondary)
-                    Text("You can close Norn now. This plan ID is the resume key for the repository workflow.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    ForEach(phases, id: \.self) { phase in
-                        let succeeded = completedPhases.contains(phase)
-                        HStack(spacing: 10) {
-                            Image(systemName: succeeded ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(succeeded ? Color.green : Color.secondary.opacity(0.45))
-                                .accessibilityHidden(true)
-                            Text(phase.replacingOccurrences(of: "_", with: " ").capitalized)
-                            Spacer()
-                            if succeeded { Text("Proven").font(.caption).foregroundStyle(.secondary) }
+                ForEach(progress.checkpoints) { checkpoint in
+                    HStack(spacing: 10) {
+                        ExecutionStateIcon(state: checkpoint.state)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(checkpoint.phase.replacingOccurrences(of: "_", with: " ").capitalized)
+                            if let message = checkpoint.operation?.lastError ?? checkpoint.operation?.message,
+                               !message.isEmpty {
+                                Text(message).font(.caption).foregroundStyle(checkpoint.state == .failed ? .red : .secondary)
+                            } else if let attempt = checkpoint.runnerAttempt {
+                                Text(runnerMessage(attempt, operation: checkpoint.operation))
+                                    .font(.caption)
+                                    .foregroundStyle(checkpoint.state == .failed ? .red : .secondary)
+                            }
                         }
-                        .accessibilityLabel("\(phase.replacingOccurrences(of: "_", with: " ")), \(succeeded ? "proven" : "pending")")
+                        Spacer()
+                        ExecutionStateBadge(state: checkpoint.state)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(checkpoint.phase.replacingOccurrences(of: "_", with: " ")), \(checkpoint.state.title)")
                 }
                 Divider()
                 HStack {
                     Text(plan.id).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1)
                     Spacer()
-                    if canUseGitHub {
-                        Button("Open Review", systemImage: "arrow.triangle.branch") { runOpenReview() }
+					Button("View Receipt", systemImage: "doc.text.magnifyingglass") { onOpenOperation(plan) }
+					if mayCreateReview {
+                        Button("Create or Recover Review", systemImage: "arrow.triangle.branch") { runOpenReview() }
+                            .buttonStyle(.borderedProminent)
                             .disabled(isWorking)
-                        Button("Apply After Review", systemImage: "play.circle.fill") {
+                    } else if mayDispatchApply {
+                        Button("Dispatch Reviewed Apply", systemImage: "play.circle.fill") {
                             if isDestructive { confirmingDestructiveApply = true } else { runApply() }
                         }
                         .buttonStyle(.borderedProminent)
                         .disabled(isWorking)
                     } else if let workflowURL {
-                        Link(destination: workflowURL) { Label("Continue in Protected Runner", systemImage: "arrow.up.right.square") }
+                        Link(destination: workflowURL) { Label("View Protected Runner", systemImage: "arrow.up.right.square") }
                     }
+					if mayAdvanceRunner, let runnerAttempt {
+						Button("Advance Proven Phase", systemImage: "checkmark.arrow.trianglehead.counterclockwise") { runAdvance(runnerAttempt) }
+							.buttonStyle(.borderedProminent)
+							.disabled(isWorking)
+							.help("Advance only after Norn has durable successful evidence for this attempt and phase")
+					} else if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
+						Link(destination: safeRunnerURL) { Label("Retry in Protected Runner", systemImage: "arrow.clockwise.circle") }
+					} else if let safeRunnerURL, runnerAttempt?.status.isActive == true {
+						Link(destination: safeRunnerURL) { Label("View Active Runner", systemImage: "arrow.up.right.square") }
+					}
                 }
-                if let reviewURL { Link("View Pull Request", destination: reviewURL) }
-                if let applyURL { Link("View Apply Run", destination: applyURL) }
-                Text("Repeating either action safely recovers the existing GitHub review or plan-named workflow run.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if let url = reviewURL ?? recordedReviewURL { Link("View Pull Request", destination: url) }
+                if let url = applyURL ?? recordedApplyURL { Link("View Apply Run", destination: url) }
+                if applyOperation != nil && runnerAttempt == nil && !isComplete {
+                    Text("Dispatch is durable handoff proof, not proof that the runner is active. The next phase remains pending until a protected runner registers and heartbeats.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if progress.state == .blocked {
+                    Text("A failed or abandoned attempt blocks later phases. Retry launches in the protected runner, which registers the next numbered attempt without moving provider credentials into Norn.")
+                        .font(.caption).foregroundStyle(.orange)
+                } else if runnerAttempt?.status.isActive == true && !canOperateFleet {
+                    Text("This principal can observe runner liveness but lacks fleet:operate permission to advance proven phases.")
+						.font(.caption).foregroundStyle(.secondary)
+                }
             }
             .padding(.top, 10)
         } label: {
@@ -414,17 +500,19 @@ private struct FleetPlanJourney: View {
                     }
                 }
                 Spacer()
-                Text(isComplete ? "Complete" : checkpoints.isEmpty ? "Planned" : "In progress")
-                    .font(.caption.weight(.semibold))
+                ExecutionStateBadge(state: progress.state)
             }
         }
         .padding(14)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .contextMenu {
-            Button("Open Fleet Review", systemImage: "arrow.triangle.branch") { runOpenReview() }.disabled(!canUseGitHub || isWorking)
-            Button("Apply Reviewed Change", systemImage: "play.circle.fill") {
+            Button("View Receipt", systemImage: "doc.text.magnifyingglass") { onOpenOperation(plan) }
+            Button("Copy Plan ID") { copyPlanID() }
+            Divider()
+            Button("Create or Recover Review", systemImage: "arrow.triangle.branch") { runOpenReview() }.disabled(!mayCreateReview || isWorking)
+            Button("Dispatch Reviewed Apply", systemImage: "play.circle.fill") {
                 if isDestructive { confirmingDestructiveApply = true } else { runApply() }
-            }.disabled(!canUseGitHub || isWorking)
+            }.disabled(!mayDispatchApply || isWorking)
         }
         .confirmationDialog(
             "Apply reviewed destructive fleet change?",
@@ -455,6 +543,34 @@ private struct FleetPlanJourney: View {
             isWorking = false
         }
     }
+
+    private func runAdvance(_ attempt: NornFleetRunnerAttempt) {
+        guard !isWorking else { return }
+        isWorking = true
+        Task {
+            _ = await onAdvanceRunner(plan.id, attempt)
+            isWorking = false
+        }
+    }
+
+    private func runnerMessage(_ attempt: NornFleetRunnerAttempt, operation: NornOperation?) -> String {
+        switch attempt.status {
+        case .abandoned: return "Attempt \(attempt.attempt) stopped heartbeating and was durably marked abandoned."
+        case .failed: return attempt.lastError ?? "Attempt \(attempt.attempt) failed in this phase."
+        case .canceled: return attempt.lastError ?? "Attempt \(attempt.attempt) was canceled."
+        case .queued where operation?.status == .succeeded,
+             .running where operation?.status == .succeeded:
+            return "Attempt \(attempt.attempt) recorded proof and is ready for an evidence-gated advance."
+        case .queued, .running:
+            return "Attempt \(attempt.attempt) heartbeat \(attempt.heartbeatAt.formatted(date: .omitted, time: .standard))."
+        case .succeeded: return "Attempt \(attempt.attempt) completed."
+        }
+    }
+
+    private func copyPlanID() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(plan.id, forType: .string)
+    }
 }
 
 private struct PoolSelection: Identifiable {
@@ -463,10 +579,14 @@ private struct PoolSelection: Identifiable {
     var id: String { name }
 }
 
-private extension JSONValue {
-    var stringValue: String? { if case let .string(value) = self { value } else { nil } }
-    var objectValue: [String: JSONValue]? { if case let .object(value) = self { value } else { nil } }
-    var intValue: Int? { if case let .number(value) = self { Int(value) } else { nil } }
+private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
+    guard let rawValue,
+          let url = URL(string: rawValue),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          components.scheme == "https", components.host != nil,
+          components.user == nil, components.password == nil,
+          components.query == nil, components.fragment == nil else { return nil }
+    return url
 }
 
 #Preview {
@@ -475,14 +595,23 @@ private extension JSONValue {
             inventory: NornFixtures.fleetInventory,
             plans: [],
             reconciliations: [:],
+            runnerAttempts: [:],
             githubStatus: .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet"),
+            snapshot: NornFixtures.snapshot,
+            deployments: NornFixtures.deployments,
+            deploymentSteps: NornFixtures.deploymentSteps,
+            deploymentVisibilitySupported: true,
             isSupported: true,
             canPlan: true,
+            canOperateFleet: true,
+            isStale: false,
             isRefreshing: false,
             onRefresh: {},
             onPlan: { _, _, _, _ in true },
             onOpenReview: { _ in nil },
-            onDispatchApply: { _, _ in nil }
+            onDispatchApply: { _, _ in nil },
+			onAdvanceRunner: { _, _ in true },
+			onOpenOperation: { _ in }
         )
     }
     .frame(width: 980, height: 720)

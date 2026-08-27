@@ -4,10 +4,14 @@ struct NornSettingsView: View {
     let profiles: [NornServerProfile]
     let selectedProfileID: UUID?
     let onSelect: (UUID?) async -> Void
-    let onAdd: (NornServerProfile, String) async throws -> Void
+    let onManualSave: (NornServerProfile, String) async throws -> Void
+    let onStartEnrollment: ServerProfileEditor.EnrollmentStart
+    let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
+    let onRotate: () async -> Void
     let onRemove: (UUID) -> Void
 
     @State private var isAddingServer = false
+    @State private var pairingProfile: NornServerProfile?
     @State private var pendingRemoval: NornServerProfile?
 
     var body: some View {
@@ -17,7 +21,7 @@ struct NornSettingsView: View {
                     ContentUnavailableView(
                         "No Servers",
                         systemImage: "macmini",
-                        description: Text("Add a Norn server to leave fixture mode.")
+                        description: Text("Add a Norn server to load live platform state.")
                     )
                 } else {
                     ForEach(profiles) { profile in
@@ -36,10 +40,20 @@ struct NornSettingsView: View {
                                     .foregroundStyle(.tint)
                                     .accessibilityLabel("Selected")
                             }
+                            if profile.isManagedDevice {
+                                Label("Managed", systemImage: "person.badge.key.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                             Button("Use") {
                                 Task { await onSelect(profile.id) }
                             }
                             .disabled(profile.id == selectedProfileID)
+                            if !profile.isManagedDevice {
+                                Button("Pair…") {
+                                    pairingProfile = profile
+                                }
+                            }
                             Button("Remove", role: .destructive) {
                                 pendingRemoval = profile
                             }
@@ -53,16 +67,44 @@ struct NornSettingsView: View {
             }
 
             Section("Security") {
-                LabeledContent("Credentials", value: "Login Keychain")
-                LabeledContent("Event authentication", value: "Bearer header")
+                LabeledContent("Credential storage", value: "Login Keychain")
+                if let profile = profiles.first(where: { $0.id == selectedProfileID }) {
+                    LabeledContent(
+                        "Authentication",
+                        value: profile.isManagedDevice ? "Enrolled device" : "Manual token"
+                    )
+                    if let scopes = profile.grantedScopes, !scopes.isEmpty {
+                        LabeledContent("Granted scopes", value: scopes.joined(separator: ", "))
+                    }
+                    if let expiresAt = profile.tokenExpiresAt {
+                        LabeledContent("Credential expires") {
+                            Text(expiresAt, style: .relative)
+                            Text(expiresAt, format: .dateTime.year().month().day().hour().minute())
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if profile.isManagedDevice {
+                        Button("Rotate Device Credential Now", systemImage: "arrow.triangle.2.circlepath") {
+                            Task { await onRotate() }
+                        }
+                    } else {
+                        Button("Replace with Device Enrollment…", systemImage: "person.badge.key.fill") {
+                            pairingProfile = profile
+                        }
+                    }
+                }
                 Text("Norn never stores access tokens in preferences, logs, or URLs.")
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 620, height: 440)
+        .frame(width: 680, height: 520)
         .sheet(isPresented: $isAddingServer) {
-            ServerProfileEditor(onSave: onAdd)
+            editor(profile: nil)
+        }
+        .sheet(item: $pairingProfile) { profile in
+            editor(profile: profile)
         }
         .alert(
             "Remove \(pendingRemoval?.name ?? "Server")?",
@@ -80,7 +122,17 @@ struct NornSettingsView: View {
                 pendingRemoval = nil
             }
         } message: { _ in
-            Text("This removes the server profile and its scoped token from Keychain. You can add it again later.")
+            Text("This removes the server profile, scoped token, and device key from this Mac. Revoke the device from an administrator session if it should lose server access immediately.")
         }
+    }
+
+    private func editor(profile: NornServerProfile?) -> some View {
+        ServerProfileEditor(
+            profile: profile,
+            startsWithPairing: true,
+            onManualSave: onManualSave,
+            onStartEnrollment: onStartEnrollment,
+            onCompleteEnrollment: onCompleteEnrollment
+        )
     }
 }

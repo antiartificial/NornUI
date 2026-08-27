@@ -7,21 +7,29 @@ enum NornFixtures {
         capabilities: NornCapabilities(
             protocolVersion: 1,
             serverVersion: "v2.16.2-control",
-            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-github-app-v1"],
+            features: ["durable-operations", "event-cursor-replay", "host-assurance", "host-metrics", "durable-app-recovery-v1", "durable-snapshots", "standalone-migrations", "regional-deployments", "versioned-deployment-history-v1", "service-instance-placement-v2", "principal-scope-discovery-v1", "fleet-v1", "fleet-inventory", "durable-fleet-capacity-plans", "fleet-reconciliation-v1", "fleet-runner-attempts-v1", "fleet-github-app-v1"],
             auth: .init(
                 scopes: ["api:read", "events:read", "platform:operate", "host:operate"],
                 websocketBearerHeader: true,
-                websocketQueryToken: false
+                websocketQueryToken: false,
+                principal: .init(authenticated: true, subject: "fixture-operator", scopes: ["api:read", "fleet:operate"])
             ),
             endpoints: [
                 "events": "/api/v1/events",
                 "hostMetrics": "/api/v1/host/metrics",
+				"appSnapshots": "/api/v1/apps/{id}/snapshots",
+				"appSnapshotRestore": "/api/v1/apps/{id}/snapshots/{snapshot}/restore",
+				"appRollbacks": "/api/v1/apps/{id}/rollbacks",
                 "fleetNodePools": "/api/v1/fleet/node-pools",
                 "fleetPlans": "/api/v1/fleet/plans",
                 "fleetReconciliations": "/api/v1/fleet/plans/{planID}/reconciliations",
+                "fleetRunnerAttempts": "/api/v1/fleet/plans/{planID}/attempts",
                 "fleetGitHub": "/api/v1/fleet/github",
                 "fleetGitHubPullRequest": "/api/v1/fleet/plans/{planID}/github/pull-request",
-                "fleetGitHubDispatch": "/api/v1/fleet/plans/{planID}/github/dispatch"
+                "fleetGitHubDispatch": "/api/v1/fleet/plans/{planID}/github/dispatch",
+                "deployments": "/api/v1/deployments",
+                "deploymentSteps": "/api/v1/deployments/{id}/steps",
+                "serviceManifest": "/api/v1/services/manifest"
             ]
         ),
         health: NornHealth(
@@ -58,8 +66,28 @@ enum NornFixtures {
                 current: false
             )
         ],
-        observedAt: now
+        observedAt: now,
+		apps: [
+			NornAppStatus(
+				spec: .init(
+					name: "mail-mcp",
+					deploy: true,
+					migrations: "./bin/migrate",
+					infrastructure: .init(postgres: .init(database: "mail_mcp")),
+					snapshots: .init(keep: 3, preRestore: true, retentionEnabled: true)
+				),
+				nomadStatus: "running",
+				healthy: true
+			)
+		]
     )
+
+	static let appSnapshots = [
+		NornAppSnapshot(filename: "mail_mcp_pre-migrate_20260825T140000.dump", database: "mail_mcp", timestamp: "20260825T140000", createdAt: now.addingTimeInterval(-3_600), size: 18_400_000),
+		NornAppSnapshot(filename: "mail_mcp_manual_20260824T140000.dump", database: "mail_mcp", timestamp: "20260824T140000", createdAt: now.addingTimeInterval(-90_000), size: 17_900_000),
+		NornAppSnapshot(filename: "mail_mcp_release_20260820T140000.dump", database: "mail_mcp", timestamp: "20260820T140000", createdAt: now.addingTimeInterval(-435_600), size: 16_800_000),
+		NornAppSnapshot(filename: "mail_mcp_release_20260812T140000.dump", database: "mail_mcp", timestamp: "20260812T140000", createdAt: now.addingTimeInterval(-1_126_800), size: 15_600_000),
+	]
 
     static let hostMetrics = NornHostMetrics(
         schemaVersion: "norn.host-metrics/v1",
@@ -102,6 +130,47 @@ enum NornFixtures {
         ]
     )
 
+    static let deployments: [NornDeployment] = [
+        NornDeployment(
+            id: "deploy-mail-mcp-20260825",
+            app: "mail-mcp",
+            commitSHA: "b3a3958019be2655b3a3958019be2655b3a39580",
+            imageTag: "mail-mcp:b3a3958",
+            sagaID: "saga-mail-mcp-20260825",
+            status: .healthy,
+            sourceKind: "git",
+            sourceRef: "main",
+            sourceDirty: false,
+            sourceChanges: nil,
+            startedAt: now.addingTimeInterval(-3_260),
+            finishedAt: now.addingTimeInterval(-3_200),
+            regions: [
+                .init(
+                    deploymentID: "deploy-mail-mcp-20260825",
+                    region: "nyc3",
+                    nomadRegion: "global",
+                    status: .healthy,
+                    desiredWeight: 100,
+                    activeWeight: 100,
+                    evalID: "eval-mail-mcp",
+                    lastError: nil,
+                    updatedAt: now.addingTimeInterval(-3_200)
+                )
+            ]
+        )
+    ]
+
+    static let deploymentSteps: [String: [NornDeploymentStep]] = [
+        "deploy-mail-mcp-20260825": [
+            deploymentStep("clone", kind: .readonly, offset: -3_260, durationMs: 1_400),
+            deploymentStep("admission", kind: .readonly, offset: -3_258, durationMs: 320),
+            deploymentStep("build", kind: .readonly, offset: -3_257, durationMs: 18_200),
+            deploymentStep("test", kind: .readonly, offset: -3_238, durationMs: 7_900),
+            deploymentStep("submit", kind: .mutable, offset: -3_229, durationMs: 2_100),
+            deploymentStep("healthy", kind: .mutable, offset: -3_226, durationMs: 24_000)
+        ]
+    ]
+
     private static func service(
         _ app: String,
         process: String,
@@ -121,8 +190,33 @@ enum NornFixtures {
                 exposure: exposure,
                 routable: status == "passing"
             ),
-            endpoints: [],
-            instances: []
+            endpoints: exposure == "public" ? [.init(url: "https://\(app).example.test", region: "nyc3")] : [],
+            instances: [
+                .init(id: "\(app)-\(process)-service", allocationID: "\(app)-\(process)-alloc", node: "node-app-1", address: "10.0.1.12", port: 8080, status: status, region: "nyc3", nodePool: "app", placementSource: "consul-tags", placementVerified: true)
+            ]
+        )
+    }
+
+    private static func deploymentStep(
+        _ name: String,
+        kind: NornDeploymentStepKind,
+        offset: TimeInterval,
+        durationMs: Int64
+    ) -> NornDeploymentStep {
+        let startedAt = now.addingTimeInterval(offset)
+        return NornDeploymentStep(
+            deploymentID: "deploy-mail-mcp-20260825",
+            app: "mail-mcp",
+            sagaID: "saga-mail-mcp-20260825",
+            step: name,
+            status: .complete,
+            kind: kind,
+            attempt: 1,
+            startedAt: startedAt,
+            finishedAt: startedAt.addingTimeInterval(Double(durationMs) / 1_000),
+            durationMs: durationMs,
+            message: nil,
+            metadata: nil
         )
     }
 

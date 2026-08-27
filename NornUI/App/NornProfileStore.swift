@@ -5,6 +5,7 @@ final class NornProfileStore {
     private let defaults: UserDefaults
     private let profilesKey = "norn.serverProfiles.v1"
     private let selectionKey = "norn.selectedProfile.v1"
+    private let durableIntentsKey = "norn.durableIntents.v1"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -40,6 +41,30 @@ final class NornProfileStore {
 
     func saveCursor(_ cursor: Int64, profileID: UUID) {
         defaults.set(cursor, forKey: cursorKey(profileID))
+    }
+
+    /// Stores only an opaque idempotency key and request digest. No credentials
+    /// or request payloads are persisted. An interrupted mutation can therefore
+    /// be retried safely after the app relaunches.
+    func durableIntentKey(scope: String, requestDigest: String) -> String {
+        var intents = defaults.dictionary(forKey: durableIntentsKey) as? [String: String] ?? [:]
+        if let value = intents[scope] {
+            let components = value.split(separator: "\u{1f}", maxSplits: 1).map(String.init)
+            if components.count == 2, components[0] == requestDigest {
+                return components[1]
+            }
+        }
+        let key = "norn-macos-\(UUID().uuidString)"
+        intents[scope] = "\(requestDigest)\u{1f}\(key)"
+        defaults.set(intents, forKey: durableIntentsKey)
+        return key
+    }
+
+    func clearDurableIntent(scope: String, key: String) {
+        var intents = defaults.dictionary(forKey: durableIntentsKey) as? [String: String] ?? [:]
+        guard intents[scope]?.hasSuffix("\u{1f}\(key)") == true else { return }
+        intents.removeValue(forKey: scope)
+        defaults.set(intents, forKey: durableIntentsKey)
     }
 
     private func cursorKey(_ id: UUID) -> String {

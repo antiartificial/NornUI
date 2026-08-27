@@ -12,6 +12,7 @@ struct OverviewView: View {
     var onShowServices: () -> Void = {}
     var onShowOperations: () -> Void = {}
     var onShowReleases: () -> Void = {}
+    var onShowHost: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -22,7 +23,8 @@ struct OverviewView: View {
         onRefresh: @escaping () -> Void = {},
         onShowServices: @escaping () -> Void = {},
         onShowOperations: @escaping () -> Void = {},
-        onShowReleases: @escaping () -> Void = {}
+        onShowReleases: @escaping () -> Void = {},
+        onShowHost: @escaping () -> Void = {}
     ) {
         self.snapshot = snapshot
         self.connectionState = connectionState
@@ -31,6 +33,7 @@ struct OverviewView: View {
         self.onShowServices = onShowServices
         self.onShowOperations = onShowOperations
         self.onShowReleases = onShowReleases
+        self.onShowHost = onShowHost
     }
 
     var body: some View {
@@ -132,16 +135,16 @@ struct OverviewView: View {
         ) {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 0) {
-                    metric(snapshot.passingServices, "healthy services", .healthy, "of \(snapshot.services.count) observed")
-                    metric(attentionServiceCount(snapshot), "need attention", attentionServiceCount(snapshot) == 0 ? .neutral : .attention, "health checks")
-                    metric(snapshot.activeOperations.count, "active operations", snapshot.activeOperations.isEmpty ? .neutral : .active, activeOperationDetail(snapshot))
-                    metric(snapshot.health.services.count, "control-plane checks", NornStatus(serviceStatus: snapshot.health.status), snapshot.health.status.capitalized)
+                    metric(snapshot.passingServices, "healthy services", .healthy, "of \(snapshot.services.count) observed", destination: "Apps", action: onShowServices)
+                    metric(attentionServiceCount(snapshot), "need attention", attentionServiceCount(snapshot) == 0 ? .neutral : .attention, "health checks", destination: "Apps", action: onShowServices)
+                    metric(snapshot.activeOperations.count, "active operations", snapshot.activeOperations.isEmpty ? .neutral : .active, activeOperationDetail(snapshot), destination: "Operations", action: onShowOperations)
+                    metric(snapshot.health.services.count, "control-plane checks", NornStatus(serviceStatus: snapshot.health.status), snapshot.health.status.capitalized, destination: "Host", action: onShowHost)
                 }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 22) {
-                    metric(snapshot.passingServices, "healthy services", .healthy, "of \(snapshot.services.count) observed")
-                    metric(attentionServiceCount(snapshot), "need attention", attentionServiceCount(snapshot) == 0 ? .neutral : .attention, "health checks")
-                    metric(snapshot.activeOperations.count, "active operations", snapshot.activeOperations.isEmpty ? .neutral : .active, activeOperationDetail(snapshot))
-                    metric(snapshot.health.services.count, "control-plane checks", NornStatus(serviceStatus: snapshot.health.status), snapshot.health.status.capitalized)
+                    metric(snapshot.passingServices, "healthy services", .healthy, "of \(snapshot.services.count) observed", destination: "Apps", action: onShowServices)
+                    metric(attentionServiceCount(snapshot), "need attention", attentionServiceCount(snapshot) == 0 ? .neutral : .attention, "health checks", destination: "Apps", action: onShowServices)
+                    metric(snapshot.activeOperations.count, "active operations", snapshot.activeOperations.isEmpty ? .neutral : .active, activeOperationDetail(snapshot), destination: "Operations", action: onShowOperations)
+                    metric(snapshot.health.services.count, "control-plane checks", NornStatus(serviceStatus: snapshot.health.status), snapshot.health.status.capitalized, destination: "Host", action: onShowHost)
                 }
             }
         }
@@ -237,15 +240,29 @@ struct OverviewView: View {
         }
     }
 
-    private func metric(_ value: Int, _ label: String, _ status: NornStatus, _ detail: String) -> some View {
-        NornMetric(value: value, label: label, status: status, detail: detail)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .overlay(alignment: .trailing) {
-                Rectangle()
-                    .fill(.quaternary)
-                    .frame(width: 1, height: 54)
-            }
+    private func metric(
+        _ value: Int,
+        _ label: String,
+        _ status: NornStatus,
+        _ detail: String,
+        destination: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            NornMetric(value: value, label: label, status: status, detail: detail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .contentShape(Rectangle())
+                .overlay(alignment: .trailing) {
+                    Rectangle()
+                        .fill(.quaternary)
+                        .frame(width: 1, height: 54)
+                }
+        }
+        .buttonStyle(.plain)
+        .help("Show \(destination)")
+        .accessibilityHint("Opens \(destination.lowercased())")
+        .accessibilityIdentifier("overview.pulse." + label.replacingOccurrences(of: " ", with: "-"))
     }
 
     private var connectionBadge: some View {

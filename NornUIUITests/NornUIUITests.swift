@@ -9,6 +9,12 @@ import XCTest
 
 final class NornUIUITests: XCTestCase {
 
+    private func fixtureApp() -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchEnvironment["NORN_UI_FIXTURES"] = "1"
+        return app
+    }
+
     override func setUpWithError() throws {
         // Put setup code here. This method is called before the invocation of each test method in the class.
 
@@ -25,7 +31,7 @@ final class NornUIUITests: XCTestCase {
     @MainActor
     func testExample() throws {
         // UI tests must launch the application that they test.
-        let app = XCUIApplication()
+        let app = fixtureApp()
         app.launch()
 
         // Use XCTAssert and related functions to verify your tests produce the correct results.
@@ -35,7 +41,7 @@ final class NornUIUITests: XCTestCase {
 
     @MainActor
     func testOperationsUsesAvailableDetailHeight() throws {
-        let app = XCUIApplication()
+        let app = fixtureApp()
         app.launch()
 
         let operationsDestination = app.staticTexts["Operations"].firstMatch
@@ -76,10 +82,27 @@ final class NornUIUITests: XCTestCase {
     }
 
     @MainActor
+    func testPlatformPulseNavigatesToOperationsAndHost() throws {
+        let app = fixtureApp()
+        app.launch()
+
+        let operationsPulse = app.buttons["overview.pulse.active-operations"]
+        XCTAssertTrue(operationsPulse.waitForExistence(timeout: 5))
+        operationsPulse.click()
+        XCTAssertTrue(app.staticTexts["operations.header"].waitForExistence(timeout: 5))
+
+        app.staticTexts["Overview"].firstMatch.click()
+        let hostPulse = app.buttons["overview.pulse.control-plane-checks"]
+        XCTAssertTrue(hostPulse.waitForExistence(timeout: 5))
+        hostPulse.click()
+        XCTAssertTrue(app.descendants(matching: .any)["host.header"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {
-            XCUIApplication().launch()
+            fixtureApp().launch()
         }
     }
 }

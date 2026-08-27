@@ -46,20 +46,91 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
     var name: String
     var baseURL: URL
     var credentialID: String
+    var deviceID: String?
+    var tokenID: String?
+    var grantedScopes: [String]?
+    var tokenExpiresAt: Date?
+    var lastRotatedAt: Date?
 
-    init(id: UUID = UUID(), name: String, baseURL: URL, credentialID: String? = nil) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        baseURL: URL,
+        credentialID: String? = nil,
+        deviceID: String? = nil,
+        tokenID: String? = nil,
+        grantedScopes: [String]? = nil,
+        tokenExpiresAt: Date? = nil,
+        lastRotatedAt: Date? = nil
+    ) {
         self.id = id
         self.name = name
         self.baseURL = baseURL
         self.credentialID = credentialID ?? id.uuidString
+        self.deviceID = deviceID
+        self.tokenID = tokenID
+        self.grantedScopes = grantedScopes
+        self.tokenExpiresAt = tokenExpiresAt
+        self.lastRotatedAt = lastRotatedAt
+    }
+
+    var isManagedDevice: Bool { deviceID != nil && tokenID != nil }
+}
+
+nonisolated struct NornEnrollmentStartRequest: Encodable, Sendable {
+    var deviceName: String
+    var platform: String
+    var model: String
+    var appVersion: String
+    var publicKey: String
+    var requestedScopes: [String]
+}
+
+nonisolated struct NornEnrollmentSession: Decodable, Sendable, Identifiable {
+    var id: String
+    var userCode: String
+    var verifier: String
+    var expiresAt: Date
+    var verificationPath: String
+    var pollPath: String
+}
+
+/// A token-bearing response. Keep instances short-lived and never persist or log
+/// `token`; only the credential vault may store it.
+nonisolated struct NornIssuedToken: Decodable, Sendable {
+    var token: String
+    var tokenID: String
+    var deviceID: String
+    var scopes: [String]
+    var expiresAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case token, scopes, expiresAt
+        case tokenID = "tokenId"
+        case deviceID = "deviceId"
     }
 }
 
 nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     struct Authentication: Codable, Hashable, Sendable {
+        struct Principal: Codable, Hashable, Sendable {
+            var authenticated: Bool
+            var subject: String?
+            var deviceID: String?
+            var scopes: [String]
+            var expiresAt: Date?
+            var legacy: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case authenticated, subject, scopes, expiresAt, legacy
+                case deviceID = "deviceId"
+            }
+        }
+
         var scopes: [String]
         var websocketBearerHeader: Bool
         var websocketQueryToken: Bool
+        var principal: Principal? = nil
     }
 
     var protocolVersion: Int
@@ -76,6 +147,13 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
 
 	var supportsAppCreation: Bool { features.contains("app-creation") && endpoints["appCreation"] != nil }
 
+    var supportsDurableAppRecovery: Bool {
+        features.contains("durable-app-recovery-v1") &&
+        endpoints["appSnapshots"] != nil &&
+        endpoints["appSnapshotRestore"] != nil &&
+        endpoints["appRollbacks"] != nil
+    }
+
     var supportsFleet: Bool {
         features.contains("fleet-v1") &&
         features.contains("fleet-inventory") &&
@@ -87,11 +165,26 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("fleet-reconciliation-v1") && endpoints["fleetReconciliations"] != nil
     }
 
+    var supportsFleetRunnerAttempts: Bool {
+        features.contains("fleet-runner-attempts-v1") && endpoints["fleetRunnerAttempts"] != nil
+    }
+
+    var grantedScopes: Set<String> { Set(auth.principal?.scopes ?? []) }
+
+    var canOperateFleet: Bool {
+        !grantedScopes.isDisjoint(with: ["fleet:operate", "api:write", "admin"])
+    }
+
     var supportsFleetGitHub: Bool {
         features.contains("fleet-github-app-v1") &&
         endpoints["fleetGitHub"] != nil &&
         endpoints["fleetGitHubPullRequest"] != nil &&
         endpoints["fleetGitHubDispatch"] != nil
+    }
+
+    var supportsDeploymentVisibility: Bool {
+        features.contains("versioned-deployment-history-v1") &&
+        endpoints["deployments"] != nil && endpoints["deploymentSteps"] != nil
     }
 }
 
@@ -212,6 +305,242 @@ nonisolated struct NornFleetReconciliationList: Codable, Hashable, Sendable {
     }
 }
 
+nonisolated enum NornFleetRunnerAttemptStatus: String, Codable, Hashable, Sendable {
+    case queued, running, succeeded, failed, canceled, abandoned
+    var isActive: Bool { self == .queued || self == .running }
+}
+
+nonisolated struct NornFleetRunnerAttempt: Identifiable, Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var id: String
+    var planID: String
+    var attempt: Int
+    var runnerAttemptID: String?
+    var status: NornFleetRunnerAttemptStatus
+    var currentPhase: String
+    var commitSHA: String
+    var planSHA256: String
+    var workflowURL: URL?
+    var retryOf: String?
+    var heartbeatSequence: Int64
+    var heartbeatTimeoutSeconds: Int
+    var revision: Int64
+    var startedAt: Date
+    var heartbeatAt: Date
+    var heartbeatExpiresAt: Date
+    var updatedAt: Date
+    var finishedAt: Date?
+    var lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, attempt, status, currentPhase, retryOf, heartbeatSequence
+        case heartbeatTimeoutSeconds, revision, startedAt, heartbeatAt, heartbeatExpiresAt, updatedAt, finishedAt, lastError
+        case planID = "planId"
+        case runnerAttemptID = "runnerAttemptId"
+        case commitSHA = "commitSha"
+        case planSHA256 = "planSha256"
+        case workflowURL = "workflowUrl"
+    }
+}
+
+nonisolated struct NornFleetRunnerAttemptList: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var planID: String
+    var attempts: [NornFleetRunnerAttempt]
+    var count: Int
+    var serverTime: Date
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, attempts, count, serverTime
+        case planID = "planId"
+    }
+}
+
+nonisolated enum NornDeploymentStatus: String, Codable, Hashable, Sendable {
+    case queued
+    case building
+    case testing
+    case migrating
+    case submitting
+    case healthy
+    case deployed
+    case failed
+
+    var isActive: Bool {
+        switch self {
+        case .queued, .building, .testing, .migrating, .submitting: true
+        case .healthy, .deployed, .failed: false
+        }
+    }
+}
+
+nonisolated struct NornDeployment: Identifiable, Codable, Hashable, Sendable {
+    nonisolated struct Region: Codable, Hashable, Sendable {
+        var deploymentID: String?
+        var region: String
+        var nomadRegion: String
+        var status: NornDeploymentStatus
+        var desiredWeight: Int
+        var activeWeight: Int
+        var evalID: String?
+        var lastError: String?
+        var updatedAt: Date
+
+        enum CodingKeys: String, CodingKey {
+            case deploymentID = "deploymentId"
+            case region, nomadRegion, status, desiredWeight, activeWeight, lastError, updatedAt
+            case evalID = "evalId"
+        }
+    }
+
+    var id: String
+    var app: String
+    var commitSHA: String
+    var imageTag: String
+    var sagaID: String
+    var status: NornDeploymentStatus
+    var sourceKind: String?
+    var sourceRef: String?
+    var sourceDirty: Bool?
+    var sourceChanges: [String]?
+    var startedAt: Date
+    var finishedAt: Date?
+    var regions: [Region]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, app, imageTag, status, sourceKind, sourceRef, sourceDirty, sourceChanges, startedAt, finishedAt, regions
+        case commitSHA = "commitSha"
+        case sagaID = "sagaId"
+    }
+}
+
+nonisolated struct NornDeploymentList: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var deployments: [NornDeployment]
+    var count: Int
+    var offset: Int?
+}
+
+nonisolated enum NornDeploymentStepStatus: String, Codable, Hashable, Sendable {
+    case running
+    case complete
+    case failed
+}
+
+nonisolated enum NornDeploymentStepKind: String, Codable, Hashable, Sendable {
+    case readonly
+    case mutable
+}
+
+nonisolated struct NornDeploymentStep: Identifiable, Codable, Hashable, Sendable {
+    var deploymentID: String
+    var app: String
+    var sagaID: String
+    var step: String
+    var status: NornDeploymentStepStatus
+    var kind: NornDeploymentStepKind?
+    var attempt: Int?
+    var startedAt: Date
+    var finishedAt: Date?
+    var durationMs: Int64?
+    var message: String?
+    var metadata: [String: JSONValue]?
+
+    var id: String { "\(deploymentID):\(step)" }
+
+    enum CodingKeys: String, CodingKey {
+        case app, step, status, kind, attempt, startedAt, finishedAt, durationMs, message, metadata
+        case deploymentID = "deploymentId"
+        case sagaID = "sagaId"
+    }
+}
+
+nonisolated struct NornDeploymentStepList: Codable, Hashable, Sendable {
+    var schemaVersion: String?
+    var deploymentID: String?
+    var steps: [NornDeploymentStep]
+    var count: Int
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, steps, count
+        case deploymentID = "deploymentId"
+    }
+}
+
+nonisolated enum NornExecutionCheckpointState: String, Hashable, Sendable {
+    case completed
+    case pending
+    case active
+    case failed
+    case blocked
+}
+
+nonisolated struct NornFleetCheckpoint: Identifiable, Hashable, Sendable {
+    var phase: String
+    var state: NornExecutionCheckpointState
+    var operation: NornOperation?
+    var runnerAttempt: NornFleetRunnerAttempt?
+
+    var id: String { phase }
+}
+
+/// A contract-only projection of append-only runner evidence. It never assumes
+/// that a protected workflow is running merely because it was dispatched.
+nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
+    static let orderedPhases = [
+        "infrastructure_applied", "inventory_generated", "nodes_configured",
+        "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
+    ]
+
+    var checkpoints: [NornFleetCheckpoint]
+    var state: NornExecutionCheckpointState
+
+    init(plan: NornOperation, reconciliations: [NornOperation], runnerAttempt: NornFleetRunnerAttempt? = nil) {
+        let payload = plan.payload ?? [:]
+        let action = payload["action"]?.stringValue
+        let currentDesired = payload["current"]?.objectValue?["desired"]?.intValue
+        let proposedDesired = payload["proposed"]?.objectValue?["desired"]?.intValue
+        let requiresDrain = action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0))
+        let phases = Self.orderedPhases.filter { requiresDrain || $0 != "old_nodes_drained" }
+        let newestByPhase = Dictionary(grouping: reconciliations) { $0.payload?["phase"]?.stringValue ?? "" }
+            .mapValues { $0.max(by: { $0.updatedAt < $1.updatedAt })! }
+
+        var failureSeen = false
+        checkpoints = phases.map { phase in
+            let operation = newestByPhase[phase]
+            let checkpointState: NornExecutionCheckpointState
+            if failureSeen {
+                checkpointState = .blocked
+            } else if runnerAttempt?.currentPhase == phase && runnerAttempt?.status.isActive == true {
+                checkpointState = .active
+            } else if runnerAttempt?.currentPhase == phase && [.failed, .canceled, .abandoned].contains(runnerAttempt?.status) {
+                checkpointState = .failed
+                failureSeen = true
+            } else {
+                switch operation?.status {
+                case .succeeded: checkpointState = .completed
+                case .failed, .canceled:
+                    checkpointState = .failed
+                    failureSeen = true
+                case .queued, .running: checkpointState = .active
+                case nil: checkpointState = .pending
+                }
+            }
+            return NornFleetCheckpoint(phase: phase, state: checkpointState, operation: operation, runnerAttempt: runnerAttempt?.currentPhase == phase ? runnerAttempt : nil)
+        }
+
+        if checkpoints.last?.state == .completed {
+            state = .completed
+        } else if checkpoints.contains(where: { $0.state == .failed }) {
+            state = .blocked
+        } else if checkpoints.contains(where: { $0.state == .active }) {
+            state = .active
+        } else {
+            state = .pending
+        }
+    }
+}
+
 nonisolated enum NornAppTemplateKind: String, Codable, CaseIterable, Hashable, Sendable {
 	case endpoint
 	case worker
@@ -224,8 +553,21 @@ nonisolated struct NornCreateAppRequest: Codable, Hashable, Sendable {
 }
 
 nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
+	nonisolated struct Infrastructure: Codable, Hashable, Sendable {
+		nonisolated struct Postgres: Codable, Hashable, Sendable { var database: String }
+		var postgres: Postgres? = nil
+	}
+	nonisolated struct SnapshotPolicy: Codable, Hashable, Sendable {
+		var keep: Int? = nil
+		var preRestore: Bool? = nil
+		var retentionEnabled: Bool? = nil
+		var exportBucket: String? = nil
+	}
 	var name: String
 	var deploy: Bool?
+	var migrations: String? = nil
+	var infrastructure: Infrastructure? = nil
+	var snapshots: SnapshotPolicy? = nil
 }
 
 nonisolated struct NornAppMutationReceipt: Codable, Hashable, Sendable {
@@ -239,6 +581,35 @@ nonisolated struct NornAppStatus: Identifiable, Codable, Hashable, Sendable {
 	var nomadStatus: String?
 	var healthy: Bool
 	var id: String { spec.name }
+}
+
+nonisolated struct NornAppSnapshot: Identifiable, Codable, Hashable, Sendable {
+	var filename: String
+	var database: String
+	var commitSHA: String? = nil
+	var timestamp: String
+	var createdAt: Date?
+	var size: Int64
+	var id: String { filename }
+
+	enum CodingKeys: String, CodingKey {
+		case filename, database, timestamp, createdAt, size
+		case commitSHA = "commitSha"
+	}
+}
+
+nonisolated enum NornAppOperationRequest: Hashable, Sendable {
+	case snapshot(app: String)
+	case pruneSnapshots(app: String, keep: Int)
+	case restoreSnapshot(app: String, snapshot: String)
+	case migrate(app: String, ref: String)
+	case rollback(app: String, regions: [String])
+
+	var app: String {
+		switch self {
+		case let .snapshot(app), let .pruneSnapshots(app, _), let .restoreSnapshot(app, _), let .migrate(app, _), let .rollback(app, _): app
+		}
+	}
 }
 
 nonisolated struct NornHostMetrics: Codable, Hashable, Sendable {
@@ -274,6 +645,17 @@ nonisolated struct NornHealth: Codable, Hashable, Sendable {
     var network: Network?
 }
 
+/// Versioned host state. Unlike the compatibility health response, this
+/// resource carries the latest durable assurance receipt even when that
+/// receipt has fallen outside the general operation-history page.
+nonisolated struct NornHostStatus: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var status: String
+    var services: [String: String]
+    var latestAssurance: NornOperation?
+    var observedAt: Date
+}
+
 nonisolated struct NornServiceManifest: Codable, Hashable, Sendable {
     var version: Int
     var generatedAt: Date
@@ -296,10 +678,20 @@ nonisolated struct NornService: Identifiable, Codable, Hashable, Sendable {
 
     struct Instance: Codable, Hashable, Sendable {
         var id: String?
+        var allocationID: String?
         var node: String?
         var address: String?
         var port: Int?
         var status: String?
+        var region: String?
+        var nodePool: String?
+        var placementSource: String?
+        var placementVerified: Bool = false
+
+        enum CodingKeys: String, CodingKey {
+            case id, node, address, port, status, region, nodePool, placementSource, placementVerified
+            case allocationID = "allocationId"
+        }
     }
 
     var name: String
@@ -425,6 +817,21 @@ nonisolated enum JSONValue: Codable, Hashable, Sendable {
         case let .array(value): try container.encode(value)
         case .null: try container.encodeNil()
         }
+    }
+
+    var stringValue: String? {
+        guard case let .string(value) = self else { return nil }
+        return value
+    }
+
+    var objectValue: [String: JSONValue]? {
+        guard case let .object(value) = self else { return nil }
+        return value
+    }
+
+    var intValue: Int? {
+        guard case let .number(value) = self else { return nil }
+        return Int(value)
     }
 }
 

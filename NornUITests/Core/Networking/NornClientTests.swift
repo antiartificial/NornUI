@@ -17,7 +17,7 @@ final class NornClientTests: XCTestCase {
                 request,
                 status: 200,
                 body: """
-                {"protocolVersion":1,"serverVersion":"v2.16.2-control","features":["event-cursor-replay"],"auth":{"scopes":["api:read"],"websocketBearerHeader":true,"websocketQueryToken":false},"endpoints":{"events":"/api/v1/events"}}
+                {"protocolVersion":1,"serverVersion":"v2.16.2-control","features":["event-cursor-replay","principal-scope-discovery-v1"],"auth":{"scopes":["api:read","fleet:operate"],"websocketBearerHeader":true,"websocketQueryToken":false,"principal":{"authenticated":true,"subject":"operator","scopes":["api:read","fleet:operate"]}},"endpoints":{"events":"/api/v1/events"}}
                 """
             )
         }
@@ -26,6 +26,8 @@ final class NornClientTests: XCTestCase {
         let capabilities = try await client.capabilities()
 
         XCTAssertEqual(capabilities.protocolVersion, 1)
+        XCTAssertEqual(capabilities.auth.principal?.scopes, ["api:read", "fleet:operate"])
+        XCTAssertTrue(capabilities.canOperateFleet)
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/capabilities")
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
@@ -54,6 +56,40 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(metrics.cpu.logicalCores, 8)
         XCTAssertEqual(metrics.memory.availableBytes, 9_126_805_504)
         XCTAssertFalse(metrics.stale)
+    }
+
+    func testHostStatusUsesVersionedRouteAndDecodesLatestAssurance() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.host-status/v1","status":"ok","services":{"postgres":"up","nomad":"up"},"latestAssurance":{"id":"assure-new","kind":"host.assure","status":"succeeded","startedAt":"2026-08-26T18:20:00Z","updatedAt":"2026-08-26T18:21:00Z"},"observedAt":"2026-08-26T18:22:00Z"}
+            """)
+        }
+
+        let client = try await makeClient()
+        let status = try await client.hostStatus()
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/host/status")
+        XCTAssertEqual(status.schemaVersion, "norn.host-status/v1")
+        XCTAssertEqual(status.latestAssurance?.id, "assure-new")
+        XCTAssertEqual(status.services["nomad"], "up")
+    }
+
+    func testReleasesPreferVersionedRoute() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            {"current":"/releases/new","releases":[{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"v2.21.0","createdAt":"2026-08-26T19:00:00Z","path":"/releases/new","current":true}]}
+            """)
+        }
+
+        let client = try await makeClient()
+        let releases = try await client.releases()
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/releases")
+        XCTAssertEqual(releases.releases.first?.version, "v2.21.0")
     }
 
     func testFleetInventoryUsesAuthenticatedV1RouteAndDecodesNodePools() async throws {
@@ -193,6 +229,95 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(payload["port"] as? Int, 8080)
     }
 
+	func testDurableAppRecoveryUsesTypedSnapshotAndMigrationRoutes() async throws {
+		let recorder = RequestRecorder()
+		NornURLProtocol.setHandler { request in
+			recorder.record(request, body: NornURLProtocol.body(of: request))
+			if request.httpMethod == "GET" {
+				return Self.response(request, status: 200, body: """
+				[{"filename":"orders_pre-migrate_20260825T140000.dump","database":"orders","timestamp":"20260825T140000","createdAt":"2026-08-25T14:00:00Z","size":4096}]
+				""")
+			}
+			return Self.response(request, status: 202, body: """
+			{"id":"migration-1","kind":"app.migrate","app":"orders-api","status":"queued","startedAt":"2026-08-25T14:00:00Z","updatedAt":"2026-08-25T14:00:00Z"}
+			""")
+	}
+
+		let client = try await makeClient()
+		let snapshots = try await client.appSnapshots(app: "orders-api")
+		XCTAssertEqual(snapshots.first?.database, "orders")
+		XCTAssertEqual(snapshots.first?.size, 4096)
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/snapshots")
+
+		let operation = try await client.queueAppOperation(.migrate(app: "orders-api", ref: "main"), idempotencyKey: "migration-retry-1")
+		XCTAssertEqual(operation.kind, "app.migrate")
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/migrations")
+		XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "migration-retry-1")
+		let body = try XCTUnwrap(recorder.lastBody)
+		let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+		XCTAssertEqual(payload["ref"] as? String, "main")
+		XCTAssertEqual(payload["confirm"] as? Bool, true)
+
+		_ = try await client.queueAppOperation(
+			.restoreSnapshot(app: "orders-api", snapshot: "orders_pre-migrate_20260825T140000.dump"),
+			idempotencyKey: "restore-retry-1"
+		)
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders-api/snapshots/orders_pre-migrate_20260825T140000.dump/restore")
+		XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "restore-retry-1")
+		}
+
+    func testDeploymentVisibilityDecodesVersionedHistoryAndStageCheckpoints() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            if request.url?.path.hasSuffix("/steps") == true {
+                return Self.response(request, status: 200, body: """
+                {"schemaVersion":"norn.deployment-steps/v1","deploymentId":"deploy-1","steps":[{"deploymentId":"deploy-1","app":"orders-api","sagaId":"saga-1","step":"submit","status":"running","kind":"mutable","attempt":1,"startedAt":"2026-08-25T14:00:02Z"}],"count":1}
+                """)
+            }
+            return Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.deployments/v1","deployments":[{"id":"deploy-1","app":"orders-api","commitSha":"0123456789012345678901234567890123456789","imageTag":"orders:0123456","sagaId":"saga-1","status":"submitting","startedAt":"2026-08-25T14:00:00Z","regions":[{"region":"nyc3","nomadRegion":"global","status":"submitting","desiredWeight":100,"activeWeight":0,"updatedAt":"2026-08-25T14:00:02Z"}]}],"count":1,"offset":0}
+            """)
+        }
+
+        let client = try await makeClient()
+        let deployments = try await client.deployments()
+        XCTAssertEqual(deployments.first?.status, .submitting)
+        XCTAssertEqual(deployments.first?.regions?.first?.region, "nyc3")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/deployments")
+
+        let steps = try await client.deploymentSteps(deploymentID: "deploy-1")
+        XCTAssertEqual(steps.first?.step, "submit")
+        XCTAssertEqual(steps.first?.kind, .mutable)
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/deployments/deploy-1/steps")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+    }
+
+    func testFleetRunnerAttemptListAndEvidenceGatedAdvanceUseV1Routes() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            let attempt = """
+            {"schemaVersion":"norn.fleet-runner-attempt/v1","id":"attempt-1","planId":"plan-1","attempt":2,"runnerAttemptId":"github-42","status":"running","currentPhase":"nodes_configured","commitSha":"0123456789012345678901234567890123456789","planSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workflowUrl":"https://github.com/acme/fleet/actions/runs/42","heartbeatSequence":4,"heartbeatTimeoutSeconds":120,"revision":5,"startedAt":"2026-08-25T14:00:00Z","heartbeatAt":"2026-08-25T14:01:00Z","heartbeatExpiresAt":"2026-08-25T14:03:00Z","updatedAt":"2026-08-25T14:01:00Z"}
+            """
+            if request.httpMethod == "POST" { return Self.response(request, status: 200, body: attempt) }
+            return Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.fleet-runner-attempt/v1","planId":"plan-1","attempts":[\(attempt)],"count":1,"serverTime":"2026-08-25T14:01:01Z"}
+            """)
+        }
+
+        let client = try await makeClient()
+        let list = try await client.fleetRunnerAttempts(planID: "plan-1")
+        XCTAssertEqual(list.attempts.first?.currentPhase, "nodes_configured")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/plans/plan-1/attempts")
+
+        _ = try await client.advanceFleetRunnerAttempt(planID: "plan-1", attempt: try XCTUnwrap(list.attempts.first))
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/plans/plan-1/attempts/attempt-1/advance")
+        let body = String(decoding: try XCTUnwrap(recorder.lastBody), as: UTF8.self)
+        XCTAssertTrue(body.contains("\"expectedPhase\":\"nodes_configured\""))
+        XCTAssertTrue(body.contains("\"revision\":5"))
+    }
+
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
@@ -240,6 +365,72 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
     }
 
+    func testEnrollmentStartsWithoutBearerAndMapsPendingExchangeByStableCode() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            if request.url?.path.hasSuffix("/exchange") == true {
+                return Self.response(request, status: 409, body: """
+                {"code":"enrollment_not_approved","detail":"enrollment is not approved"}
+                """)
+            }
+            return Self.response(request, status: 201, body: """
+            {"id":"ca761232-ed42-11ce-bacd-00aa0057b223","userCode":"ABCD-EFGH","verifier":"device-only-verifier","expiresAt":"2099-08-26T20:10:00Z","verificationPath":"/api/v1/enrollments/approve","pollPath":"/api/v1/enrollments/ca761232-ed42-11ce-bacd-00aa0057b223/exchange"}
+            """)
+        }
+
+        let client = try NornEnrollmentClient(
+            baseURL: try XCTUnwrap(URL(string: "https://norn.example")),
+            session: makeSession()
+        )
+        let enrollment = try await client.start(.init(
+            deviceName: "Studio Mac",
+            platform: "macOS",
+            model: "Mac14,3",
+            appVersion: "2.22.0",
+            publicKey: "base64url-x963-public-key",
+            requestedScopes: ["api:read", "events:read"]
+        ))
+
+        XCTAssertEqual(enrollment.userCode, "ABCD-EFGH")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/enrollments")
+        XCTAssertNil(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+        let body = try XCTUnwrap(recorder.lastBody)
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(payload["deviceName"] as? String, "Studio Mac")
+        XCTAssertEqual(payload["requestedScopes"] as? [String], ["api:read", "events:read"])
+
+        do {
+            _ = try await client.exchange(enrollment)
+            XCTFail("Expected enrollment to remain pending")
+        } catch let error as NornEnrollmentClientError {
+            XCTAssertEqual(error, .awaitingApproval)
+        }
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/enrollments/ca761232-ed42-11ce-bacd-00aa0057b223/exchange")
+        XCTAssertNil(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func testManagedCredentialRotationReplacesKeychainToken() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            {"token":"replacement-token","tokenId":"token-2","deviceId":"device-1","scopes":["api:read","events:read"],"expiresAt":"2099-09-25T20:10:00Z"}
+            """)
+        }
+        let vault = TestCredentialVault(token: "old-token")
+        let profile = NornServerProfile(name: "Test server", baseURL: try XCTUnwrap(URL(string: "https://norn.example")))
+        let client = try NornClient(profile: profile, credentialVault: vault, session: makeSession())
+
+        let issued = try await client.rotateCredential()
+
+        XCTAssertEqual(issued.tokenID, "token-2")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/auth/rotate")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer old-token")
+        let savedToken = await vault.savedToken()
+        XCTAssertEqual(savedToken, "replacement-token")
+    }
+
     func testRejectsInsecureNonLoopbackProfile() async throws {
         let vault = TestCredentialVault(token: "scoped-test-token")
         let profile = NornServerProfile(name: "Remote", baseURL: try XCTUnwrap(URL(string: "http://norn.example")))
@@ -285,18 +476,27 @@ final class NornClientTests: XCTestCase {
 }
 
 private actor TestCredentialVault: NornCredentialVault {
-    private let credential: NornCredential
+	private var credential: NornCredential?
 
     init(token: String) {
-        credential = try! NornCredential(accessToken: token)
+		credential = try! NornCredential(accessToken: token)
     }
 
     func credential(for identifier: String) -> NornCredential? {
         credential
     }
 
-    func store(_ credential: NornCredential, for identifier: String) {}
-    func removeCredential(for identifier: String) {}
+	func store(_ credential: NornCredential, for identifier: String) {
+		self.credential = credential
+	}
+
+	func removeCredential(for identifier: String) {
+		credential = nil
+	}
+
+	func savedToken() -> String? {
+		credential?.accessToken
+	}
 }
 
 private final class RequestRecorder: @unchecked Sendable {
