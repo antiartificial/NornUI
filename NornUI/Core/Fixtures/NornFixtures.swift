@@ -43,6 +43,7 @@ enum NornFixtures {
             service("mail-mcp", process: "mcp", exposure: "private", status: "passing"),
             service("mail-mcp", process: "worker", exposure: "private", status: "passing"),
             service("like-trove", process: "web", exposure: "private", status: "passing"),
+            service("like-trove", process: "daily-capture", exposure: "internal", status: "unknown", type: "cron"),
             service("vigil-gateway", process: "web", exposure: "private", status: "passing"),
             service("contextdb", process: "web", exposure: "local", status: "unknown")
         ],
@@ -177,13 +178,14 @@ enum NornFixtures {
         _ app: String,
         process: String,
         exposure: String,
-        status: String
+        status: String,
+        type: String? = nil
     ) -> NornService {
         NornService(
             name: "\(app)-\(process)",
             app: app,
             process: process,
-            type: process == "web" ? "service" : process,
+            type: type ?? (process == "web" ? "service" : process),
             status: status,
             healthPath: "/health",
             reachability: .init(

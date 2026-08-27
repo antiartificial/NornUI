@@ -643,7 +643,7 @@ final class NornAppModel {
         case .failure: failures.append("operations")
         }
         switch result.4 {
-        case let .value(releases): next.releases = releases.releases.sorted { $0.createdAt > $1.createdAt }
+        case let .value(releases): next.releases = NornRelease.canonicalHistory(releases.releases)
         case .failure: failures.append("releases")
         }
         switch result.5 {

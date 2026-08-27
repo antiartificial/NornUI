@@ -100,12 +100,14 @@ actor NornClient: NornClientProtocol {
 
     func releases() async throws -> NornReleaseList {
         do {
-            return try await get("api/v1/releases")
+            let releases: NornReleaseList = try await get("api/v1/releases")
+            return releases.canonicalized()
         } catch let NornClientError.http(status, _, _) where status == 404 {
             // Older servers exposed only the compatibility route. Keep the
             // fallback narrow so authorization and decoding failures remain
             // visible instead of being silently masked.
-            return try await get("api/platform/releases")
+            let releases: NornReleaseList = try await get("api/platform/releases")
+            return releases.canonicalized()
         }
     }
 

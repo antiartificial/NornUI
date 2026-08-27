@@ -556,6 +556,16 @@ nonisolated struct NornCreateAppRequest: Codable, Hashable, Sendable {
 }
 
 nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
+	nonisolated struct Process: Codable, Hashable, Sendable {
+		nonisolated struct Scaling: Codable, Hashable, Sendable {
+			var min: Int?
+		}
+
+		var schedule: String?
+		var function: JSONValue?
+		var scaling: Scaling?
+	}
+
 	nonisolated struct Infrastructure: Codable, Hashable, Sendable {
 		nonisolated struct Postgres: Codable, Hashable, Sendable { var database: String }
 		var postgres: Postgres? = nil
@@ -568,6 +578,7 @@ nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
 	}
 	var name: String
 	var deploy: Bool?
+	var processes: [String: Process]? = nil
 	var migrations: String? = nil
 	var infrastructure: Infrastructure? = nil
 	var snapshots: SnapshotPolicy? = nil
@@ -580,9 +591,25 @@ nonisolated struct NornAppMutationReceipt: Codable, Hashable, Sendable {
 }
 
 nonisolated struct NornAppStatus: Identifiable, Codable, Hashable, Sendable {
+	nonisolated struct AllocationSummary: Codable, Hashable, Sendable {
+		nonisolated struct ProcessCount: Codable, Hashable, Sendable {
+			var running: Int
+			var active: Int
+			var retained: Int
+			var total: Int
+		}
+
+		var running: Int
+		var active: Int
+		var retained: Int
+		var total: Int
+		var byProcess: [String: ProcessCount]?
+	}
+
 	var spec: NornAppSpecSummary
 	var nomadStatus: String?
 	var healthy: Bool
+	var allocationSummary: AllocationSummary? = nil
 	var id: String { spec.name }
 }
 
@@ -759,6 +786,15 @@ nonisolated struct NornOperationList: Codable, Hashable, Sendable {
 nonisolated struct NornReleaseList: Codable, Hashable, Sendable {
     var current: String?
     var releases: [NornRelease]
+
+    /// One row per immutable artifact, newest first.
+    ///
+    /// Older Norn servers can expose both an activation receipt and an imported
+    /// artifact receipt for the same SHA, and may also surface an atomic staging
+    /// directory. Those records describe one binary, not separate releases.
+    func canonicalized() -> NornReleaseList {
+        NornReleaseList(current: current, releases: NornRelease.canonicalHistory(releases))
+    }
 }
 
 nonisolated struct NornRelease: Identifiable, Codable, Hashable, Sendable {
@@ -817,6 +853,51 @@ nonisolated struct NornRelease: Identifiable, Codable, Hashable, Sendable {
 
     var shortSHA: String { String(sha.prefix(8)) }
 
+    /// Collapses multiple receipts for the same immutable artifact and orders
+    /// the resulting history by actual timestamps rather than encoded strings.
+    static func canonicalHistory(_ releases: [NornRelease]) -> [NornRelease] {
+        let groups = Dictionary(grouping: releases) { release in
+            let normalizedSHA = release.sha.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalizedSHA.isEmpty {
+                return "missing-sha|\(release.path)|\(release.version)|\(release.createdAt.timeIntervalSince1970)"
+            }
+            return normalizedSHA
+        }
+
+        return groups.values
+            .compactMap(canonicalRelease)
+            .sorted { lhs, rhs in
+                if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                return lhs.sha.localizedStandardCompare(rhs.sha) == .orderedDescending
+            }
+    }
+
+    private static func canonicalRelease(from receipts: [NornRelease]) -> NornRelease? {
+        guard var release = receipts.max(by: { releasePreference($0) < releasePreference($1) }) else {
+            return nil
+        }
+
+        release.current = receipts.contains(where: \.current)
+        release.createdAt = receipts.map(\.createdAt).max() ?? release.createdAt
+        if release.displayVersion?.nornNonempty == nil {
+            release.displayVersion = receipts.compactMap(\.displayVersion).first(where: { $0.nornNonempty != nil })
+        }
+        return release
+    }
+
+    private static func releasePreference(_ release: NornRelease) -> ReleasePreference {
+        let selfArtifactVersion = "platform-\(release.sha.lowercased())"
+        let describesArtifact = release.version.lowercased() != selfArtifactVersion
+        return ReleasePreference(
+            current: release.current,
+            hasDisplayVersion: release.displayVersion?.nornNonempty != nil,
+            hasSemanticVersion: release.directDisplayLabel != nil,
+            describesArtifact: describesArtifact,
+            createdAt: release.createdAt,
+            stableTieBreak: "\(release.version)|\(release.path)"
+        )
+    }
+
     private var legacyAncestorSHA: String? {
         let value = version.lowercased()
         let prefix = "platform-"
@@ -859,6 +940,24 @@ nonisolated struct NornRelease: Identifiable, Codable, Hashable, Sendable {
             }
         }
         return nil
+    }
+}
+
+private nonisolated struct ReleasePreference: Comparable {
+    let current: Bool
+    let hasDisplayVersion: Bool
+    let hasSemanticVersion: Bool
+    let describesArtifact: Bool
+    let createdAt: Date
+    let stableTieBreak: String
+
+    static func < (lhs: ReleasePreference, rhs: ReleasePreference) -> Bool {
+        if lhs.current != rhs.current { return !lhs.current && rhs.current }
+        if lhs.hasDisplayVersion != rhs.hasDisplayVersion { return !lhs.hasDisplayVersion && rhs.hasDisplayVersion }
+        if lhs.hasSemanticVersion != rhs.hasSemanticVersion { return !lhs.hasSemanticVersion && rhs.hasSemanticVersion }
+        if lhs.describesArtifact != rhs.describesArtifact { return !lhs.describesArtifact && rhs.describesArtifact }
+        if lhs.createdAt != rhs.createdAt { return lhs.createdAt < rhs.createdAt }
+        return lhs.stableTieBreak < rhs.stableTieBreak
     }
 }
 

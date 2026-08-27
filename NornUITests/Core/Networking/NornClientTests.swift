@@ -76,6 +76,26 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(status.services["nomad"], "up")
     }
 
+    func testAppsDecodeWorkloadIntentAndAllocationSummary() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            [{"spec":{"name":"jobs","deploy":true,"processes":{"daily":{"schedule":"17 3 * * *"},"invoke":{"function":{"timeout":"30s"}},"web":{"scaling":{"min":0}}}},"nomadStatus":"running","healthy":false,"allocations":[],"allocationSummary":{"running":0,"active":0,"retained":0,"total":0,"byProcess":{}}}]
+            """)
+        }
+
+        let apps = try await makeClient().apps()
+        let app = try XCTUnwrap(apps.first)
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps")
+        XCTAssertEqual(app.spec.processes?["daily"]?.schedule, "17 3 * * *")
+        XCTAssertNotNil(app.spec.processes?["invoke"]?.function)
+        XCTAssertEqual(app.spec.processes?["web"]?.scaling?.min, 0)
+        XCTAssertEqual(app.allocationSummary?.active, 0)
+        XCTAssertEqual(app.allocationSummary?.byProcess, [:])
+    }
+
     func testReleasesPreferVersionedRoute() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
@@ -104,6 +124,28 @@ final class NornClientTests: XCTestCase {
 
         XCTAssertEqual(releases.releases.first?.displayVersion, "v2.21.0-platform-2-gbbbbbbb")
         XCTAssertEqual(releases.releases.first?.displayLabel(in: releases.releases), "v2.21.0-platform-2-gbbbbbbb")
+    }
+
+    func testReleasesCollapseDuplicateArtifactReceiptsAndSortNewestFirst() async throws {
+        NornURLProtocol.setHandler { request in
+            Self.response(request, status: 200, body: """
+            {"current":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","releases":[
+              {"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"platform-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","createdAt":"2026-08-26T19:02:00Z","path":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current":false},
+              {"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version":"v2.20.0-platform","createdAt":"2026-08-26T18:00:00Z","path":"/releases/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","current":false},
+              {"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"v2.21.0-platform-1-gaaaaaaa","createdAt":"2026-08-26T19:00:00Z","path":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current":true}
+            ]}
+            """)
+        }
+
+        let releases = try await makeClient().releases().releases
+
+        XCTAssertEqual(releases.map(\.sha), [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        XCTAssertTrue(releases[0].current)
+        XCTAssertEqual(releases[0].version, "v2.21.0-platform-1-gaaaaaaa")
+        XCTAssertEqual(releases[0].createdAt, Date(timeIntervalSince1970: 1_787_770_920))
     }
 
     func testFleetInventoryUsesAuthenticatedV1RouteAndDecodesNodePools() async throws {
