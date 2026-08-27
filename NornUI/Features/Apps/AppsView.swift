@@ -1,138 +1,533 @@
 import SwiftUI
 
 struct AppsView: View {
-	var apps: [NornAppStatus] = []
+    var apps: [NornAppStatus] = []
     let services: [NornService]
-	var canCreate = false
-	var supportsRecovery = false
-	var onCreate: () -> Void = {}
-	var onEnable: (String) -> Void = { _ in }
-	var onLoadSnapshots: (String) async -> [NornAppSnapshot]? = { _ in nil }
-	var onQueueOperation: (NornAppOperationRequest) async -> NornOperation? = { _ in nil }
-	var onOpenOperation: (NornOperation) -> Void = { _ in }
-	@State private var pendingEnable: NornAppStatus?
-    @State private var selection: NornService.ID?
+    var canCreate = false
+    var supportsRecovery = false
+    var onCreate: () -> Void = {}
+    var onEnable: (String) -> Void = { _ in }
+    var onLoadSnapshots: (String) async -> [NornAppSnapshot]? = { _ in nil }
+    var onQueueOperation: (NornAppOperationRequest) async -> NornOperation? = { _ in nil }
+    var onOpenOperation: (NornOperation) -> Void = { _ in }
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pendingEnable: NornAppStatus?
+    @State private var selectedAppName: String?
     @State private var searchText = ""
+    @State private var presentation: AppListPresentation = .grouped
+    @State private var activeOnly = false
+    @State private var sort = AppListSort.app
+    @State private var sortAscending = true
+    @State private var expandedApps: Set<String> = []
 
     private var filteredServices: [NornService] {
-        guard !searchText.isEmpty else { return services }
-        return services.filter {
-            $0.app.localizedStandardContains(searchText)
-                || $0.process.localizedStandardContains(searchText)
-                || $0.name.localizedStandardContains(searchText)
+        services
+            .filter { !activeOnly || isActive($0) }
+            .filter { searchText.isEmpty || matchesSearch($0) }
+            .sorted(by: serviceOrder)
+    }
+
+    private var groupedApps: [AppServiceGroup] {
+        let appStatuses = apps.reduce(into: [String: NornAppStatus]()) { result, app in
+            result[app.spec.name] = app
         }
+        let activeServices = services.filter { !activeOnly || isActive($0) }
+        var names = Set(activeServices.map(\.app))
+        names.formUnion(apps.compactMap { app in
+            guard app.spec.deploy != false else { return nil }
+            guard !activeOnly || isActive(app) else { return nil }
+            return app.spec.name
+        })
+
+        return names.compactMap { name in
+            let app = appStatuses[name]
+            let allChildren = activeServices.filter { $0.app == name }
+            let appMatches = searchText.isEmpty
+                || name.localizedStandardContains(searchText)
+                || app?.nomadStatus?.localizedStandardContains(searchText) == true
+            let children = appMatches ? allChildren : allChildren.filter(matchesSearch)
+            guard searchText.isEmpty || appMatches || !children.isEmpty else { return nil }
+            return AppServiceGroup(name: name, app: app, services: children.sorted(by: serviceOrder))
+        }
+        .sorted(by: groupOrder)
     }
 
     var body: some View {
-		HSplitView {
-		VStack(spacing: 0) {
-			if !drafts.isEmpty {
-				HStack(spacing: 10) {
-					Label("Drafts", systemImage: "lock.shield")
-					ForEach(drafts) { app in
-						HStack(spacing: 5) {
-							Text(app.spec.name).font(.callout.weight(.medium))
-							Button("Enable") { pendingEnable = app }.buttonStyle(.link)
-						}
-						.padding(.horizontal, 9).padding(.vertical, 5).background(.quaternary, in: Capsule())
-					}
-					Spacer()
-					Text("Deployment off").foregroundStyle(.secondary)
-				}
-				.padding(12)
-				Divider()
-			}
-        Table(filteredServices, selection: $selection) {
-            TableColumn("Service") { service in
-                HStack(spacing: 9) {
-                    Circle()
-                        .fill(statusColor(service.status))
-                        .frame(width: 7, height: 7)
-                        .shadow(color: statusColor(service.status).opacity(0.45), radius: 3)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(service.app)
-                            .fontWeight(.medium)
-                        Text(service.name)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(service.app), \(service.status)")
+        HSplitView {
+            VStack(spacing: 0) {
+                draftStrip
+                appList
             }
-            .width(min: 190, ideal: 260)
+            .frame(minWidth: 410)
 
-            TableColumn("Process") { service in
-                Label(service.process, systemImage: processSymbol(service.type))
-                    .foregroundStyle(.secondary)
+            if let selectedApp {
+                AppRecoveryInspector(
+                    app: selectedApp,
+                    isSupported: supportsRecovery,
+                    onLoadSnapshots: onLoadSnapshots,
+                    onQueue: onQueueOperation,
+                    onOpenOperation: onOpenOperation
+                )
+                .frame(minWidth: 290, idealWidth: 370, maxWidth: 480)
+            } else {
+                ContentUnavailableView(
+                    "Select an App",
+                    systemImage: "square.stack.3d.up",
+                    description: Text("Choose an app to inspect its durable recovery controls.")
+                )
+                .frame(minWidth: 290, maxWidth: .infinity, maxHeight: .infinity)
             }
-            .width(min: 120, ideal: 160)
-
-            TableColumn("Exposure") { service in
-                Text(service.reachability.exposure.capitalized)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 90, ideal: 120)
-
-            TableColumn("Status") { service in
-                Text(service.status.capitalized)
-                    .foregroundStyle(statusColor(service.status))
-            }
-            .width(min: 80, ideal: 100)
         }
-		}
-		.frame(minWidth: 430)
-		if let selectedApp {
-			AppRecoveryInspector(
-				app: selectedApp,
-				isSupported: supportsRecovery,
-				onLoadSnapshots: onLoadSnapshots,
-				onQueue: onQueueOperation,
-				onOpenOperation: onOpenOperation
-			)
-			.frame(minWidth: 330, idealWidth: 390, maxWidth: 480)
-		} else {
-			ContentUnavailableView("Select an App", systemImage: "square.stack.3d.up", description: Text("Choose a service to inspect durable recovery controls."))
-				.frame(minWidth: 330, maxWidth: .infinity, maxHeight: .infinity)
-		}
-		}
-        .searchable(text: $searchText, placement: .toolbar, prompt: "Search apps and services")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search apps, processes, and status")
         .navigationTitle("Apps")
-		.toolbar {
-			ToolbarItem(placement: .primaryAction) {
-				Button(action: onCreate) { Label("Create App", systemImage: "plus") }
-					.disabled(!canCreate)
-					.help(canCreate ? "Create a disabled app draft" : "This server does not support app creation")
-			}
-		}
-        .overlay {
-            if filteredServices.isEmpty {
-                ContentUnavailableView.search(text: searchText)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Picker("Organization", selection: $presentation) {
+                    Label("Grouped", systemImage: "list.bullet.indent")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Grouped app list")
+                        .accessibilityIdentifier("apps.presentation.grouped")
+                        .tag(AppListPresentation.grouped)
+                    Label("Flat", systemImage: "tablecells")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Flat app list")
+                        .accessibilityIdentifier("apps.presentation.flat")
+                        .tag(AppListPresentation.flat)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 126)
+                .help("Switch between app groups and a flat service list")
+                .accessibilityIdentifier("apps.presentation")
+
+                Toggle(isOn: $activeOnly) {
+                    Label("Active Only", systemImage: "bolt.fill")
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("apps.active-only")
+                }
+                .toggleStyle(.button)
+                .help("Show only running, healthy, or routable apps and services")
+                .accessibilityLabel("Show active apps only")
+
+                Button(action: onCreate) {
+                    Label("Create App", systemImage: "plus")
+                }
+                .disabled(!canCreate)
+                .help(canCreate ? "Create a disabled app draft" : "This server does not support app creation")
             }
         }
-		.task {
-			if selection == nil { selection = filteredServices.first?.id }
-		}
-		.confirmationDialog("Enable deployment for \(pendingEnable?.spec.name ?? "this app")?", isPresented: Binding(get: { pendingEnable != nil }, set: { if !$0 { pendingEnable = nil } })) {
-			Button("Enable Deployment") { if let app = pendingEnable { onEnable(app.spec.name) }; pendingEnable = nil }
-			Button("Cancel", role: .cancel) { pendingEnable = nil }
-		} message: { Text("The app will become eligible for deploy and host-recovery workflows. Verify its source, build, secrets, and health checks first.") }
+        .task { normalizeSelection() }
+        .onChange(of: visibleAppNames) { _, _ in normalizeSelection() }
+        .confirmationDialog(
+            "Enable deployment for \(pendingEnable?.spec.name ?? "this app")?",
+            isPresented: Binding(
+                get: { pendingEnable != nil },
+                set: { if !$0 { pendingEnable = nil } }
+            )
+        ) {
+            Button("Enable Deployment") {
+                if let app = pendingEnable { onEnable(app.spec.name) }
+                pendingEnable = nil
+            }
+            Button("Cancel", role: .cancel) { pendingEnable = nil }
+        } message: {
+            Text("The app will become eligible for deploy and host-recovery workflows. Verify its source, build, secrets, and health checks first.")
+        }
     }
 
-	private var drafts: [NornAppStatus] { apps.filter { $0.spec.deploy == false }.sorted { $0.spec.name < $1.spec.name } }
-	private var selectedApp: NornAppStatus? {
-		guard let selection, let service = services.first(where: { $0.id == selection }) else { return apps.first }
-		return apps.first(where: { $0.spec.name == service.app })
-	}
-
-    private func statusColor(_ status: String) -> Color {
-        switch status {
-        case "passing", "running", "up": .green
-        case "warning", "pending": .orange
-        case "critical", "failed", "down": .red
-        default: .secondary
+    @ViewBuilder
+    private var draftStrip: some View {
+        if !drafts.isEmpty {
+            HStack(spacing: 10) {
+                Label("Drafts", systemImage: "lock.shield")
+                    .fixedSize()
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(drafts) { app in
+                            HStack(spacing: 5) {
+                                Text(app.spec.name)
+                                    .font(.callout.weight(.medium))
+                                Button("Enable") { pendingEnable = app }
+                                    .buttonStyle(.link)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(.quaternary, in: Capsule())
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+                Text("Deployment off")
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+            .padding(12)
+            Divider()
         }
+    }
+
+    private var appList: some View {
+        VStack(spacing: 0) {
+            AppListHeader(sort: sort, ascending: sortAscending, onSort: applySort)
+            Divider()
+            if visibleAppNames.isEmpty {
+                ContentUnavailableView(
+                    activeOnly && searchText.isEmpty ? "No Active Apps" : "No Matching Apps",
+                    systemImage: activeOnly && searchText.isEmpty ? "bolt.slash" : "magnifyingglass",
+                    description: Text(activeOnly && searchText.isEmpty ? "Turn off Active Only to include stopped or unhealthy services." : "Try a different search or filter.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        if presentation == .grouped {
+                            ForEach(groupedApps) { group in
+                                AppGroupRow(
+                                    group: group,
+                                    isExpanded: expandedApps.contains(group.id),
+                                    isSelected: selectedAppName == group.name,
+                                    onToggle: { toggleExpansion(group.name) },
+                                    onSelect: { selectedAppName = group.name }
+                                )
+                                if expandedApps.contains(group.id) {
+                                    ForEach(group.services) { service in
+                                        AppServiceRow(
+                                            service: service,
+                                            isChild: true,
+                                            isSelected: selectedAppName == service.app,
+                                            onSelect: { selectedAppName = service.app }
+                                        )
+                                    }
+                                    .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+                                }
+                                Divider()
+                            }
+                        } else {
+                            ForEach(filteredServices) { service in
+                                AppServiceRow(
+                                    service: service,
+                                    isChild: false,
+                                    isSelected: selectedAppName == service.app,
+                                    onSelect: { selectedAppName = service.app }
+                                )
+                                Divider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("apps.list")
+    }
+
+    private var drafts: [NornAppStatus] {
+        guard !activeOnly else { return [] }
+        return apps
+            .filter { $0.spec.deploy == false }
+            .filter { searchText.isEmpty || $0.spec.name.localizedStandardContains(searchText) }
+            .sorted { $0.spec.name.localizedStandardCompare($1.spec.name) == .orderedAscending }
+    }
+
+    private var visibleAppNames: [String] {
+        switch presentation {
+        case .grouped: groupedApps.map(\.name)
+        case .flat: Array(Set(filteredServices.map(\.app))).sorted()
+        }
+    }
+
+    private var selectedApp: NornAppStatus? {
+        guard let name = selectedAppName ?? visibleAppNames.first else { return nil }
+        return apps.first { $0.spec.name == name }
+    }
+
+    private func normalizeSelection() {
+        if let selectedAppName, visibleAppNames.contains(selectedAppName) { return }
+        selectedAppName = visibleAppNames.first
+    }
+
+    private func toggleExpansion(_ app: String) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+            if expandedApps.contains(app) { expandedApps.remove(app) }
+            else { expandedApps.insert(app) }
+        }
+    }
+
+    private func applySort(_ next: AppListSort) {
+        if sort == next { sortAscending.toggle() }
+        else { sort = next; sortAscending = true }
+    }
+
+    private func matchesSearch(_ service: NornService) -> Bool {
+        service.app.localizedStandardContains(searchText)
+            || service.process.localizedStandardContains(searchText)
+            || service.name.localizedStandardContains(searchText)
+            || service.status.localizedStandardContains(searchText)
+            || service.reachability.exposure.localizedStandardContains(searchText)
+            || service.endpoints?.contains { $0.url.localizedStandardContains(searchText) } == true
+            || service.instances?.contains {
+                $0.region?.localizedStandardContains(searchText) == true
+                    || $0.nodePool?.localizedStandardContains(searchText) == true
+                    || $0.node?.localizedStandardContains(searchText) == true
+            } == true
+    }
+
+    private func isActive(_ service: NornService) -> Bool {
+        guard apps.first(where: { $0.spec.name == service.app })?.spec.deploy != false else { return false }
+        return ["passing", "running", "up", "healthy"].contains(service.status.lowercased())
+            || service.reachability.routable
+    }
+
+    private func isActive(_ app: NornAppStatus) -> Bool {
+        guard app.spec.deploy != false else { return false }
+        return app.healthy || ["running", "up", "healthy"].contains(app.nomadStatus?.lowercased() ?? "")
+    }
+
+    private func serviceOrder(_ left: NornService, _ right: NornService) -> Bool {
+        ordered(serviceSortValue(left), serviceSortValue(right), tie: left.name, right.name)
+    }
+
+    private func groupOrder(_ left: AppServiceGroup, _ right: AppServiceGroup) -> Bool {
+        ordered(groupSortValue(left), groupSortValue(right), tie: left.name, right.name)
+    }
+
+    private func ordered(_ left: String, _ right: String, tie leftTie: String, _ rightTie: String) -> Bool {
+        let result = left.localizedStandardCompare(right)
+        if result == .orderedSame {
+            let tie = leftTie.localizedStandardCompare(rightTie)
+            return sortAscending ? tie == .orderedAscending : tie == .orderedDescending
+        }
+        return sortAscending ? result == .orderedAscending : result == .orderedDescending
+    }
+
+    private func serviceSortValue(_ service: NornService) -> String {
+        switch sort {
+        case .app: service.app
+        case .process: service.process
+        case .exposure: service.reachability.exposure
+        case .status: "\(statusRank(service.status))-\(service.status)"
+        }
+    }
+
+    private func groupSortValue(_ group: AppServiceGroup) -> String {
+        switch sort {
+        case .app: group.name
+        case .process: group.processSummary
+        case .exposure: group.exposure
+        case .status: "\(statusRank(group.status))-\(group.status)"
+        }
+    }
+
+    private func statusRank(_ status: String) -> Int {
+        switch NornStatus(serviceStatus: status) {
+        case .critical: 0
+        case .attention: 1
+        case .active: 2
+        case .healthy: 3
+        case .neutral, .offline: 4
+        }
+    }
+}
+
+private enum AppListPresentation: String, CaseIterable, Identifiable {
+    case grouped
+    case flat
+    var id: String { rawValue }
+}
+
+private enum AppListSort: String {
+    case app
+    case process
+    case exposure
+    case status
+}
+
+private struct AppServiceGroup: Identifiable {
+    let name: String
+    let app: NornAppStatus?
+    let services: [NornService]
+    var id: String { name }
+
+    var processSummary: String {
+        "\(services.count) process\(services.count == 1 ? "" : "es")"
+    }
+
+    var exposure: String {
+        let exposures = Set(services.map { $0.reachability.exposure.capitalized }).sorted()
+        if exposures.isEmpty { return "—" }
+        if exposures.count == 1 { return exposures[0] }
+        return "Mixed"
+    }
+
+    var status: String {
+        if app?.healthy == false { return "critical" }
+        let states = services.map { $0.status.lowercased() }
+        if states.isEmpty {
+            if app?.healthy == true { return "passing" }
+            return app?.nomadStatus ?? "unknown"
+        }
+        if states.allSatisfy({ ["passing", "running", "up", "healthy"].contains($0) }) { return "passing" }
+        if states.contains(where: { ["critical", "failed", "down"].contains($0) }) { return "critical" }
+        if states.contains(where: { ["warning", "pending", "degraded"].contains($0) }) { return "warning" }
+        return "unknown"
+    }
+}
+
+private struct AppListHeader: View {
+    let sort: AppListSort
+    let ascending: Bool
+    let onSort: (AppListSort) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            header("App / Service", .app)
+                .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
+            header("Process", .process)
+                .frame(width: 90, alignment: .leading)
+            header("Exposure", .exposure)
+                .frame(width: 72, alignment: .leading)
+            header("Status", .status)
+                .frame(width: 90, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
+    private func header(_ title: String, _ value: AppListSort) -> some View {
+        Button { onSort(value) } label: {
+            HStack(spacing: 4) {
+                Text(title)
+                if sort == value {
+                    Image(systemName: ascending ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(sort == value ? .primary : .secondary)
+            .contentShape(Rectangle())
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("apps.sort.\(value.rawValue)")
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Sort by \(title)")
+        .accessibilityHint(sort == value ? "Sorted \(ascending ? "ascending" : "descending"); click to reverse" : "Click to sort ascending")
+    }
+}
+
+private struct AppGroupRow: View {
+    let group: AppServiceGroup
+    let isExpanded: Bool
+    let isSelected: Bool
+    let onToggle: () -> Void
+    let onSelect: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 7) {
+                Button(action: onToggle) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .frame(width: 16, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
+                .accessibilityLabel(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
+                .accessibilityIdentifier("apps.disclosure.\(group.name)")
+                Image(systemName: "square.stack.3d.up.fill")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(group.name)
+                        .fontWeight(.semibold)
+                        .lineLimit(1)
+                        .accessibilityIdentifier("apps.root.\(group.name)")
+                    Text("\(group.services.count) service\(group.services.count == 1 ? "" : "s")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
+            Text(group.processSummary)
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            Text(group.exposure)
+                .foregroundStyle(.secondary)
+                .frame(width: 72, alignment: .leading)
+            NornStatusBadge(status: NornStatus(serviceStatus: group.status), label: group.status.capitalized)
+                .frame(width: 90, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(isSelected ? Color.accentColor.opacity(0.14) : isHovered ? Color.secondary.opacity(0.06) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Inspect \(group.name)", action: onSelect)
+            Button(isExpanded ? "Collapse" : "Expand", action: onToggle)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityHint("Click to inspect; use the disclosure control to show processes")
+    }
+}
+
+private struct AppServiceRow: View {
+    let service: NornService
+    let isChild: Bool
+    let isSelected: Bool
+    let onSelect: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 8) {
+                if isChild { Color.clear.frame(width: 24) }
+                Circle()
+                    .fill(NornStatus(serviceStatus: service.status).tint)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: NornStatus(serviceStatus: service.status).tint.opacity(0.4), radius: 3)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isChild ? service.name : service.app)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+                    Text(isChild ? allocationSummary : service.name)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
+            Label(service.process, systemImage: processSymbol(service.type))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 90, alignment: .leading)
+            Text(service.reachability.exposure.capitalized)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 72, alignment: .leading)
+            Text(service.status.capitalized)
+                .foregroundStyle(NornStatus(serviceStatus: service.status).tint)
+                .lineLimit(1)
+                .frame(width: 90, alignment: .leading)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.accentColor.opacity(isChild ? 0.08 : 0.14) : isHovered ? Color.secondary.opacity(0.06) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .onHover { isHovered = $0 }
+        .contextMenu { Button("Inspect \(service.app)", action: onSelect) }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(service.app), \(service.process), \(service.status)")
+        .accessibilityIdentifier("apps.service.\(service.id)")
+    }
+
+    private var allocationSummary: String {
+        let count = service.instances?.count ?? 0
+        return count == 0 ? service.process : "\(count) allocation\(count == 1 ? "" : "s")"
     }
 
     private func processSymbol(_ type: String) -> String {

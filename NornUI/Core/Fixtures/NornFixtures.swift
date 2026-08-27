@@ -41,11 +41,13 @@ enum NornFixtures {
             service("mail-agent", process: "web", exposure: "public", status: "passing"),
             service("mail-indexer", process: "web", exposure: "public", status: "passing"),
             service("mail-mcp", process: "mcp", exposure: "private", status: "passing"),
+            service("mail-mcp", process: "worker", exposure: "private", status: "passing"),
             service("like-trove", process: "web", exposure: "private", status: "passing"),
             service("vigil-gateway", process: "web", exposure: "private", status: "passing"),
             service("contextdb", process: "web", exposure: "local", status: "unknown")
         ],
         operations: [
+            operation("app.deploy", app: "mail-mcp", status: .running, offset: -42, message: "Waiting for regional readiness"),
             operation("platform.smoke", status: .succeeded, offset: -420, message: "Platform smoke complete"),
             operation("host.assure", status: .succeeded, offset: -760, message: "Host assurance complete"),
             operation("app.deploy", app: "mail-mcp", status: .succeeded, offset: -3_200, message: "Deployment healthy")

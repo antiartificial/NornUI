@@ -99,6 +99,66 @@ final class NornUIUITests: XCTestCase {
     }
 
     @MainActor
+    func testAppsGroupingSearchActiveFilterAndSorting() throws {
+        let app = fixtureApp()
+        app.launch()
+
+        app.staticTexts["Apps"].firstMatch.click()
+
+        let mailRoot = app.descendants(matching: .any)["apps.root.mail-mcp"]
+        let disclosure = app.descendants(matching: .any)["apps.disclosure.mail-mcp"]
+        let activeOnly = app.descendants(matching: .any)["apps.active-only"]
+
+        XCTAssertTrue(mailRoot.waitForExistence(timeout: 5))
+        XCTAssertTrue(disclosure.waitForExistence(timeout: 5))
+        disclosure.click()
+        XCTAssertTrue(app.descendants(matching: .any)["apps.service.mail-mcp-mcp"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["apps.service.mail-mcp-worker"].waitForExistence(timeout: 5))
+
+        XCTAssertTrue(app.buttons["Sort by Status"].waitForExistence(timeout: 5))
+        app.buttons["Sort by Status"].click()
+        XCTAssertTrue(app.buttons["Sort by Status"].waitForExistence(timeout: 5))
+        app.buttons["Sort by Status"].click()
+
+        let contextRoot = app.descendants(matching: .any)["apps.root.contextdb"]
+        XCTAssertTrue(contextRoot.waitForExistence(timeout: 5))
+        XCTAssertTrue(activeOnly.waitForExistence(timeout: 5))
+        activeOnly.click()
+        XCTAssertFalse(contextRoot.waitForExistence(timeout: 1))
+        activeOnly.click()
+
+        let search = app.searchFields.firstMatch
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.click()
+        search.typeText("contextdb")
+        XCTAssertTrue(contextRoot.waitForExistence(timeout: 5))
+        XCTAssertFalse(mailRoot.exists)
+
+        let flatMode = app.descendants(matching: .any)["apps.presentation.flat"]
+        XCTAssertTrue(flatMode.waitForExistence(timeout: 5))
+        flatMode.click()
+        XCTAssertTrue(app.descendants(matching: .any)["apps.service.contextdb-web"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testActivityExplainsSidebarRollups() throws {
+        let app = fixtureApp()
+        app.launch()
+
+        let activity = app.descendants(matching: .any)["sidebar.activity"]
+        XCTAssertTrue(activity.waitForExistence(timeout: 5))
+        activity.click()
+
+        XCTAssertTrue(app.descendants(matching: .any)["activity.header"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["activity.summary"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["activity.in-flight"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["activity.service-health"].waitForExistence(timeout: 5))
+        let passingServices = app.descendants(matching: .any)["activity.services.passing"]
+        XCTAssertTrue(passingServices.waitForExistence(timeout: 5))
+        passingServices.click()
+    }
+
+    @MainActor
     func testLaunchPerformance() throws {
         // This measures how long it takes to launch your application.
         measure(metrics: [XCTApplicationLaunchMetric()]) {

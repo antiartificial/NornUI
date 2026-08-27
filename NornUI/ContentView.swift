@@ -64,7 +64,7 @@ struct ContentView: View {
     private var sidebar: some View {
         List(selection: $appModel.navigation) {
             Section("Control Room") {
-                ForEach(NornNavigation.allCases) { destination in
+                ForEach(NornNavigation.allCases.filter { $0 != .activity }) { destination in
                     Label(destination.title, systemImage: destination.symbol)
                         .tag(destination)
                         .accessibilityHint("Shows \(destination.title.lowercased())")
@@ -72,19 +72,20 @@ struct ContentView: View {
             }
 
             Section("Activity") {
-                LabeledContent {
-                    Text("\(appModel.snapshot.activeOperations.count)")
-                        .font(.body.monospacedDigit())
-                } label: {
-                    Label("Active", systemImage: "bolt.horizontal.circle")
+                VStack(alignment: .leading, spacing: 7) {
+                    Label("Inspect Activity", systemImage: NornNavigation.activity.symbol)
+                    HStack(spacing: 10) {
+                        Label("\(appModel.snapshot.activeOperations.count) active", systemImage: "bolt.horizontal")
+                        Label("\(appModel.snapshot.passingServices)/\(appModel.snapshot.services.count)", systemImage: "checkmark.circle")
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                 }
-
-                LabeledContent {
-                    Text("\(appModel.snapshot.passingServices)/\(appModel.snapshot.services.count)")
-                        .font(.body.monospacedDigit())
-                } label: {
-                    Label("Passing", systemImage: "checkmark.circle")
-                }
+                .padding(.vertical, 3)
+                .accessibilityElement(children: .combine)
+                .tag(NornNavigation.activity)
+                .accessibilityIdentifier("sidebar.activity")
+                .accessibilityHint("Shows the operations and services behind these totals")
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -176,6 +177,12 @@ struct ContentView: View {
             )
             .onAppear { appModel.setFleetVisible(true) }
             .onDisappear { appModel.setFleetVisible(false) }
+        case .activity:
+            ActivityFeatureView(
+                snapshot: appModel.snapshot,
+                onOpenOperation: openOperation,
+                onShowApps: { appModel.navigation = .apps }
+            )
         }
     }
 

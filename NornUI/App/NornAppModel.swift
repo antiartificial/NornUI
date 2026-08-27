@@ -194,8 +194,12 @@ final class NornAppModel {
 	}
 
     func start() async {
+        guard !isFixtureMode else {
+            connectionState = .online
+            return
+        }
         guard !profiles.isEmpty, clientFactory != nil else {
-            connectionState = isFixtureMode ? .online : .idle
+            connectionState = .idle
             return
         }
         await connect()

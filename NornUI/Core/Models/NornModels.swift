@@ -7,6 +7,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
     case fleet
     case platform
     case host
+    case activity
 
     var id: String { rawValue }
 
@@ -18,6 +19,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .fleet: "Fleet"
         case .platform: "Releases"
         case .host: "Host"
+        case .activity: "Activity"
         }
     }
 
@@ -29,6 +31,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .fleet: "server.rack"
         case .platform: "shippingbox.and.arrow.backward"
         case .host: "macmini"
+        case .activity: "bolt.horizontal.circle"
         }
     }
 }

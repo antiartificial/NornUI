@@ -9,8 +9,9 @@ to the control-plane database or expose arbitrary shell execution.
 
 The current working milestone includes:
 
-- A native `NavigationSplitView` shell with Overview, Apps, Operations,
-  Platform, Host, and Fleet surfaces.
+- A native `NavigationSplitView` shell with Overview, Apps, Activity,
+  Operations, Platform, Host, and Fleet surfaces. Activity expands the sidebar
+  pulse into in-flight receipts, recent operations, and service-health groups.
 - Multiple Norn server profiles with native device enrollment. A per-profile
   P-256 identity is protected by Secure Enclave when available, with a
   device-only Keychain fallback; issued bearer credentials remain in Keychain.
@@ -29,6 +30,8 @@ The current working milestone includes:
   manifest responses.
 - Safe app creation with deployment disabled by default, followed by an
   explicit deployment-enable action.
+- Searchable app inventory with grouped app/process/allocation disclosures,
+  an optional flat presentation, active-only filtering, and sortable columns.
 - Durable app snapshots, retention pruning, exact-snapshot restore, standalone
   schema migrations, and regional application rollback. Retry-safe intents are
   retained locally until Norn accepts the operation and returns its receipt.
