@@ -17,7 +17,6 @@ protocol NornClientProtocol: Sendable {
 	func planFleetCapacity(pool: String, request: NornFleetPlanRequest, idempotencyKey: String) async throws -> NornOperation
 	func fleetReconciliations(planID: String) async throws -> NornFleetReconciliationList
 	func fleetRunnerAttempts(planID: String) async throws -> NornFleetRunnerAttemptList
-	func advanceFleetRunnerAttempt(planID: String, attempt: NornFleetRunnerAttempt) async throws -> NornFleetRunnerAttempt
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus
 	func createFleetPullRequest(planID: String) async throws -> NornOperation
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation
@@ -25,6 +24,11 @@ protocol NornClientProtocol: Sendable {
 	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep]
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt
+	func releaseQualifications(app: String) async throws -> [NornReleaseQualification]
+	func preflightRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation
+	func deployRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation
+	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification
+	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot]
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation
     func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation
@@ -45,7 +49,6 @@ extension NornClientProtocol {
 	func fleetRunnerAttempts(planID: String) async throws -> NornFleetRunnerAttemptList {
 		.init(schemaVersion: "norn.fleet-runner-attempt/v1", planID: planID, attempts: [], count: 0, serverTime: .now)
 	}
-	func advanceFleetRunnerAttempt(planID: String, attempt: NornFleetRunnerAttempt) async throws -> NornFleetRunnerAttempt { throw NornClientError.invalidResponse }
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus { .unconfigured }
 	func createFleetPullRequest(planID: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation { throw NornClientError.invalidResponse }
@@ -53,6 +56,11 @@ extension NornClientProtocol {
 	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] { [] }
 	func createApp(_ request: NornCreateAppRequest) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt { throw NornClientError.invalidResponse }
+	func releaseQualifications(app: String) async throws -> [NornReleaseQualification] { [] }
+	func preflightRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
+	func deployRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
+	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification { throw NornClientError.invalidResponse }
+	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 }

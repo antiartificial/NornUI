@@ -12,14 +12,12 @@ struct FleetFeatureView: View {
     let deploymentVisibilitySupported: Bool
     let isSupported: Bool
     let canPlan: Bool
-    let canOperateFleet: Bool
     let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     let onPlan: (String, Int, String, String) async -> Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
-	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
@@ -129,6 +127,12 @@ struct FleetFeatureView: View {
                 Label(githubStatus.connected ? "GitHub connected" : githubStatus.configured ? "GitHub needs attention" : "GitHub not configured", systemImage: githubStatus.connected ? "link.circle.fill" : "link.badge.plus")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(githubStatus.connected ? .green : .secondary)
+                if let environment = githubStatus.environment {
+                    Text("Fleet dispatch: \(environment)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Fleet GitHub dispatch environment \(environment)")
+                }
             }
         }
         .padding(18)
@@ -208,10 +212,8 @@ struct FleetFeatureView: View {
                             operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
                             canUseGitHub: canPlan && githubStatus.connected,
-                            canOperateFleet: canOperateFleet,
                             onOpenReview: onOpenReview,
                             onDispatchApply: onDispatchApply,
-							onAdvanceRunner: onAdvanceRunner,
 							onOpenOperation: onOpenOperation
                         )
                     }
@@ -376,10 +378,8 @@ private struct FleetPlanJourney: View {
     let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
-    let canOperateFleet: Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
-	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
@@ -409,12 +409,6 @@ private struct FleetPlanJourney: View {
     }
     private var mayDispatchApply: Bool {
         canUseGitHub && reviewOperation != nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
-    }
-    private var currentCheckpoint: NornFleetCheckpoint? {
-        progress.checkpoints.first { $0.state == .failed } ?? progress.checkpoints.first { $0.state == .active } ?? progress.checkpoints.first { $0.state == .pending }
-    }
-    private var mayAdvanceRunner: Bool {
-        runnerAttempt?.status.isActive == true && currentCheckpoint?.runnerAttempt?.id == runnerAttempt?.id && currentCheckpoint?.operation?.status == .succeeded && canOperateFleet
     }
     private var safeRunnerURL: URL? {
         safeFleetRunnerURL(runnerAttempt?.workflowURL?.absoluteString)
@@ -461,12 +455,7 @@ private struct FleetPlanJourney: View {
                     } else if let workflowURL {
                         Link(destination: workflowURL) { Label("View Protected Runner", systemImage: "arrow.up.right.square") }
                     }
-					if mayAdvanceRunner, let runnerAttempt {
-						Button("Advance Proven Phase", systemImage: "checkmark.arrow.trianglehead.counterclockwise") { runAdvance(runnerAttempt) }
-							.buttonStyle(.borderedProminent)
-							.disabled(isWorking)
-							.help("Advance only after Norn has durable successful evidence for this attempt and phase")
-					} else if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
+					if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
 						Link(destination: safeRunnerURL) { Label("Retry in Protected Runner", systemImage: "arrow.clockwise.circle") }
 					} else if let safeRunnerURL, runnerAttempt?.status.isActive == true {
 						Link(destination: safeRunnerURL) { Label("View Active Runner", systemImage: "arrow.up.right.square") }
@@ -480,8 +469,8 @@ private struct FleetPlanJourney: View {
                 } else if progress.state == .blocked {
                     Text("A failed or abandoned attempt blocks later phases. Retry launches in the protected runner, which registers the next numbered attempt without moving provider credentials into Norn.")
                         .font(.caption).foregroundStyle(.orange)
-                } else if runnerAttempt?.status.isActive == true && !canOperateFleet {
-                    Text("This principal can observe runner liveness but lacks fleet:operate permission to advance proven phases.")
+                } else if runnerAttempt?.status.isActive == true {
+                    Text("Runner phases advance only from protected workflow evidence.")
 						.font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -544,15 +533,6 @@ private struct FleetPlanJourney: View {
         }
     }
 
-    private func runAdvance(_ attempt: NornFleetRunnerAttempt) {
-        guard !isWorking else { return }
-        isWorking = true
-        Task {
-            _ = await onAdvanceRunner(plan.id, attempt)
-            isWorking = false
-        }
-    }
-
     private func runnerMessage(_ attempt: NornFleetRunnerAttempt, operation: NornOperation?) -> String {
         switch attempt.status {
         case .abandoned: return "Attempt \(attempt.attempt) stopped heartbeating and was durably marked abandoned."
@@ -603,14 +583,12 @@ private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
             deploymentVisibilitySupported: true,
             isSupported: true,
             canPlan: true,
-            canOperateFleet: true,
             isStale: false,
             isRefreshing: false,
             onRefresh: {},
             onPlan: { _, _, _, _ in true },
             onOpenReview: { _ in nil },
             onDispatchApply: { _, _ in nil },
-			onAdvanceRunner: { _, _ in true },
 			onOpenOperation: { _ in }
         )
     }

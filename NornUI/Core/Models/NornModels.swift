@@ -3,6 +3,7 @@ import Foundation
 nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Sendable {
     case overview
     case apps
+    case delivery
     case operations
     case fleet
     case platform
@@ -15,6 +16,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         switch self {
         case .overview: "Overview"
         case .apps: "Apps"
+        case .delivery: "Delivery"
         case .operations: "Operations"
         case .fleet: "Fleet"
         case .platform: "Releases"
@@ -27,6 +29,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         switch self {
         case .overview: "sparkles.rectangle.stack"
         case .apps: "square.stack.3d.up"
+        case .delivery: "arrow.triangle.branch"
         case .operations: "waveform.path.ecg.rectangle"
         case .fleet: "server.rack"
         case .platform: "shippingbox.and.arrow.backward"
@@ -115,6 +118,10 @@ nonisolated struct NornIssuedToken: Decodable, Sendable {
 }
 
 nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
+    struct Environment: Codable, Hashable, Sendable {
+        var id: String
+        var profile: String
+    }
     struct Authentication: Codable, Hashable, Sendable {
         struct Principal: Codable, Hashable, Sendable {
             var authenticated: Bool
@@ -141,6 +148,7 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     var features: [String]
     var auth: Authentication
     var endpoints: [String: String]
+    var environment: Environment? = nil
 
     /// Host metrics are optional so older control planes continue to work without
     /// presenting a connection failure in the Host view.
@@ -189,6 +197,141 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("versioned-deployment-history-v1") &&
         endpoints["deployments"] != nil && endpoints["deploymentSteps"] != nil
     }
+
+    var supportsReleasePipeline: Bool {
+        ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"].allSatisfy(features.contains)
+    }
+
+    var environmentID: String { environment?.id ?? "development" }
+    var environmentProfile: String { environment?.profile ?? "development" }
+}
+
+/// Immutable staging evidence passed unchanged to a production control plane.
+/// The server, rather than the desktop client, verifies this receipt.
+nonisolated struct NornReleaseQualification: Codable, Hashable, Sendable, Identifiable {
+    var schemaVersion: String
+    var id: String
+    var deploymentID: String
+    var app: String
+    var sourceSHA: String
+    var artifact: String
+    var environment: String
+    var issuedAt: String
+    var expiresAt: String
+    var keyID: String
+    var signature: String
+    var candidate: NornReleaseCandidate
+    var dsse: NornDSSEEnvelope
+
+    var expiryDate: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
+    }
+    var isExpired: Bool { expiryDate.map { $0 < .now } ?? true }
+    var isV2Signed: Bool {
+        schemaVersion == "norn.release-qualification/v2" &&
+        !candidate.signerWorkflowRef.isEmpty &&
+        candidate.signerWorkflowRef.hasSuffix("@\(candidate.signerWorkflowSHA)") &&
+        !candidate.signerWorkflowSHA.isEmpty &&
+        dsse.payloadType == "application/vnd.norn.release-qualification.v2+json" &&
+        dsse.signatures.count == 1 &&
+        dsse.signatures.first?.keyID == keyID && dsse.signatures.first?.sig == signature
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, app, artifact, environment, issuedAt, expiresAt, signature, candidate, dsse
+        case deploymentID = "deploymentId"
+        case sourceSHA = "sourceSha"
+        case keyID = "keyId"
+    }
+}
+
+nonisolated struct NornReleaseCandidate: Codable, Hashable, Sendable {
+    var provider: String
+    var repository: String
+    var repositoryID: String
+    var ownerID: String
+    /// Server-derived GitHub visibility. It is part of the signed candidate
+    /// identity and must survive decode/re-encode of DSSE-backed evidence.
+    var repositoryVisibility: String?
+    var runID: String
+    var runAttempt: String?
+    var workflowRef: String
+    var workflowSHA: String
+    var signerWorkflowRef: String
+    var signerWorkflowSHA: String
+    var ref: String
+    var attestation: NornReleaseAttestation
+
+    enum CodingKeys: String, CodingKey {
+        case provider, repository, repositoryVisibility, ref, attestation
+        case repositoryID = "repositoryId"
+        case ownerID = "ownerId"
+        case runID = "runId"
+        case runAttempt
+        case workflowRef
+        case workflowSHA = "workflowSha"
+        case signerWorkflowRef
+        case signerWorkflowSHA = "signerWorkflowSha"
+    }
+}
+
+nonisolated struct NornReleaseAttestation: Codable, Hashable, Sendable {
+    /// The server selects this from its independently verified GitHub OIDC identity.
+    var mode: String? = nil
+    /// Display-only server verifier identity. Never a credential, token, or installation ID.
+    var verifier: String? = nil
+    var verifierIdentity: String? = nil
+    var issuer: String
+    var subjectDigest: String
+    var materialSHA: String
+    var provenanceURI: String?
+    var sbomURI: String?
+
+    var displayVerifier: String { verifier ?? verifierIdentity ?? "Not reported" }
+    var displayMode: String { mode ?? "Not reported" }
+
+    enum CodingKeys: String, CodingKey {
+        case mode, verifier, verifierIdentity, issuer, subjectDigest
+        case materialSHA = "materialSha"
+        case provenanceURI = "provenanceUri"
+        case sbomURI = "sbomUri"
+    }
+}
+
+nonisolated struct NornDSSEEnvelope: Codable, Hashable, Sendable {
+    var payloadType: String
+    var payload: String
+    var signatures: [NornDSSESignature]
+}
+
+nonisolated struct NornDSSESignature: Codable, Hashable, Sendable {
+    var keyID: String
+    var sig: String
+
+    enum CodingKeys: String, CodingKey { case sig; case keyID = "keyid" }
+}
+
+nonisolated struct NornReleaseQualificationList: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var qualifications: [NornReleaseQualification]
+    var count: Int
+}
+
+nonisolated struct NornReleaseActionRequest: Codable, Hashable, Sendable {
+    var sourceSHA: String
+    var artifact: String?
+
+    enum CodingKeys: String, CodingKey { case artifact; case sourceSHA = "sourceSha" }
+}
+
+nonisolated struct NornReleasePromotionRequest: Codable, Hashable, Sendable {
+    var qualification: NornReleaseQualification
+    var sourceSHA: String
+    var artifact: String
+
+    enum CodingKeys: String, CodingKey { case qualification, artifact; case sourceSHA = "sourceSha" }
 }
 
 nonisolated struct NornFleetNodePool: Codable, Hashable, Sendable {
@@ -277,6 +420,7 @@ nonisolated struct NornFleetGitHubStatus: Codable, Hashable, Sendable {
     var connected: Bool
     var repository: String?
     var installationID: Int64?
+    var environment: String?
     var defaultBranch: String?
     var configPath: String?
     var planWorkflow: String?
@@ -284,7 +428,7 @@ nonisolated struct NornFleetGitHubStatus: Codable, Hashable, Sendable {
     var message: String?
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, configured, connected, repository, defaultBranch, configPath, planWorkflow, applyWorkflow, message
+        case schemaVersion, configured, connected, repository, environment, defaultBranch, configPath, planWorkflow, applyWorkflow, message
         case installationID = "installationId"
     }
 
@@ -491,6 +635,7 @@ nonisolated struct NornFleetCheckpoint: Identifiable, Hashable, Sendable {
 /// that a protected workflow is running merely because it was dispatched.
 nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
     static let orderedPhases = [
+        "prechange_verified", "provider_applying",
         "infrastructure_applied", "inventory_generated", "nodes_configured",
         "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
     ]

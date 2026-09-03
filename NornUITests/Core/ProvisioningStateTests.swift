@@ -20,7 +20,7 @@ final class ProvisioningStateTests: XCTestCase {
 
         XCTAssertEqual(progress.state, .blocked)
         XCTAssertEqual(progress.checkpoints.map(\.state), [
-            .completed, .completed, .failed, .blocked, .blocked, .blocked, .blocked
+            .pending, .pending, .completed, .completed, .failed, .blocked, .blocked, .blocked, .blocked
         ])
     }
 
@@ -40,8 +40,8 @@ final class ProvisioningStateTests: XCTestCase {
 
         XCTAssertEqual(progress.state, .active)
         XCTAssertFalse(progress.checkpoints.contains { $0.phase == "old_nodes_drained" })
-        XCTAssertEqual(progress.checkpoints.first?.state, .active)
-        XCTAssertEqual(progress.checkpoints.dropFirst().first?.state, .pending)
+        XCTAssertEqual(progress.checkpoints.first?.state, .pending)
+        XCTAssertEqual(progress.checkpoints.first { $0.phase == "infrastructure_applied" }?.state, .active)
     }
 
     func testSuccessfulDispatchReceiptDoesNotMakeMissingPhaseActive() {
