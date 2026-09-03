@@ -166,6 +166,7 @@ struct ContentView: View {
                 deployments: appModel.deployments,
                 deploymentSteps: appModel.deploymentSteps,
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
+                environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canPerformOperations,
                 isStale: !appModel.isFixtureMode && appModel.connectionState != .online,

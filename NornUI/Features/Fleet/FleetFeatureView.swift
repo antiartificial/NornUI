@@ -10,6 +10,7 @@ struct FleetFeatureView: View {
     let deployments: [NornDeployment]
     let deploymentSteps: [String: [NornDeploymentStep]]
     let deploymentVisibilitySupported: Bool
+    let environmentID: String
     let isSupported: Bool
     let canPlan: Bool
     let isStale: Bool
@@ -31,7 +32,13 @@ struct FleetFeatureView: View {
 
     var body: some View {
         Group {
-            if !isSupported {
+            if !isSupported && !ReleasePipelineFeaturePolicy.requiresManagedFleet(in: environmentID) {
+                ContentUnavailableView(
+                    "Fleet not needed for local development",
+                    systemImage: "macmini",
+                    description: Text("This development control plane can run without Fleet. Configure separate managed staging and production fleets when workloads enter the release pipeline.")
+                )
+            } else if !isSupported {
                 ContentUnavailableView(
                     "Fleet Unavailable",
                     systemImage: "server.rack",
@@ -132,6 +139,12 @@ struct FleetFeatureView: View {
                         .font(.caption.monospaced())
                         .foregroundStyle(.secondary)
                         .accessibilityLabel("Fleet GitHub dispatch environment \(environment)")
+                }
+                if let repository = inventory.document?.metadata?.repository {
+                    Text("GitHub owner: \(repository.split(separator: "/", maxSplits: 1).first.map(String.init) ?? repository)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .help("The owner may be a personal GitHub account or an organization. Norn authorizes its exact numeric identity.")
                 }
             }
         }
@@ -581,6 +594,7 @@ private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
             deployments: NornFixtures.deployments,
             deploymentSteps: NornFixtures.deploymentSteps,
             deploymentVisibilitySupported: true,
+            environmentID: "production",
             isSupported: true,
             canPlan: true,
             isStale: false,

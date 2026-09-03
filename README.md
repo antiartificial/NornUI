@@ -26,6 +26,10 @@ The current working milestone includes:
   exact artifact SHA for provenance and rollback.
 - Fleet inventory, node-pool capacity planning, reconciliation checkpoints,
   GitHub review creation, and protected apply dispatch.
+- A read-only delivery desk that treats local development as a direct lane and
+  requires Fleet plus signed release evidence only for managed staging and
+  production. Ordinary private repositories use `norn-signed-private`; GitHub
+  Enterprise private attestations remain an optional backend.
 - A responsive provisioning view with explicit fleet checkpoint states,
   current platform/deployment execution, and an observed ingress-to-allocation
   topology assembled from Norn's fleet, deployment, health, and service

@@ -372,7 +372,7 @@ final class NornClientTests: XCTestCase {
         NornURLProtocol.setHandler { request in
             recorder.record(request, body: NornURLProtocol.body(of: request))
             return Self.response(request, status: 200, body: """
-            {"schemaVersion":"norn.release-qualifications/v2","count":1,"qualifications":[{"schemaVersion":"norn.release-qualification/v2","id":"qualification-1","app":"api","environment":"staging","deploymentId":"deploy-1","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifact":"registry.example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","issuedAt":"2026-08-31T14:00:00Z","expiresAt":"2026-12-01T14:00:00Z","keyId":"staging-2026","signature":"signed-receipt","candidate":{"provider":"github-actions","repository":"acme/api","repositoryId":"1","ownerId":"2","repositoryVisibility":"private","runId":"3","workflowRef":"acme/api/.github/workflows/caller.yml@cccccccccccccccccccccccccccccccccccccccc","workflowSha":"cccccccccccccccccccccccccccccccccccccccc","signerWorkflowRef":"acme/norn/.github/workflows/release.yml@dddddddddddddddddddddddddddddddddddddddd","signerWorkflowSha":"dddddddddddddddddddddddddddddddddddddddd","ref":"refs/heads/main","attestation":{"mode":"github-private","verifier":"Norn Pilot Release Verifier","issuer":"https://token.actions.githubusercontent.com","subjectDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","materialSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"dsse":{"payloadType":"application/vnd.norn.release-qualification.v2+json","payload":"payload","signatures":[{"keyid":"staging-2026","sig":"signed-receipt"}]}}]}
+            {"schemaVersion":"norn.release-qualifications/v2","count":1,"qualifications":[{"schemaVersion":"norn.release-qualification/v2","id":"qualification-1","app":"api","environment":"staging","deploymentId":"deploy-1","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifact":"registry.example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","issuedAt":"2026-08-31T14:00:00Z","expiresAt":"2026-12-01T14:00:00Z","keyId":"staging-2026","signature":"signed-receipt","candidate":{"provider":"github-actions","repository":"acme/api","repositoryId":"1","ownerId":"2","repositoryVisibility":"private","runId":"3","workflowRef":"acme/api/.github/workflows/caller.yml@cccccccccccccccccccccccccccccccccccccccc","workflowSha":"cccccccccccccccccccccccccccccccccccccccc","signerWorkflowRef":"acme/norn/.github/workflows/release.yml@dddddddddddddddddddddddddddddddddddddddd","signerWorkflowSha":"dddddddddddddddddddddddddddddddddddddddd","ref":"refs/heads/main","attestation":{"mode":"github-private","verifier":"GitHub private attestation verifier","issuer":"https://token.actions.githubusercontent.com","subjectDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","materialSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"dsse":{"payloadType":"application/vnd.norn.release-qualification.v2+json","payload":"payload","signatures":[{"keyid":"staging-2026","sig":"signed-receipt"}]}}]}
             """)
         }
 
@@ -380,13 +380,42 @@ final class NornClientTests: XCTestCase {
 
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/api/qualifications")
         XCTAssertEqual(qualification?.candidate.repositoryVisibility, "private")
-        XCTAssertEqual(qualification?.candidate.attestation.displayMode, "github-private")
-        XCTAssertEqual(qualification?.candidate.attestation.displayVerifier, "Norn Pilot Release Verifier")
+        XCTAssertEqual(qualification?.candidate.attestation.displayMode, "GitHub Enterprise private")
+        XCTAssertEqual(qualification?.candidate.attestation.displayVerifier, "GitHub private attestation verifier")
         let encoded = try XCTUnwrap(try JSONEncoder().encode(qualification))
         let roundTrip = try JSONDecoder().decode(NornReleaseQualification.self, from: encoded)
         XCTAssertEqual(roundTrip.candidate.repositoryVisibility, "private")
         XCTAssertEqual(roundTrip.candidate.attestation.mode, "github-private")
-        XCTAssertEqual(roundTrip.candidate.attestation.verifier, "Norn Pilot Release Verifier")
+        XCTAssertEqual(roundTrip.candidate.attestation.verifier, "GitHub private attestation verifier")
+        XCTAssertNil(roundTrip.candidate.attestation.bundle)
+    }
+
+    func testReleaseQualificationDecodesAndRoundTripsNornSignedPrivateEvidence() async throws {
+        NornURLProtocol.setHandler { request in
+            Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.release-qualifications/v2","count":1,"qualifications":[{"schemaVersion":"norn.release-qualification/v2","id":"qualification-private-1","app":"api","environment":"staging","deploymentId":"deploy-private-1","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifact":"registry.example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","issuedAt":"2026-08-31T14:00:00Z","expiresAt":"2026-12-01T14:00:00Z","keyId":"norn-private-2026","signature":"signed-receipt","candidate":{"provider":"github-actions","repository":"personal-user/api","repositoryId":"101","ownerId":"202","repositoryVisibility":"private","runId":"303","workflowRef":"personal-user/api/.github/workflows/caller.yml@cccccccccccccccccccccccccccccccccccccccc","workflowSha":"cccccccccccccccccccccccccccccccccccccccc","signerWorkflowRef":"personal-user/norn/.github/workflows/release.yml@dddddddddddddddddddddddddddddddddddddddd","signerWorkflowSha":"dddddddddddddddddddddddddddddddddddddddd","ref":"refs/heads/main","attestation":{"mode":"norn-signed-private","verifier":"Norn private DSSE","issuer":"https://token.actions.githubusercontent.com","subjectDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","materialSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","bundle":{"schemaVersion":"norn.private-release-attestation/v1","keyId":"sha256:private-key","provenance":{"payloadType":"application/vnd.in-toto+json","payload":"provenance-payload","signatures":[{"keyid":"sha256:private-key","sig":"provenance-signature"}]},"sbom":{"payloadType":"application/vnd.in-toto+json","payload":"sbom-payload","signatures":[{"keyid":"sha256:private-key","sig":"sbom-signature"}]}}}},"dsse":{"payloadType":"application/vnd.norn.release-qualification.v2+json","payload":"payload","signatures":[{"keyid":"norn-private-2026","sig":"signed-receipt"}]}}]}
+            """)
+        }
+
+        let qualifications = try await makeClient().releaseQualifications(app: "api")
+        let qualification = try XCTUnwrap(qualifications.first)
+        XCTAssertEqual(qualification.candidate.repository, "personal-user/api")
+        XCTAssertEqual(qualification.candidate.ownerID, "202")
+        XCTAssertEqual(qualification.candidate.repositoryID, "101")
+        XCTAssertEqual(qualification.candidate.attestation.mode, "norn-signed-private")
+        XCTAssertEqual(qualification.candidate.attestation.displayMode, "Norn-signed private")
+        XCTAssertEqual(qualification.candidate.attestation.displayVerifier, "Norn private DSSE")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.schemaVersion, "norn.private-release-attestation/v1")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.keyID, "sha256:private-key")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.provenance.payload, "provenance-payload")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.provenance.signatures.first?.keyID, "sha256:private-key")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.sbom.payload, "sbom-payload")
+        XCTAssertEqual(qualification.candidate.attestation.bundle?.sbom.signatures.first?.sig, "sbom-signature")
+
+        let encoded = try JSONEncoder().encode(qualification)
+        let roundTrip = try JSONDecoder().decode(NornReleaseQualification.self, from: encoded)
+        XCTAssertEqual(roundTrip.candidate.attestation.mode, "norn-signed-private")
+        XCTAssertEqual(roundTrip.candidate.attestation.bundle, qualification.candidate.attestation.bundle)
     }
 
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {
