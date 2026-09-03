@@ -288,15 +288,38 @@ nonisolated struct NornReleaseAttestation: Codable, Hashable, Sendable {
     var materialSHA: String
     var provenanceURI: String?
     var sbomURI: String?
+    /// Portable, server-signed provenance and SPDX statements used by the
+    /// ordinary-private repository trust path. GitHub-backed adapters omit it.
+    var bundle: NornReleaseAttestationBundle?
 
     var displayVerifier: String { verifier ?? verifierIdentity ?? "Not reported" }
-    var displayMode: String { mode ?? "Not reported" }
+    var displayMode: String {
+        switch mode {
+        case "norn-signed-private": "Norn-signed private"
+        case "github-private": "GitHub Enterprise private"
+        case "github-public": "GitHub public"
+        case let value?: value
+        case nil: "Not reported"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
-        case mode, verifier, verifierIdentity, issuer, subjectDigest
+        case mode, verifier, verifierIdentity, issuer, subjectDigest, bundle
         case materialSHA = "materialSha"
         case provenanceURI = "provenanceUri"
         case sbomURI = "sbomUri"
+    }
+}
+
+nonisolated struct NornReleaseAttestationBundle: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var keyID: String
+    var provenance: NornDSSEEnvelope
+    var sbom: NornDSSEEnvelope
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, provenance, sbom
+        case keyID = "keyId"
     }
 }
 

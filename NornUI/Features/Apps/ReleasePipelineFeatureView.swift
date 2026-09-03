@@ -5,7 +5,14 @@ import SwiftUI
 /// this policy explicit makes both staging and production presentation
 /// read-only, even when a server profile otherwise has operator credentials.
 enum ReleasePipelineFeaturePolicy {
+    static let productionGateLabel = "Protected tag + Norn gate"
     static func permitsManualMutation(in _: String) -> Bool { false }
+    static func requiresManagedFleet(in environment: String) -> Bool {
+        environment == "staging" || environment == "production"
+    }
+    static func requiresSignedReleaseEvidence(in environment: String) -> Bool {
+        requiresManagedFleet(in: environment)
+    }
 }
 
 /// A read-only application release desk. Protected GitHub workflows own all
@@ -26,13 +33,17 @@ struct ReleasePipelineFeatureView: View {
 
     private var isStaging: Bool { environmentID == "staging" }
     private var isProduction: Bool { environmentID == "production" }
+    private var isManagedFleet: Bool { ReleasePipelineFeaturePolicy.requiresManagedFleet(in: environmentID) }
     private var selectedApp: String { appName.isEmpty ? apps.first?.spec.name ?? "" : appName }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
-                if !isSupported {
+                if !isManagedFleet {
+                    environmentCard
+                    localDevelopmentLane
+                } else if !isSupported {
                     ContentUnavailableView("Release pipeline unavailable", systemImage: "lock.shield", description: Text("This server has not advertised release provenance, qualifications, and promotions."))
                         .frame(maxWidth: .infinity, minHeight: 260)
                 } else {
@@ -72,20 +83,33 @@ struct ReleasePipelineFeatureView: View {
         Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 8) {
             GridRow { Text("Environment").foregroundStyle(.secondary); Text(environmentID).font(.body.monospaced()).textSelection(.enabled) }
             GridRow { Text("Policy profile").foregroundStyle(.secondary); Text(environmentProfile).font(.body.monospaced()).textSelection(.enabled) }
+            GridRow { Text("Delivery scope").foregroundStyle(.secondary); Text(isManagedFleet ? "Managed Fleet" : "Local development") }
         }
         .font(.subheadline)
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Release environment \(environmentID), policy profile \(environmentProfile)")
+        .accessibilityLabel("Release environment \(environmentID), policy profile \(environmentProfile), \(isManagedFleet ? "managed Fleet" : "local development")")
+    }
+
+    private var localDevelopmentLane: some View {
+        ContentUnavailableView(
+            "Local development lane",
+            systemImage: "macmini",
+            description: Text("Fleet and signed private-release evidence are not required on this development control plane. They become mandatory when this workload enters managed staging or production.")
+        )
+        .frame(maxWidth: .infinity, minHeight: 180)
+        .padding(18)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityLabel("Local development lane. Fleet and signed private release evidence are required only in managed staging and production.")
     }
 
     private var ciStagingLane: some View {
         ContentUnavailableView(
             "CI-owned staging lane",
             systemImage: "lock.shield",
-            description: Text("A protected merge workflow owns staging submission and qualification. This view is read-only: monitor CI and inspect its durable evidence here.")
+            description: Text("A protected merge workflow owns staging submission and qualification. Its configured signing backend may be Norn-controlled, KMS-backed, or the optional GitHub Enterprise adapter.")
         )
         .frame(maxWidth: .infinity, minHeight: 160)
         .padding(18)
@@ -95,15 +119,15 @@ struct ReleasePipelineFeatureView: View {
 
     private var productionGate: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Label("GitHub-governed production lane", systemImage: "exclamationmark.shield.fill").font(.headline).foregroundStyle(.red); Spacer(); Text("GitHub approval required").font(.caption.weight(.semibold)).foregroundStyle(.red) }
-            Text("This view is read-only for production promotion. Norn accepts the exact staged source and artifact only from the protected GitHub release workflow.").font(.subheadline).foregroundStyle(.secondary)
+            HStack { Label("GitHub-governed production lane", systemImage: "exclamationmark.shield.fill").font(.headline).foregroundStyle(.red); Spacer(); Text(ReleasePipelineFeaturePolicy.productionGateLabel).font(.caption.weight(.semibold)).foregroundStyle(.red) }
+            Text("This view is read-only for production promotion. Norn accepts the exact staged source, artifact, and signed qualification only from the protected GitHub release workflow.").font(.subheadline).foregroundStyle(.secondary)
             Picker("Application", selection: $appName) {
                 ForEach(apps, id: \.id) { Text($0.spec.name).tag($0.spec.name) }
             }
             .frame(maxWidth: 320, alignment: .leading)
-            Text("To promote, create a protected v* tag at the qualified commit. GitHub Environment approval runs the reusable production workflow, which transports the signed staging receipt to Norn.")
+            Text("To promote, create a protected v* tag at the qualified commit. The reusable production workflow transports the signed staging receipt to Norn, which independently verifies qualification and promotion policy.")
                 .font(.caption).foregroundStyle(.secondary)
-            Text("Use the evidence below to review the source SHA, artifact digest, and signer. Follow the GitHub Actions run for approval and promotion status; NornUI never pastes evidence or queues production work.")
+            Text("Use the evidence below to review the source SHA, artifact digest, and signer. GitHub Environment reviewers may add a separate approval when the repository plan supports them; they are not assumed for a personal private repository.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(18)
@@ -129,9 +153,21 @@ struct ReleasePipelineFeatureView: View {
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 6) {
                 GridRow { Text("Source").foregroundStyle(.secondary); Text(qualification.sourceSHA).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle) }
                 GridRow { Text("Artifact").foregroundStyle(.secondary); Text(qualification.artifact).font(.caption.monospaced()).textSelection(.enabled).lineLimit(1).truncationMode(.middle) }
-                GridRow { Text("Attestation mode").foregroundStyle(.secondary); Text(qualification.candidate.attestation.displayMode).font(.caption.monospaced()).textSelection(.enabled) }
+                GridRow { Text("GitHub repository").foregroundStyle(.secondary); Text(qualification.candidate.repository).font(.caption.monospaced()).textSelection(.enabled) }
+                GridRow { Text("Owner / repository IDs").foregroundStyle(.secondary); Text("\(qualification.candidate.ownerID) / \(qualification.candidate.repositoryID)").font(.caption.monospaced()).textSelection(.enabled) }
+                GridRow {
+                    Text("Signing backend").foregroundStyle(.secondary)
+                    Text(qualification.candidate.attestation.displayMode)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .help("Backend identifier: \(qualification.candidate.attestation.mode ?? "not reported")")
+                }
                 GridRow { Text("Verifier").foregroundStyle(.secondary); Text(qualification.candidate.attestation.displayVerifier).font(.caption.monospaced()).textSelection(.enabled) }
-                GridRow { Text("Signer").foregroundStyle(.secondary); Text(qualification.keyID).font(.caption.monospaced()).textSelection(.enabled) }
+                if qualification.candidate.attestation.mode == "norn-signed-private",
+                   let privateSigner = qualification.candidate.attestation.bundle?.keyID {
+                    GridRow { Text("Private evidence signer").foregroundStyle(.secondary); Text(privateSigner).font(.caption.monospaced()).textSelection(.enabled) }
+                }
+                GridRow { Text("Qualification signer").foregroundStyle(.secondary); Text(qualification.keyID).font(.caption.monospaced()).textSelection(.enabled) }
                 GridRow { Text("Expires").foregroundStyle(.secondary); Text(qualification.expiryDate?.formatted(date: .abbreviated, time: .shortened) ?? qualification.expiresAt) }
             }
         }
