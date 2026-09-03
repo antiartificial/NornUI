@@ -109,7 +109,7 @@ struct ContentView: View {
                 onShowReleases: { appModel.navigation = .platform },
                 onShowHost: { appModel.navigation = .host }
             )
-        case .apps:
+		case .apps:
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
@@ -121,7 +121,17 @@ struct ContentView: View {
 				onQueueOperation: { await appModel.queueAppOperation($0) },
 				onOpenOperation: openOperation
 			)
-        case .operations:
+		case .delivery:
+			ReleasePipelineFeatureView(
+				apps: appModel.snapshot.apps,
+				deployments: appModel.deployments,
+				environmentID: appModel.environmentID,
+				environmentProfile: appModel.environmentProfile,
+				isSupported: appModel.releasePipelineSupported,
+				isConnected: appModel.canPerformOperations,
+				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
+			)
+		case .operations:
             OperationsFeatureView(
                 snapshot: appModel.snapshot,
                 onRefresh: refresh,
@@ -158,7 +168,6 @@ struct ContentView: View {
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canPerformOperations,
-                canOperateFleet: appModel.canOperateFleet,
                 isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
@@ -172,7 +181,6 @@ struct ContentView: View {
                 },
                 onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
                 onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
-				onAdvanceRunner: { await appModel.advanceFleetRunnerAttempt(planID: $0, attempt: $1) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }

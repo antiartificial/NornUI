@@ -76,6 +76,26 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(status.services["nomad"], "up")
     }
 
+    func testAppsDecodeWorkloadIntentAndAllocationSummary() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            [{"spec":{"name":"jobs","deploy":true,"processes":{"daily":{"schedule":"17 3 * * *"},"invoke":{"function":{"timeout":"30s"}},"web":{"scaling":{"min":0}}}},"nomadStatus":"running","healthy":false,"allocations":[],"allocationSummary":{"running":0,"active":0,"retained":0,"total":0,"byProcess":{}}}]
+            """)
+        }
+
+        let apps = try await makeClient().apps()
+        let app = try XCTUnwrap(apps.first)
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps")
+        XCTAssertEqual(app.spec.processes?["daily"]?.schedule, "17 3 * * *")
+        XCTAssertNotNil(app.spec.processes?["invoke"]?.function)
+        XCTAssertEqual(app.spec.processes?["web"]?.scaling?.min, 0)
+        XCTAssertEqual(app.allocationSummary?.active, 0)
+        XCTAssertEqual(app.allocationSummary?.byProcess, [:])
+    }
+
     func testReleasesPreferVersionedRoute() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
@@ -104,6 +124,28 @@ final class NornClientTests: XCTestCase {
 
         XCTAssertEqual(releases.releases.first?.displayVersion, "v2.21.0-platform-2-gbbbbbbb")
         XCTAssertEqual(releases.releases.first?.displayLabel(in: releases.releases), "v2.21.0-platform-2-gbbbbbbb")
+    }
+
+    func testReleasesCollapseDuplicateArtifactReceiptsAndSortNewestFirst() async throws {
+        NornURLProtocol.setHandler { request in
+            Self.response(request, status: 200, body: """
+            {"current":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","releases":[
+              {"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"platform-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","createdAt":"2026-08-26T19:02:00Z","path":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current":false},
+              {"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","version":"v2.20.0-platform","createdAt":"2026-08-26T18:00:00Z","path":"/releases/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","current":false},
+              {"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","version":"v2.21.0-platform-1-gaaaaaaa","createdAt":"2026-08-26T19:00:00Z","path":"/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","current":true}
+            ]}
+            """)
+        }
+
+        let releases = try await makeClient().releases().releases
+
+        XCTAssertEqual(releases.map(\.sha), [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ])
+        XCTAssertTrue(releases[0].current)
+        XCTAssertEqual(releases[0].version, "v2.21.0-platform-1-gaaaaaaa")
+        XCTAssertEqual(releases[0].createdAt, Date(timeIntervalSince1970: 1_787_770_920))
     }
 
     func testFleetInventoryUsesAuthenticatedV1RouteAndDecodesNodePools() async throws {
@@ -307,14 +349,13 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
     }
 
-    func testFleetRunnerAttemptListAndEvidenceGatedAdvanceUseV1Routes() async throws {
+    func testFleetRunnerAttemptListUsesReadOnlyV1Route() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
             recorder.record(request, body: NornURLProtocol.body(of: request))
             let attempt = """
             {"schemaVersion":"norn.fleet-runner-attempt/v1","id":"attempt-1","planId":"plan-1","attempt":2,"runnerAttemptId":"github-42","status":"running","currentPhase":"nodes_configured","commitSha":"0123456789012345678901234567890123456789","planSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","workflowUrl":"https://github.com/acme/fleet/actions/runs/42","heartbeatSequence":4,"heartbeatTimeoutSeconds":120,"revision":5,"startedAt":"2026-08-25T14:00:00Z","heartbeatAt":"2026-08-25T14:01:00Z","heartbeatExpiresAt":"2026-08-25T14:03:00Z","updatedAt":"2026-08-25T14:01:00Z"}
             """
-            if request.httpMethod == "POST" { return Self.response(request, status: 200, body: attempt) }
             return Self.response(request, status: 200, body: """
             {"schemaVersion":"norn.fleet-runner-attempt/v1","planId":"plan-1","attempts":[\(attempt)],"count":1,"serverTime":"2026-08-25T14:01:01Z"}
             """)
@@ -324,12 +365,28 @@ final class NornClientTests: XCTestCase {
         let list = try await client.fleetRunnerAttempts(planID: "plan-1")
         XCTAssertEqual(list.attempts.first?.currentPhase, "nodes_configured")
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/plans/plan-1/attempts")
+    }
 
-        _ = try await client.advanceFleetRunnerAttempt(planID: "plan-1", attempt: try XCTUnwrap(list.attempts.first))
-        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/plans/plan-1/attempts/attempt-1/advance")
-        let body = String(decoding: try XCTUnwrap(recorder.lastBody), as: UTF8.self)
-        XCTAssertTrue(body.contains("\"expectedPhase\":\"nodes_configured\""))
-        XCTAssertTrue(body.contains("\"revision\":5"))
+    func testReleaseQualificationDecodesPrivateAttestationModeAndSafeVerifierLabel() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.release-qualifications/v2","count":1,"qualifications":[{"schemaVersion":"norn.release-qualification/v2","id":"qualification-1","app":"api","environment":"staging","deploymentId":"deploy-1","sourceSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","artifact":"registry.example/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","issuedAt":"2026-08-31T14:00:00Z","expiresAt":"2026-12-01T14:00:00Z","keyId":"staging-2026","signature":"signed-receipt","candidate":{"provider":"github-actions","repository":"acme/api","repositoryId":"1","ownerId":"2","repositoryVisibility":"private","runId":"3","workflowRef":"acme/api/.github/workflows/caller.yml@cccccccccccccccccccccccccccccccccccccccc","workflowSha":"cccccccccccccccccccccccccccccccccccccccc","signerWorkflowRef":"acme/norn/.github/workflows/release.yml@dddddddddddddddddddddddddddddddddddddddd","signerWorkflowSha":"dddddddddddddddddddddddddddddddddddddddd","ref":"refs/heads/main","attestation":{"mode":"github-private","verifier":"Norn Pilot Release Verifier","issuer":"https://token.actions.githubusercontent.com","subjectDigest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","materialSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"dsse":{"payloadType":"application/vnd.norn.release-qualification.v2+json","payload":"payload","signatures":[{"keyid":"staging-2026","sig":"signed-receipt"}]}}]}
+            """)
+        }
+
+        let qualification = try await makeClient().releaseQualifications(app: "api").first
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/api/qualifications")
+        XCTAssertEqual(qualification?.candidate.repositoryVisibility, "private")
+        XCTAssertEqual(qualification?.candidate.attestation.displayMode, "github-private")
+        XCTAssertEqual(qualification?.candidate.attestation.displayVerifier, "Norn Pilot Release Verifier")
+        let encoded = try XCTUnwrap(try JSONEncoder().encode(qualification))
+        let roundTrip = try JSONDecoder().decode(NornReleaseQualification.self, from: encoded)
+        XCTAssertEqual(roundTrip.candidate.repositoryVisibility, "private")
+        XCTAssertEqual(roundTrip.candidate.attestation.mode, "github-private")
+        XCTAssertEqual(roundTrip.candidate.attestation.verifier, "Norn Pilot Release Verifier")
     }
 
     func testOperationsBuildsBoundedActiveQueryAndDecodesNonFractionalDate() async throws {

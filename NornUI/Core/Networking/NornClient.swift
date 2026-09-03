@@ -100,12 +100,14 @@ actor NornClient: NornClientProtocol {
 
     func releases() async throws -> NornReleaseList {
         do {
-            return try await get("api/v1/releases")
+            let releases: NornReleaseList = try await get("api/v1/releases")
+            return releases.canonicalized()
         } catch let NornClientError.http(status, _, _) where status == 404 {
             // Older servers exposed only the compatibility route. Keep the
             // fallback narrow so authorization and decoding failures remain
             // visible instead of being silently masked.
-            return try await get("api/platform/releases")
+            let releases: NornReleaseList = try await get("api/platform/releases")
+            return releases.canonicalized()
         }
     }
 
@@ -170,19 +172,6 @@ actor NornClient: NornClientProtocol {
 		return try await get("api/v1/fleet/plans/\(value.pathComponentEncoded)/attempts")
 	}
 
-	func advanceFleetRunnerAttempt(planID: String, attempt: NornFleetRunnerAttempt) async throws -> NornFleetRunnerAttempt {
-		struct Body: Encodable {
-			let schemaVersion = "norn.fleet-runner-attempt/v1"
-			let expectedPhase: String
-			let revision: Int64
-		}
-		return try await perform(
-			path: "api/v1/fleet/plans/\(planID.pathComponentEncoded)/attempts/\(attempt.id.pathComponentEncoded)/advance",
-			method: "POST",
-			body: Self.encoder.encode(Body(expectedPhase: attempt.currentPhase, revision: attempt.revision))
-		)
-	}
-
 	func fleetGitHubStatus() async throws -> NornFleetGitHubStatus {
 		try await get("api/v1/fleet/github")
 	}
@@ -219,6 +208,35 @@ actor NornClient: NornClientProtocol {
 	func setAppDeployment(app: String, enabled: Bool) async throws -> NornAppMutationReceipt {
 		struct Body: Encodable { let enabled: Bool }
 		return try await perform(path: "api/v1/apps/\(app.pathComponentEncoded)/deployment", method: "PUT", body: Self.encoder.encode(Body(enabled: enabled)))
+	}
+
+	func releaseQualifications(app: String) async throws -> [NornReleaseQualification] {
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		let response: NornReleaseQualificationList = try await get("api/v1/apps/\(value.pathComponentEncoded)/qualifications")
+		guard response.schemaVersion == "norn.release-qualifications/v2", response.qualifications.allSatisfy(\.isV2Signed) else { throw NornClientError.invalidResponse }
+		return response.qualifications
+	}
+
+	func preflightRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation {
+		try await releaseQueue(app: app, path: "releases/preflight", body: request, idempotencyKey: idempotencyKey)
+	}
+
+	func deployRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation {
+		try await releaseQueue(app: app, path: "releases/deployments", body: request, idempotencyKey: idempotencyKey)
+	}
+
+	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification {
+		struct Body: Encodable { let deploymentID: String; enum CodingKeys: String, CodingKey { case deploymentID = "deploymentId" } }
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty, !deploymentID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw NornClientError.invalidResponse }
+		let receipt: NornReleaseQualification = try await perform(path: "api/v1/apps/\(value.pathComponentEncoded)/qualifications", method: "POST", body: Self.encoder.encode(Body(deploymentID: deploymentID)), idempotencyKey: idempotencyKey)
+		guard receipt.isV2Signed else { throw NornClientError.invalidResponse }
+		return receipt
+	}
+
+	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation {
+		try await releaseQueue(app: app, path: "promotions", body: request, idempotencyKey: idempotencyKey)
 	}
 
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] {
@@ -302,6 +320,12 @@ actor NornClient: NornClientProtocol {
     ) async throws -> NornOperation {
         try await perform(path: path, method: "POST", body: Self.encoder.encode(body), idempotencyKey: idempotencyKey)
     }
+
+	private func releaseQueue<Body: Encodable>(app: String, path: String, body: Body, idempotencyKey: String) async throws -> NornOperation {
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		return try await queue(path: "api/v1/apps/\(value.pathComponentEncoded)/\(path)", body: body, idempotencyKey: idempotencyKey)
+	}
 
     private func perform<Value: Decodable>(
         path: String,

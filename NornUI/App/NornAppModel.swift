@@ -111,6 +111,101 @@ final class NornAppModel {
 
 	var appCreationSupported: Bool { snapshot.capabilities.supportsAppCreation }
 	var durableAppRecoverySupported: Bool { snapshot.capabilities.supportsDurableAppRecovery }
+	var releasePipelineSupported: Bool { snapshot.capabilities.supportsReleasePipeline }
+	var environmentID: String { snapshot.capabilities.environmentID }
+	var environmentProfile: String { snapshot.capabilities.environmentProfile }
+
+	func releaseQualifications(app: String) async -> [NornReleaseQualification] {
+		guard let client, releasePipelineSupported else { return [] }
+		do { return try await client.releaseQualifications(app: app) }
+		catch {
+			lastError = error.localizedDescription
+			return []
+		}
+	}
+
+	@discardableResult
+	func preflightRelease(app: String, sourceSHA: String, artifact: String?) async -> NornOperation? {
+		await queueRelease(app: app, kind: "preflight", sourceSHA: sourceSHA, artifact: artifact) { client, request, key in
+			try await client.preflightRelease(app: app, request: request, idempotencyKey: key)
+		}
+	}
+
+	@discardableResult
+	func deployRelease(app: String, sourceSHA: String, artifact: String?) async -> NornOperation? {
+		await queueRelease(app: app, kind: "deployment", sourceSHA: sourceSHA, artifact: artifact) { client, request, key in
+			try await client.deployRelease(app: app, request: request, idempotencyKey: key)
+		}
+	}
+
+	@discardableResult
+	func qualifyRelease(app: String, deploymentID: String) async -> NornReleaseQualification? {
+		guard let client, canPerformOperations, releasePipelineSupported, environmentID == "staging" else { return nil }
+		lastError = nil
+		let intent = releaseIntent(app: app, kind: "qualification", values: [deploymentID])
+		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
+		do {
+			let qualification = try await client.qualifyRelease(app: app, deploymentID: deploymentID, idempotencyKey: idempotencyKey)
+			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
+			return qualification
+		} catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	@discardableResult
+	func promoteRelease(app: String, qualification: NornReleaseQualification) async -> NornOperation? {
+		guard let client, canPerformOperations, releasePipelineSupported, environmentID == "production", !qualification.isExpired else { return nil }
+		lastError = nil
+		let intent = releaseIntent(app: app, kind: "promotion", values: [qualification.id, qualification.deploymentID, qualification.sourceSHA, qualification.artifact])
+		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
+		do {
+			let operation = try await client.promoteRelease(app: app, request: .init(qualification: qualification, sourceSHA: qualification.sourceSHA, artifact: qualification.artifact), idempotencyKey: idempotencyKey)
+			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
+			upsert(operation)
+			return operation
+		} catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	private func queueRelease(
+		app: String,
+		kind: String,
+		sourceSHA: String,
+		artifact: String?,
+		action: @escaping @Sendable (any NornClientProtocol, NornReleaseActionRequest, String) async throws -> NornOperation
+	) async -> NornOperation? {
+		guard let client, canPerformOperations, releasePipelineSupported, environmentID == "staging" else { return nil }
+		let normalizedSHA = sourceSHA.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+		let trimmedArtifact = artifact?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		let normalizedArtifact = trimmedArtifact.isEmpty ? nil : trimmedArtifact
+		guard normalizedSHA.range(of: "^[a-f0-9]{40}$", options: .regularExpression) != nil else {
+			lastError = "A release source must be an exact 40-character lowercase SHA."
+			return nil
+		}
+		lastError = nil
+		let intent = releaseIntent(app: app, kind: kind, values: [normalizedSHA, normalizedArtifact ?? ""])
+		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
+		do {
+			let operation = try await action(client, .init(sourceSHA: normalizedSHA, artifact: normalizedArtifact), idempotencyKey)
+			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
+			upsert(operation)
+			return operation
+		} catch {
+			lastError = error.localizedDescription
+			return nil
+		}
+	}
+
+	private func releaseIntent(app: String, kind: String, values: [String]) -> (scope: String, digest: String) {
+		let profile = selectedProfileID?.uuidString ?? "fixture"
+		let canonical = ([profile, app, kind] + values).joined(separator: "\u{1f}")
+		let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+		return ("release:\(profile):\(app):\(kind)", digest)
+	}
 
 	func appSnapshots(app: String) async -> [NornAppSnapshot]? {
 		guard let client, durableAppRecoverySupported else { return nil }
@@ -323,23 +418,6 @@ final class NornAppModel {
             return
         } catch {
             lastError = error.localizedDescription
-        }
-    }
-
-    @discardableResult
-    func advanceFleetRunnerAttempt(planID: String, attempt: NornFleetRunnerAttempt) async -> Bool {
-        guard let client, fleetRunnerAttemptsSupported, canOperateFleet else { return false }
-        lastError = nil
-        do {
-            let updated = try await client.advanceFleetRunnerAttempt(planID: planID, attempt: attempt)
-            var attempts = fleetRunnerAttempts[planID] ?? []
-            attempts.removeAll { $0.id == updated.id }
-            attempts.append(updated)
-            fleetRunnerAttempts[planID] = attempts.sorted { $0.attempt > $1.attempt }
-            return true
-        } catch {
-            lastError = error.localizedDescription
-            return false
         }
     }
 
@@ -643,7 +721,7 @@ final class NornAppModel {
         case .failure: failures.append("operations")
         }
         switch result.4 {
-        case let .value(releases): next.releases = releases.releases.sorted { $0.createdAt > $1.createdAt }
+        case let .value(releases): next.releases = NornRelease.canonicalHistory(releases.releases)
         case .failure: failures.append("releases")
         }
         switch result.5 {

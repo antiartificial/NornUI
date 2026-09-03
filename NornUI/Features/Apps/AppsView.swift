@@ -64,6 +64,10 @@ struct AppsView: View {
             if let selectedApp {
                 AppRecoveryInspector(
                     app: selectedApp,
+                    workloadState: AppWorkloadState.aggregate(
+                        app: selectedApp,
+                        services: services.filter { $0.app == selectedApp.spec.name }
+                    ),
                     isSupported: supportsRecovery,
                     onLoadSnapshots: onLoadSnapshots,
                     onQueue: onQueueOperation,
@@ -194,6 +198,7 @@ struct AppsView: View {
                                     ForEach(group.services) { service in
                                         AppServiceRow(
                                             service: service,
+                                            app: group.app,
                                             isChild: true,
                                             isSelected: selectedAppName == service.app,
                                             onSelect: { selectedAppName = service.app }
@@ -207,6 +212,7 @@ struct AppsView: View {
                             ForEach(filteredServices) { service in
                                 AppServiceRow(
                                     service: service,
+                                    app: appStatus(for: service.app),
                                     isChild: false,
                                     isSelected: selectedAppName == service.app,
                                     onSelect: { selectedAppName = service.app }
@@ -259,10 +265,13 @@ struct AppsView: View {
     }
 
     private func matchesSearch(_ service: NornService) -> Bool {
-        service.app.localizedStandardContains(searchText)
+        let workloadState = AppWorkloadState.resolve(service: service, app: appStatus(for: service.app))
+        return service.app.localizedStandardContains(searchText)
             || service.process.localizedStandardContains(searchText)
             || service.name.localizedStandardContains(searchText)
             || service.status.localizedStandardContains(searchText)
+            || service.type.localizedStandardContains(searchText)
+            || workloadState.label.localizedStandardContains(searchText)
             || service.reachability.exposure.localizedStandardContains(searchText)
             || service.endpoints?.contains { $0.url.localizedStandardContains(searchText) } == true
             || service.instances?.contains {
@@ -302,10 +311,12 @@ struct AppsView: View {
 
     private func serviceSortValue(_ service: NornService) -> String {
         switch sort {
-        case .app: service.app
-        case .process: service.process
-        case .exposure: service.reachability.exposure
-        case .status: "\(statusRank(service.status))-\(service.status)"
+        case .app: return service.app
+        case .process: return service.process
+        case .exposure: return service.reachability.exposure
+        case .status:
+            let state = AppWorkloadState.resolve(service: service, app: appStatus(for: service.app))
+            return "\(state.sortRank)-\(state.label)"
         }
     }
 
@@ -314,18 +325,12 @@ struct AppsView: View {
         case .app: group.name
         case .process: group.processSummary
         case .exposure: group.exposure
-        case .status: "\(statusRank(group.status))-\(group.status)"
+        case .status: "\(group.workloadState.sortRank)-\(group.workloadState.label)"
         }
     }
 
-    private func statusRank(_ status: String) -> Int {
-        switch NornStatus(serviceStatus: status) {
-        case .critical: 0
-        case .attention: 1
-        case .active: 2
-        case .healthy: 3
-        case .neutral, .offline: 4
-        }
+    private func appStatus(for name: String) -> NornAppStatus? {
+        apps.first { $0.spec.name == name }
     }
 }
 
@@ -352,6 +357,14 @@ private struct AppServiceGroup: Identifiable {
         "\(services.count) process\(services.count == 1 ? "" : "es")"
     }
 
+    var workloadSummary: String {
+        let jobs = services.filter { ["cron", "function"].contains($0.type.lowercased()) }.count
+        let residents = services.count - jobs
+        if jobs == 0 { return "\(residents) service\(residents == 1 ? "" : "s")" }
+        if residents == 0 { return "\(jobs) job\(jobs == 1 ? "" : "s")" }
+        return "\(residents) service\(residents == 1 ? "" : "s") · \(jobs) job\(jobs == 1 ? "" : "s")"
+    }
+
     var exposure: String {
         let exposures = Set(services.map { $0.reachability.exposure.capitalized }).sorted()
         if exposures.isEmpty { return "—" }
@@ -359,17 +372,8 @@ private struct AppServiceGroup: Identifiable {
         return "Mixed"
     }
 
-    var status: String {
-        if app?.healthy == false { return "critical" }
-        let states = services.map { $0.status.lowercased() }
-        if states.isEmpty {
-            if app?.healthy == true { return "passing" }
-            return app?.nomadStatus ?? "unknown"
-        }
-        if states.allSatisfy({ ["passing", "running", "up", "healthy"].contains($0) }) { return "passing" }
-        if states.contains(where: { ["critical", "failed", "down"].contains($0) }) { return "critical" }
-        if states.contains(where: { ["warning", "pending", "degraded"].contains($0) }) { return "warning" }
-        return "unknown"
+    var workloadState: AppWorkloadState {
+        AppWorkloadState.aggregate(app: app, services: services)
     }
 }
 
@@ -387,7 +391,7 @@ private struct AppListHeader: View {
             header("Exposure", .exposure)
                 .frame(width: 72, alignment: .leading)
             header("Status", .status)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: 104, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -443,7 +447,7 @@ private struct AppGroupRow: View {
                         .fontWeight(.semibold)
                         .lineLimit(1)
                         .accessibilityIdentifier("apps.root.\(group.name)")
-                    Text("\(group.services.count) service\(group.services.count == 1 ? "" : "s")")
+                    Text(group.workloadSummary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -455,8 +459,8 @@ private struct AppGroupRow: View {
             Text(group.exposure)
                 .foregroundStyle(.secondary)
                 .frame(width: 72, alignment: .leading)
-            NornStatusBadge(status: NornStatus(serviceStatus: group.status), label: group.status.capitalized)
-                .frame(width: 90, alignment: .leading)
+            AppWorkloadBadge(state: group.workloadState)
+                .frame(width: 104, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -475,19 +479,24 @@ private struct AppGroupRow: View {
 
 private struct AppServiceRow: View {
     let service: NornService
+    let app: NornAppStatus?
     let isChild: Bool
     let isSelected: Bool
     let onSelect: () -> Void
     @State private var isHovered = false
+
+    private var workloadState: AppWorkloadState {
+        AppWorkloadState.resolve(service: service, app: app)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
             HStack(spacing: 8) {
                 if isChild { Color.clear.frame(width: 24) }
                 Circle()
-                    .fill(NornStatus(serviceStatus: service.status).tint)
+                    .fill(workloadState.semanticStatus.tint)
                     .frame(width: 7, height: 7)
-                    .shadow(color: NornStatus(serviceStatus: service.status).tint.opacity(0.4), radius: 3)
+                    .shadow(color: workloadState.semanticStatus.tint.opacity(0.4), radius: 3)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(isChild ? service.name : service.app)
@@ -508,10 +517,10 @@ private struct AppServiceRow: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .frame(width: 72, alignment: .leading)
-            Text(service.status.capitalized)
-                .foregroundStyle(NornStatus(serviceStatus: service.status).tint)
+            Label(workloadState.label, systemImage: workloadState.symbol)
+                .foregroundStyle(workloadState.semanticStatus.tint)
                 .lineLimit(1)
-                .frame(width: 90, alignment: .leading)
+                .frame(width: 104, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -521,12 +530,14 @@ private struct AppServiceRow: View {
         .onHover { isHovered = $0 }
         .contextMenu { Button("Inspect \(service.app)", action: onSelect) }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(service.app), \(service.process), \(service.status)")
+        .accessibilityLabel("\(service.app), \(service.process), \(workloadState.label)")
         .accessibilityIdentifier("apps.service.\(service.id)")
     }
 
     private var allocationSummary: String {
         let count = service.instances?.count ?? 0
+        if service.type == "cron" { return "Scheduled job" }
+        if service.type == "function" { return "On-demand job" }
         return count == 0 ? service.process : "\(count) allocation\(count == 1 ? "" : "s")"
     }
 
@@ -540,8 +551,158 @@ private struct AppServiceRow: View {
     }
 }
 
+enum AppWorkloadState: String, Equatable {
+    case healthy
+    case active
+    case scheduled
+    case onDemand
+    case scaledToZero
+    case disabled
+    case attention
+    case critical
+    case unknown
+
+    var label: String {
+        switch self {
+        case .healthy: "Healthy"
+        case .active: "Running"
+        case .scheduled: "Scheduled"
+        case .onDemand: "On demand"
+        case .scaledToZero: "Scaled to zero"
+        case .disabled: "Disabled"
+        case .attention: "Attention"
+        case .critical: "Critical"
+        case .unknown: "Unknown"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .healthy: "checkmark.circle.fill"
+        case .active: "play.circle.fill"
+        case .scheduled: "calendar.badge.clock"
+        case .onDemand: "play.square"
+        case .scaledToZero: "moon.zzz"
+        case .disabled: "pause.circle"
+        case .attention: "exclamationmark.triangle.fill"
+        case .critical: "xmark.octagon.fill"
+        case .unknown: "questionmark.circle"
+        }
+    }
+
+    var semanticStatus: NornStatus {
+        switch self {
+        case .healthy: .healthy
+        case .active: .active
+        case .attention: .attention
+        case .critical: .critical
+        case .scheduled, .onDemand, .scaledToZero, .disabled, .unknown: .neutral
+        }
+    }
+
+    var sortRank: Int {
+        switch self {
+        case .critical: 0
+        case .attention: 1
+        case .active: 2
+        case .healthy: 3
+        case .scheduled, .onDemand: 4
+        case .scaledToZero, .disabled: 5
+        case .unknown: 6
+        }
+    }
+
+    static func resolve(service: NornService, app: NornAppStatus?) -> AppWorkloadState {
+        if app?.spec.deploy == false { return .disabled }
+        if isScaledToZero(service: service, app: app) { return .scaledToZero }
+
+        let rawStatus = service.status.lowercased()
+        if ["critical", "failing", "down", "failed"].contains(rawStatus) { return .critical }
+        if ["warning", "pending", "degraded"].contains(rawStatus) { return .attention }
+        if ["passing", "ok", "up", "healthy"].contains(rawStatus) { return .healthy }
+        if rawStatus == "running" { return .active }
+
+        switch service.type.lowercased() {
+        case "cron": return .scheduled
+        case "function": return .onDemand
+        default: break
+        }
+
+        return .unknown
+    }
+
+    static func aggregate(app: NornAppStatus?, services: [NornService]) -> AppWorkloadState {
+        if app?.spec.deploy == false { return .disabled }
+
+        let states = services.map { resolve(service: $0, app: app) }
+        if states.contains(.critical) { return .critical }
+        if states.contains(.attention) { return .attention }
+        if !states.isEmpty, states.allSatisfy({ $0 == .scaledToZero }) { return .scaledToZero }
+        if let app, isAppScaledToZero(app) { return .scaledToZero }
+
+        let schedulerStatus = app?.nomadStatus?.lowercased() ?? ""
+        if ["dead", "failed", "lost"].contains(schedulerStatus) { return .critical }
+        if ["pending", "starting"].contains(schedulerStatus) { return .attention }
+
+        if states.contains(.unknown) {
+            return app?.healthy == false ? .critical : .unknown
+        }
+        if states.contains(.healthy) { return .healthy }
+        if states.contains(.active) { return .active }
+        if states.contains(.scaledToZero) { return .scaledToZero }
+        if states.contains(.scheduled) { return .scheduled }
+        if states.contains(.onDemand) { return .onDemand }
+
+        if app?.healthy == true { return .healthy }
+        if allProcesses(in: app, match: { $0.schedule?.isEmpty == false }) { return .scheduled }
+        if allProcesses(in: app, match: { $0.function != nil }) { return .onDemand }
+        return app?.healthy == false ? .critical : .unknown
+    }
+
+    private static func isScaledToZero(service: NornService, app: NornAppStatus?) -> Bool {
+        guard let app else { return false }
+        guard !["cron", "function"].contains(service.type.lowercased()) else { return false }
+        if app.spec.processes?[service.process]?.scaling?.min == 0 { return true }
+        guard app.nomadStatus?.lowercased() == "running" else { return false }
+        if let processCounts = app.allocationSummary?.byProcess {
+            return (processCounts[service.process]?.active ?? 0) == 0
+        }
+        return app.allocationSummary?.active == 0 && service.instances?.isEmpty != false
+    }
+
+    private static func isAppScaledToZero(_ app: NornAppStatus) -> Bool {
+        if allProcesses(in: app, match: { $0.schedule?.isEmpty == false || $0.function != nil }) { return false }
+        if allProcesses(in: app, match: { $0.scaling?.min == 0 }) { return true }
+        return app.nomadStatus?.lowercased() == "running" && app.allocationSummary?.active == 0
+    }
+
+    private static func allProcesses(
+        in app: NornAppStatus?,
+        match predicate: (NornAppSpecSummary.Process) -> Bool
+    ) -> Bool {
+        guard let processes = app?.spec.processes, !processes.isEmpty else { return false }
+        return processes.values.allSatisfy(predicate)
+    }
+}
+
+private struct AppWorkloadBadge: View {
+    let state: AppWorkloadState
+
+    var body: some View {
+        Label(state.label, systemImage: state.symbol)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(state.semanticStatus.tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(state.semanticStatus.tint.opacity(0.1), in: Capsule())
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(state.label)")
+    }
+}
+
 private struct AppRecoveryInspector: View {
 	let app: NornAppStatus
+	let workloadState: AppWorkloadState
 	let isSupported: Bool
 	let onLoadSnapshots: (String) async -> [NornAppSnapshot]?
 	let onQueue: (NornAppOperationRequest) async -> NornOperation?
@@ -596,9 +757,18 @@ private struct AppRecoveryInspector: View {
 	private var header: some View {
 		VStack(alignment: .leading, spacing: 5) {
 			Text("APP CONTROL").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-			HStack { Text(app.spec.name).font(.title2.weight(.semibold)); Spacer(); NornStatusBadge(status: app.healthy ? .healthy : .critical) }
-			Text(app.nomadStatus ?? "Unknown scheduler status").font(.callout).foregroundStyle(.secondary)
+			HStack { Text(app.spec.name).font(.title2.weight(.semibold)); Spacer(); AppWorkloadBadge(state: workloadState) }
+			Text(schedulerSummary).font(.callout).foregroundStyle(.secondary)
 		}
+	}
+
+	private var schedulerSummary: String {
+		if workloadState == .disabled { return "Deployment is disabled" }
+		if workloadState == .scaledToZero { return "No active allocations; scheduler job remains available" }
+		if workloadState == .scheduled { return "Scheduled workload; idle between runs" }
+		if workloadState == .onDemand { return "On-demand workload; idle until invoked" }
+		let schedulerStatus = app.nomadStatus?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+		return schedulerStatus.isEmpty ? "Scheduler status unavailable" : schedulerStatus.capitalized
 	}
 
 	private var quickActions: some View {

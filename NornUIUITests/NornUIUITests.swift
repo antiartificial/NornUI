@@ -12,6 +12,7 @@ final class NornUIUITests: XCTestCase {
     private func fixtureApp() -> XCUIApplication {
         let app = XCUIApplication()
         app.launchEnvironment["NORN_UI_FIXTURES"] = "1"
+        app.launchArguments += ["-ApplePersistenceIgnoreState", "YES"]
         return app
     }
 
@@ -43,21 +44,24 @@ final class NornUIUITests: XCTestCase {
     func testOperationsUsesAvailableDetailHeight() throws {
         let app = fixtureApp()
         app.launch()
-
-        let operationsDestination = app.staticTexts["Operations"].firstMatch
-        XCTAssertTrue(operationsDestination.waitForExistence(timeout: 5))
-        operationsDestination.click()
+        app.activate()
+        app.typeKey("3", modifierFlags: .command)
 
         let window = app.windows.firstMatch
         let header = app.staticTexts["operations.header"]
         let metrics = app.descendants(matching: .any)["operations.metrics"]
         let showLabel = app.staticTexts["operations.show-label"]
         let timeline = app.descendants(matching: .any)["operations.timeline"]
+        let columnFilters = app.descendants(matching: .any)["operations.column-filters"]
 
         XCTAssertTrue(header.waitForExistence(timeout: 5))
         XCTAssertTrue(metrics.waitForExistence(timeout: 5))
         XCTAssertTrue(showLabel.waitForExistence(timeout: 5))
         XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        XCTAssertTrue(columnFilters.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["operations.release-row"].firstMatch.waitForExistence(timeout: 5))
+        let operationHeader = app.buttons["Operation"].firstMatch
+        XCTAssertTrue(operationHeader.waitForExistence(timeout: 5))
         XCTAssertLessThan(header.frame.minY, window.frame.midY)
         XCTAssertGreaterThanOrEqual(header.frame.minX, timeline.frame.minX - 1)
         XCTAssertLessThan(header.frame.maxX, metrics.frame.minX)
@@ -102,8 +106,8 @@ final class NornUIUITests: XCTestCase {
     func testAppsGroupingSearchActiveFilterAndSorting() throws {
         let app = fixtureApp()
         app.launch()
-
-        app.staticTexts["Apps"].firstMatch.click()
+        app.activate()
+        app.typeKey("2", modifierFlags: .command)
 
         let mailRoot = app.descendants(matching: .any)["apps.root.mail-mcp"]
         let disclosure = app.descendants(matching: .any)["apps.disclosure.mail-mcp"]
@@ -114,6 +118,13 @@ final class NornUIUITests: XCTestCase {
         disclosure.click()
         XCTAssertTrue(app.descendants(matching: .any)["apps.service.mail-mcp-mcp"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["apps.service.mail-mcp-worker"].waitForExistence(timeout: 5))
+
+        let likeDisclosure = app.descendants(matching: .any)["apps.disclosure.like-trove"]
+        XCTAssertTrue(likeDisclosure.waitForExistence(timeout: 5))
+        likeDisclosure.click()
+        let scheduledJob = app.descendants(matching: .any)["apps.service.like-trove-daily-capture"]
+        XCTAssertTrue(scheduledJob.waitForExistence(timeout: 5))
+        XCTAssertTrue(scheduledJob.label.contains("Scheduled"))
 
         XCTAssertTrue(app.buttons["Sort by Status"].waitForExistence(timeout: 5))
         app.buttons["Sort by Status"].click()

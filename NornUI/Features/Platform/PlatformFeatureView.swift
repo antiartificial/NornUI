@@ -90,12 +90,13 @@ struct PlatformFeatureView: View {
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onCopyRelease: @escaping (NornRelease) -> Void = { _ in }
     ) {
-        self.releases = snapshot.releases.sorted { $0.createdAt > $1.createdAt }
+        let releases = NornRelease.canonicalHistory(snapshot.releases)
+        self.releases = releases
         self.activeOperations = snapshot.activeOperations
         self.isConnected = isConnected
         self.onQueue = onQueue
         self.onCopyRelease = onCopyRelease
-        _selectedReleaseID = State(initialValue: snapshot.releases.first(where: \.current)?.id)
+        _selectedReleaseID = State(initialValue: releases.first(where: \.current)?.id)
     }
 
     init(
@@ -105,7 +106,8 @@ struct PlatformFeatureView: View {
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onCopyRelease: @escaping (NornRelease) -> Void = { _ in }
     ) {
-        self.releases = releases.sorted { $0.createdAt > $1.createdAt }
+        let releases = NornRelease.canonicalHistory(releases)
+        self.releases = releases
         self.activeOperations = activeOperations
         self.isConnected = isConnected
         self.onQueue = onQueue
