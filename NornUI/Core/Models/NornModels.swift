@@ -148,18 +148,40 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     var features: [String]
     var auth: Authentication
     var endpoints: [String: String]
+    /// `fleet-only` exposes the infrastructure authority, not a runtime
+    /// control-plane. Clients must not infer app or host state from it.
+    var authority: String? = nil
+
+    var isFleetAuthorityOnly: Bool {
+        authority == "fleet-only" || features.contains("fleet-authority-only-v1")
+    }
+
+    /// Compatibility capability documents may list supported scopes, but do
+    /// not identify the caller. Only an explicit authenticated principal is
+    /// evidence for enabling privileged UI actions.
+    var authenticatedPrincipal: Authentication.Principal? {
+        guard let principal = auth.principal, principal.authenticated else { return nil }
+        return principal
+    }
+
+    var grantedScopes: Set<String> { Set(authenticatedPrincipal?.scopes ?? []) }
+
+    /// Environment identity for authority banners. Unlike the legacy release
+    /// model's compatibility default, this never invents an environment.
+    var assertedEnvironmentID: String? { environment?.id }
+    var assertedEnvironmentProfile: String? { environment?.profile }
     var environment: Environment? = nil
 
     /// Host metrics are optional so older control planes continue to work without
     /// presenting a connection failure in the Host view.
     var supportsHostMetrics: Bool {
-        features.contains("host-metrics") && endpoints["hostMetrics"] != nil
+        !isFleetAuthorityOnly && features.contains("host-metrics") && endpoints["hostMetrics"] != nil
     }
 
-	var supportsAppCreation: Bool { features.contains("app-creation") && endpoints["appCreation"] != nil }
+	var supportsAppCreation: Bool { !isFleetAuthorityOnly && features.contains("app-creation") && endpoints["appCreation"] != nil }
 
     var supportsDurableAppRecovery: Bool {
-        features.contains("durable-app-recovery-v1") &&
+        !isFleetAuthorityOnly && features.contains("durable-app-recovery-v1") &&
         endpoints["appSnapshots"] != nil &&
         endpoints["appSnapshotRestore"] != nil &&
         endpoints["appRollbacks"] != nil
@@ -180,8 +202,6 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("fleet-runner-attempts-v1") && endpoints["fleetRunnerAttempts"] != nil
     }
 
-    var grantedScopes: Set<String> { Set(auth.principal?.scopes ?? []) }
-
     var canOperateFleet: Bool {
         !grantedScopes.isDisjoint(with: ["fleet:operate", "api:write", "admin"])
     }
@@ -200,6 +220,10 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
 
     var supportsReleasePipeline: Bool {
         ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"].allSatisfy(features.contains)
+    }
+
+    var supportsEventStream: Bool {
+        !isFleetAuthorityOnly && endpoints["events"] != nil
     }
 
     var environmentID: String { environment?.id ?? "development" }

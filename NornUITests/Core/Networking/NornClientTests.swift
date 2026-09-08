@@ -33,6 +33,33 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
     }
 
+    func testCompatibilityCapabilitiesWithoutPrincipalDoNotClaimAuthentication() throws {
+        let data = Data("""
+        {"protocolVersion":1,"serverVersion":"compat","features":[],"auth":{"scopes":["api:read","api:write"],"websocketBearerHeader":true,"websocketQueryToken":false},"endpoints":{}}
+        """.utf8)
+        let capabilities = try JSONDecoder().decode(NornCapabilities.self, from: data)
+        XCTAssertNil(capabilities.authenticatedPrincipal)
+        XCTAssertTrue(capabilities.grantedScopes.isEmpty)
+        XCTAssertFalse(capabilities.canOperateFleet)
+    }
+
+    func testTailscaleURLRequiresHTTPSAndEnrollmentSurfacesCertificateErrors() async throws {
+        XCTAssertTrue(NornClient.isAllowedBaseURL(try XCTUnwrap(URL(string: "https://mini.tail1234.ts.net"))))
+        XCTAssertFalse(NornClient.isAllowedBaseURL(try XCTUnwrap(URL(string: "http://mini.tail1234.ts.net"))))
+        NornURLProtocol.setHandler { _ in throw URLError(.serverCertificateUntrusted) }
+        let enrollment = try NornEnrollmentClient(
+            baseURL: try XCTUnwrap(URL(string: "https://mini.tail1234.ts.net")),
+            session: makeSession()
+        )
+        do {
+            _ = try await enrollment.capabilities()
+            XCTFail("expected certificate preflight failure")
+        } catch let error as NornEnrollmentClientError {
+            guard case .transport(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertFalse(message.isEmpty)
+        }
+    }
+
     func testHostMetricsUsesAuthenticatedV1RouteAndDecodesContract() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in

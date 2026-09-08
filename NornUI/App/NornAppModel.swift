@@ -8,6 +8,7 @@ typealias NornEnrollmentClientFactory = @Sendable (URL) async throws -> any Norn
 nonisolated private enum NornRefreshValue<Value: Sendable>: Sendable {
     case value(Value)
     case failure
+    case unavailable
 }
 
 nonisolated private func captureRefreshValue<Value: Sendable>(
@@ -55,6 +56,7 @@ final class NornAppModel {
     @ObservationIgnored private var fleetTask: Task<Void, Never>?
     @ObservationIgnored private var isHostMetricsVisible = false
     @ObservationIgnored private var isFleetVisible = false
+    @ObservationIgnored private var connectionGeneration: UInt64 = 0
 
     init(
         profileStore: NornProfileStore? = nil,
@@ -103,6 +105,20 @@ final class NornAppModel {
 
     var canPerformOperations: Bool {
         connectionState == .online && client != nil
+    }
+
+    var isFleetAuthorityOnly: Bool { snapshot.capabilities.isFleetAuthorityOnly }
+    var isServerAuthenticated: Bool { snapshot.capabilities.authenticatedPrincipal != nil }
+    var assertedEnvironmentID: String? { snapshot.capabilities.assertedEnvironmentID }
+    var assertedEnvironmentProfile: String? { snapshot.capabilities.assertedEnvironmentProfile }
+
+    var canReadRuntime: Bool { hasScope("api:read") && !isFleetAuthorityOnly }
+    var canWriteRuntime: Bool { hasScope("api:write") && !isFleetAuthorityOnly }
+    var canRunPlatformMaintenance: Bool { hasScope("platform:operate") && !isFleetAuthorityOnly }
+    var canRunHostAssurance: Bool { hasScope("host:operate") && !isFleetAuthorityOnly }
+
+    var availableNavigationDestinations: [NornNavigation] {
+        isFleetAuthorityOnly ? [.overview, .fleet] : NornNavigation.allCases.filter { $0 != .activity }
     }
 
     var hostMetricsSupported: Bool {
@@ -208,7 +224,7 @@ final class NornAppModel {
 	}
 
 	func appSnapshots(app: String) async -> [NornAppSnapshot]? {
-		guard let client, durableAppRecoverySupported else { return nil }
+		guard let client, canReadRuntime, durableAppRecoverySupported else { return nil }
 		do { return try await client.appSnapshots(app: app) }
 		catch {
 			lastError = error.localizedDescription
@@ -218,7 +234,7 @@ final class NornAppModel {
 
 	@discardableResult
 	func queueAppOperation(_ request: NornAppOperationRequest) async -> NornOperation? {
-		guard let client, durableAppRecoverySupported else { return nil }
+		guard let client, canWriteRuntime, durableAppRecoverySupported else { return nil }
 		lastError = nil
 		let intent = appOperationIntent(request)
 		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
@@ -261,11 +277,15 @@ final class NornAppModel {
     var fleetRunnerAttemptsSupported: Bool { snapshot.capabilities.supportsFleetRunnerAttempts }
     var fleetGitHubSupported: Bool { snapshot.capabilities.supportsFleetGitHub }
     var deploymentVisibilitySupported: Bool { snapshot.capabilities.supportsDeploymentVisibility }
-    var canOperateFleet: Bool { canPerformOperations && snapshot.capabilities.canOperateFleet }
+    var canOperateFleet: Bool {
+        guard canPerformOperations, isServerAuthenticated else { return false }
+        if isFleetAuthorityOnly { return hasScope("api:write") }
+        return hasScope("fleet:operate")
+    }
 
 	@discardableResult
 	func createApp(_ request: NornCreateAppRequest) async -> NornAppMutationReceipt? {
-		guard let client else { return nil }
+		guard let client, canWriteRuntime, appCreationSupported else { return nil }
 		lastError = nil
 		do {
 			let receipt = try await client.createApp(request)
@@ -280,7 +300,7 @@ final class NornAppModel {
 	}
 
 	func setAppDeployment(app: String, enabled: Bool) async {
-		guard let client else { return }
+		guard let client, canWriteRuntime else { return }
 		lastError = nil
 		do {
 			_ = try await client.setAppDeployment(app: app, enabled: enabled)
@@ -301,14 +321,14 @@ final class NornAppModel {
     }
 
     func connect() async {
+        connectionGeneration &+= 1
+        let generation = connectionGeneration
         eventTask?.cancel()
         stopHostMetricsPolling()
         stopFleetPolling()
-        hostMetrics = nil
-        fleetReconciliations = [:]
-        fleetRunnerAttempts = [:]
+        client = nil
+        clearConnectionScopedState()
         guard let profile = selectedProfile, let clientFactory else {
-            client = nil
             isFixtureMode = false
             connectionState = .idle
             return
@@ -316,15 +336,25 @@ final class NornAppModel {
 
         connectionState = .connecting
         do {
-            client = try await clientFactory(profile)
+            let nextClient = try await clientFactory(profile)
+            guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
+            client = nextClient
             try await rotateSelectedCredentialIfNeeded(force: false)
+            guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
             isFixtureMode = false
-            lastError = try await refreshAuthoritativeState()
+            lastError = try await refreshAuthoritativeState(generation: generation, profileID: profile.id)
+            guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
+            if isFleetAuthorityOnly { navigation = .fleet }
             connectionState = .online
-            listenForEvents(profile: profile)
+            if snapshot.capabilities.supportsEventStream { listenForEvents(profile: profile, generation: generation) }
             startHostMetricsPollingIfNeeded()
             startFleetPollingIfNeeded()
+        } catch is CancellationError {
+            return
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
+            client = nil
+            clearConnectionScopedState()
             connectionState = .offline(error.localizedDescription)
             lastError = error.localizedDescription
         }
@@ -335,14 +365,21 @@ final class NornAppModel {
             snapshot.observedAt = .now
             return
         }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
         isRefreshing = true
         defer { isRefreshing = false }
         do {
-            lastError = try await refreshAuthoritativeState()
+            lastError = try await refreshAuthoritativeState(generation: generation, profileID: profileID)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             connectionState = .online
             startHostMetricsPollingIfNeeded()
             startFleetPollingIfNeeded()
+        } catch is CancellationError {
+            return
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            clearConnectionScopedState()
             connectionState = .offline(error.localizedDescription)
             lastError = error.localizedDescription
             stopHostMetricsPolling()
@@ -393,15 +430,21 @@ final class NornAppModel {
 
     func refreshFleet() async {
         guard let client, connectionState == .online, fleetSupported else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
         isFleetRefreshing = true
         defer { isFleetRefreshing = false }
         do {
             async let inventory = client.fleetInventory()
             async let plans = client.fleetPlans()
             async let githubStatus: NornFleetGitHubStatus = fleetGitHubSupported ? client.fleetGitHubStatus() : .unconfigured
-            fleetInventory = try await inventory
-            fleetPlans = try await plans
-            fleetGitHubStatus = try await githubStatus
+            let refreshedInventory = try await inventory
+            let refreshedPlans = try await plans
+            let refreshedGitHubStatus = try await githubStatus
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            fleetInventory = refreshedInventory
+            fleetPlans = refreshedPlans
+            fleetGitHubStatus = refreshedGitHubStatus
             for plan in fleetPlans where fleetReconciliationSupported {
                 if let result = try? await client.fleetReconciliations(planID: plan.id) {
                     fleetReconciliations[plan.id] = result.reconciliations
@@ -417,13 +460,15 @@ final class NornAppModel {
         } catch is CancellationError {
             return
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            clearFleetAndDeploymentState()
             lastError = error.localizedDescription
         }
     }
 
     @discardableResult
     func createFleetPullRequest(planID: String) async -> URL? {
-        guard let client, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
         lastError = nil
         do {
             let operation = try await client.createFleetPullRequest(planID: planID)
@@ -437,7 +482,7 @@ final class NornAppModel {
 
     @discardableResult
     func dispatchFleetApply(planID: String, allowDestructive: Bool) async -> URL? {
-        guard let client, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
         lastError = nil
         do {
             let operation = try await client.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive)
@@ -451,7 +496,7 @@ final class NornAppModel {
 
     @discardableResult
     func planFleetCapacity(pool: String, desired: Int, size: String, reason: String) async -> NornOperation? {
-        guard let client else { return nil }
+        guard let client, canOperateFleet else { return nil }
         guard let current = fleetInventory.nodePools[pool] else {
             lastError = "The selected fleet pool is no longer available."
             return nil
@@ -503,7 +548,7 @@ final class NornAppModel {
 
     @discardableResult
     func queue(_ request: NornMaintenanceRequest) async -> NornOperation? {
-        guard let client else { return nil }
+        guard let client, mayQueue(request) else { return nil }
         lastError = nil
         do {
             let operation = try await client.queue(request, idempotencyKey: UUID().uuidString)
@@ -573,6 +618,11 @@ final class NornAppModel {
         return (enrollment, identity.protection)
     }
 
+    func discoverEnrollmentCapabilities(profile: NornServerProfile) async throws -> NornCapabilities {
+        guard let enrollmentClientFactory else { throw NornEnrollmentClientError.invalidResponse }
+        return try await enrollmentClientFactory(profile.baseURL).capabilities()
+    }
+
     func completeDeviceEnrollment(
         profile: NornServerProfile,
         enrollment: NornEnrollmentSession
@@ -617,8 +667,17 @@ final class NornAppModel {
     }
 
     func removeProfile(id: UUID) {
+        let wasSelected = selectedProfileID == id
+        if wasSelected {
+            connectionGeneration &+= 1
+            eventTask?.cancel()
+            stopHostMetricsPolling()
+            stopFleetPolling()
+            client = nil
+            clearConnectionScopedState()
+        }
         profiles.removeAll { $0.id == id }
-        if selectedProfileID == id {
+        if wasSelected {
             selectedProfileID = profiles.first?.id
         }
         persistProfiles()
@@ -640,6 +699,14 @@ final class NornAppModel {
     }
 
     func selectProfile(id: UUID?) async {
+        // Invalidate every in-flight response before changing the profile ID.
+        // This closes the tiny gap between selection and connect() setup.
+        connectionGeneration &+= 1
+        eventTask?.cancel()
+        stopHostMetricsPolling()
+        stopFleetPolling()
+        client = nil
+        clearConnectionScopedState()
         selectedProfileID = id
         profileStore.saveSelection(id)
         await connect()
@@ -673,15 +740,24 @@ final class NornAppModel {
         return expiresAt.timeIntervalSinceNow <= 7 * 24 * 60 * 60
     }
 
-    private func refreshAuthoritativeState() async throws -> String? {
+    private func refreshAuthoritativeState(
+        generation: UInt64? = nil,
+        profileID: UUID? = nil
+    ) async throws -> String? {
         guard let client else { return nil }
+        let expectedGeneration = generation ?? connectionGeneration
+        let expectedProfileID = profileID ?? selectedProfileID
         let capabilities = try await client.capabilities()
-        async let healthResult = captureRefreshValue { try await client.health() }
-        async let hostStatusResult = captureRefreshValue { try await client.hostStatus() }
-        async let manifestResult = captureRefreshValue { try await client.serviceManifest() }
-		async let appsResult = captureRefreshValue { try await client.apps() }
+        guard isCurrentConnection(generation: expectedGeneration, profileID: expectedProfileID) else {
+            throw CancellationError()
+        }
+        let authorityOnly = capabilities.isFleetAuthorityOnly
+        async let healthResult: NornRefreshValue<NornHealth> = authorityOnly ? .unavailable : captureRefreshValue { try await client.health() }
+        async let hostStatusResult: NornRefreshValue<NornHostStatus> = authorityOnly ? .unavailable : captureRefreshValue { try await client.hostStatus() }
+        async let manifestResult: NornRefreshValue<NornServiceManifest> = authorityOnly ? .unavailable : captureRefreshValue { try await client.serviceManifest() }
+		async let appsResult: NornRefreshValue<[NornAppStatus]> = authorityOnly ? .unavailable : captureRefreshValue { try await client.apps() }
         async let operationsResult = captureRefreshValue { try await client.operations(activeOnly: false, limit: 100) }
-        async let releasesResult = captureRefreshValue { try await client.releases() }
+        async let releasesResult: NornRefreshValue<NornReleaseList> = authorityOnly ? .unavailable : captureRefreshValue { try await client.releases() }
         async let fleetInventoryResult = captureRefreshValue {
             capabilities.supportsFleet ? try await client.fleetInventory() : .unconfigured
         }
@@ -703,30 +779,41 @@ final class NornAppModel {
             fleetPlansResult,
             fleetGitHubResult
         )
+        guard isCurrentConnection(generation: expectedGeneration, profileID: expectedProfileID) else {
+            throw CancellationError()
+        }
         var failures: [String] = []
-        var next = snapshot
+        // Begin from an empty snapshot on every authoritative refresh. A
+        // partially failed request may omit information, but it must never
+        // inherit it from a different server profile.
+        var next = Self.emptySnapshot
         next.capabilities = capabilities
         next.observedAt = .now
 
         switch result.0 {
         case let .value(health): next.health = health
         case .failure: failures.append("health")
+        case .unavailable: break
         }
         switch result.2 {
         case let .value(manifest): next.services = manifest.services
         case .failure: failures.append("services")
+        case .unavailable: break
         }
         switch result.3 {
         case let .value(operations): next.operations = operations.sorted { $0.updatedAt > $1.updatedAt }
         case .failure: failures.append("operations")
+        case .unavailable: break
         }
         switch result.4 {
         case let .value(releases): next.releases = NornRelease.canonicalHistory(releases.releases)
         case .failure: failures.append("releases")
+        case .unavailable: break
         }
         switch result.5 {
 		case let .value(apps): next.apps = apps
         case .failure: failures.append("apps")
+        case .unavailable: break
         }
 
         // Host status is its own versioned resource. Merge its latest receipt
@@ -745,29 +832,57 @@ final class NornAppModel {
             if capabilities.endpoints["hostStatus"] != nil {
                 failures.append("host assurance")
             }
+        case .unavailable: break
         }
         snapshot = next
 
         switch result.6 {
         case let .value(inventory): fleetInventory = inventory
-        case .failure: failures.append("fleet inventory")
+        case .failure:
+            fleetInventory = .unconfigured
+            failures.append("fleet inventory")
+        case .unavailable: break
         }
         switch result.7 {
         case let .value(plans): fleetPlans = plans
-        case .failure: failures.append("fleet plans")
+        case .failure:
+            fleetPlans = []
+            fleetReconciliations = [:]
+            fleetRunnerAttempts = [:]
+            failures.append("fleet plans")
+        case .unavailable: break
         }
         switch result.8 {
         case let .value(status): fleetGitHubStatus = status
-        case .failure: failures.append("fleet GitHub status")
+        case .failure:
+            fleetGitHubStatus = .unconfigured
+            failures.append("fleet GitHub status")
+        case .unavailable: break
         }
-        await refreshDeploymentVisibility(using: client)
+        if authorityOnly {
+            deployments = []
+            deploymentSteps = [:]
+        } else {
+            await refreshDeploymentVisibility(
+                using: client,
+                expectedGeneration: expectedGeneration,
+                expectedProfileID: expectedProfileID
+            )
+        }
         guard !failures.isEmpty else { return nil }
         return "Connected, but \(failures.joined(separator: ", ")) could not refresh. Other sections are current."
     }
 
     /// Deployment checkpoints are an optional compatibility lane. A failure
     /// must not discard the last known execution picture or take v1 offline.
-    private func refreshDeploymentVisibility(using client: any NornClientProtocol) async {
+    private func refreshDeploymentVisibility(
+        using client: any NornClientProtocol,
+        expectedGeneration: UInt64? = nil,
+        expectedProfileID: UUID? = nil
+    ) async {
+        let generation = expectedGeneration ?? connectionGeneration
+        let profileID = expectedProfileID ?? selectedProfileID
+        guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
         guard snapshot.capabilities.supportsDeploymentVisibility else {
             deployments = []
             deploymentSteps = [:]
@@ -779,34 +894,41 @@ final class NornAppModel {
             for deployment in current.prefix(12) {
                 steps[deployment.id] = (try? await client.deploymentSteps(deploymentID: deployment.id)) ?? []
             }
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             deployments = current
             deploymentSteps = steps
         } catch is CancellationError {
             return
         } catch {
-            // Preserve cached compatibility data. The main v1 refresh remains authoritative.
+            // A compatibility failure cannot be attributed safely after a
+            // profile change, so show it as unavailable rather than cached.
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            deployments = []
+            deploymentSteps = [:]
         }
     }
 
-    private func listenForEvents(profile: NornServerProfile) {
+    private func listenForEvents(profile: NornServerProfile, generation: UInt64) {
         guard let client else { return }
         eventTask = Task { [weak self] in
             var retry = 0
             while !Task.isCancelled {
-                guard let self, self.selectedProfileID == profile.id else { return }
+                guard let self, self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                 let cursor = self.profileStore.loadCursor(profileID: profile.id)
                 do {
                     for try await event in client.events(after: cursor) {
                         guard !Task.isCancelled else { return }
-                        await self.receive(event, profileID: profile.id)
+                        await self.receive(event, profileID: profile.id, generation: generation)
                     }
                     guard !Task.isCancelled else { return }
+                    guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                     self.connectionState = .reconnecting
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                     self.connectionState = .reconnecting
                     self.lastError = error.localizedDescription
                     self.stopHostMetricsPolling()
@@ -817,7 +939,8 @@ final class NornAppModel {
                 let delaySeconds = min(pow(2.0, Double(retry - 1)), 30)
                 do {
                     try await Task.sleep(for: .seconds(delaySeconds))
-                    self.lastError = try await self.refreshAuthoritativeState()
+                    self.lastError = try await self.refreshAuthoritativeState(generation: generation, profileID: profile.id)
+                    guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                     self.connectionState = .online
                     self.startHostMetricsPollingIfNeeded()
                     self.startFleetPollingIfNeeded()
@@ -825,6 +948,7 @@ final class NornAppModel {
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                     self.connectionState = .offline(error.localizedDescription)
                     self.lastError = error.localizedDescription
                     self.stopHostMetricsPolling()
@@ -850,14 +974,51 @@ final class NornAppModel {
         apps: []
     )
 
-    private func receive(_ event: NornControlEvent, profileID: UUID) async {
+    private func receive(_ event: NornControlEvent, profileID: UUID, generation: UInt64) async {
+        guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
         profileStore.saveCursor(event.id, profileID: profileID)
         if let object = event.payload.objectValue,
            let operationID = object["operationId"]?.stringValue,
            let client,
            let updated = try? await client.operation(id: operationID) {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             upsert(updated)
         }
+    }
+
+    private func isCurrentConnection(generation: UInt64, profileID: UUID?) -> Bool {
+        connectionGeneration == generation && selectedProfileID == profileID
+    }
+
+    private func hasScope(_ scope: String) -> Bool {
+        guard canPerformOperations else { return false }
+        return snapshot.capabilities.grantedScopes.contains(scope)
+            || snapshot.capabilities.grantedScopes.contains("admin")
+    }
+
+    private func mayQueue(_ request: NornMaintenanceRequest) -> Bool {
+        switch request {
+        case .hostAssurance: return canRunHostAssurance
+        case .platformPreflight, .platformUpgrade, .platformRollback, .platformSmoke:
+            return canRunPlatformMaintenance
+        }
+    }
+
+    private func clearConnectionScopedState() {
+        snapshot = Self.emptySnapshot
+        hostMetrics = nil
+        clearFleetAndDeploymentState()
+        selectedOperationID = nil
+    }
+
+    private func clearFleetAndDeploymentState() {
+        fleetInventory = .unconfigured
+        fleetPlans = []
+        fleetReconciliations = [:]
+        fleetRunnerAttempts = [:]
+        fleetGitHubStatus = .unconfigured
+        deployments = []
+        deploymentSteps = [:]
     }
 
     private func upsert(_ operation: NornOperation) {

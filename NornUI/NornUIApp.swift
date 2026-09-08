@@ -50,6 +50,7 @@ struct NornUIApp: App {
                 selectedProfileID: appModel.selectedProfileID,
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onDiscoverCapabilities: { try await appModel.discoverEnrollmentCapabilities(profile: $0) },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
@@ -75,7 +76,7 @@ private struct NornCommands: Commands {
 				appModel.isShowingCreateApp = true
 			}
 			.keyboardShortcut("n", modifiers: .command)
-			.disabled(!appModel.canPerformOperations || !appModel.appCreationSupported)
+			.disabled(!appModel.canWriteRuntime || !appModel.appCreationSupported)
 
 			Divider()
             Button("Refresh Control Room") {
@@ -89,23 +90,36 @@ private struct NornCommands: Commands {
                 Task { await appModel.queue(.platformSmoke) }
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(!appModel.canPerformOperations)
+            .disabled(!appModel.canRunPlatformMaintenance)
 
             Button("Run Host Assurance") {
                 Task { await appModel.queue(.hostAssurance) }
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(!appModel.canPerformOperations)
+            .disabled(!appModel.canRunHostAssurance)
         }
 
         CommandGroup(after: .sidebar) {
             Divider()
-            ForEach(Array(NornNavigation.allCases.enumerated()), id: \.element.id) { index, destination in
+            ForEach(appModel.availableNavigationDestinations) { destination in
                 Button("Show \(destination.title)") {
                     appModel.navigation = destination
                 }
-                .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                .keyboardShortcut(navigationShortcut(for: destination), modifiers: .command)
             }
+        }
+    }
+
+    private func navigationShortcut(for destination: NornNavigation) -> KeyEquivalent {
+        switch destination {
+        case .overview: "1"
+        case .apps: "2"
+        case .operations: "3"
+        case .fleet: "4"
+        case .platform: "5"
+        case .host: "6"
+        case .activity: "7"
+        case .delivery: "8"
         }
     }
 }

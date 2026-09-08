@@ -141,6 +141,49 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot.releases.first?.version, "v2.21.0")
         XCTAssertTrue(model.lastError?.contains("fleet inventory") == true)
         XCTAssertFalse(model.snapshot.operations.contains { $0.updatedAt == NornFixtures.snapshot.operations[0].updatedAt })
+        XCTAssertEqual(model.fleetInventory, .unconfigured)
+        XCTAssertTrue(model.fleetPlans.isEmpty)
+        XCTAssertTrue(model.deployments.isEmpty)
+    }
+
+    func testCompatibilityScopesAndFleetAuthorityFilterActionsAndNavigation() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Compatibility", baseURL: URL(string: "https://norn.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient(principal: nil, authority: "fleet-only") })
+        await model.start()
+
+        XCTAssertFalse(model.isServerAuthenticated)
+        XCTAssertFalse(model.canOperateFleet)
+        XCTAssertEqual(model.availableNavigationDestinations, [.overview, .fleet])
+        let queued = await model.queue(.platformSmoke)
+        XCTAssertNil(queued)
+    }
+
+    func testProfileSwitchFailureClearsPriorDashboardAndFleetEvidence() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "First", baseURL: URL(string: "https://first.example.test")!)
+        let second = NornServerProfile(name: "Second", baseURL: URL(string: "https://second.example.test")!)
+        store.saveProfiles([first, second])
+        store.saveSelection(first.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            profile.id == second.id ? ScopeProbeClient(failsCapabilities: true) : ScopeProbeClient()
+        })
+        await model.start()
+        XCTAssertFalse(model.snapshot.services.isEmpty)
+        await model.selectProfile(id: second.id)
+        XCTAssertTrue(model.snapshot.services.isEmpty)
+        XCTAssertTrue(model.snapshot.operations.isEmpty)
+        XCTAssertTrue(model.fleetPlans.isEmpty)
+        XCTAssertTrue(model.deployments.isEmpty)
+        if case .offline = model.connectionState {} else { XCTFail("expected offline") }
     }
 
     func testDeviceEnrollmentPersistsOnlyManagedMetadataAndKeychainCredential() async throws {
@@ -236,7 +279,11 @@ private actor ModelEnrollmentClient: NornEnrollmentClientProtocol {
 }
 
 private struct MockNornClient: NornClientProtocol {
-    func capabilities() async throws -> NornCapabilities { NornFixtures.snapshot.capabilities }
+    func capabilities() async throws -> NornCapabilities {
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.auth.principal?.scopes.append(contentsOf: ["platform:operate", "host:operate"])
+        return capabilities
+    }
     func hostMetrics() async throws -> NornHostMetrics { NornFixtures.hostMetrics }
     func health() async throws -> NornHealth { NornFixtures.snapshot.health }
     func fleetInventory() async throws -> NornFleetInventory { NornFixtures.fleetInventory }
@@ -312,6 +359,42 @@ private struct FailingMetricsClient: NornClientProtocol {
     private enum MetricsError: Error {
         case unavailable
     }
+}
+
+private struct ScopeProbeClient: NornClientProtocol {
+    let principal: NornCapabilities.Authentication.Principal?
+    let authority: String?
+    let failsCapabilities: Bool
+    private let base = MockNornClient()
+
+    init(
+        principal: NornCapabilities.Authentication.Principal? = NornFixtures.snapshot.capabilities.auth.principal,
+        authority: String? = nil,
+        failsCapabilities: Bool = false
+    ) {
+        self.principal = principal
+        self.authority = authority
+        self.failsCapabilities = failsCapabilities
+    }
+
+    func capabilities() async throws -> NornCapabilities {
+        if failsCapabilities { throw URLError(.cannotConnectToHost) }
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.auth.principal = principal
+        capabilities.authority = authority
+        if authority == "fleet-only" { capabilities.features.append("fleet-authority-only-v1") }
+        return capabilities
+    }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func fleetInventory() async throws -> NornFleetInventory { try await base.fleetInventory() }
+    func fleetPlans() async throws -> [NornOperation] { try await base.fleetPlans() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation { try await base.queue(request, idempotencyKey: idempotencyKey) }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { base.events(after: cursor) }
 }
 
 private struct PartialDashboardClient: NornClientProtocol {

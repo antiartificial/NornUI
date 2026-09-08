@@ -47,6 +47,9 @@ struct ContentView: View {
                 onManualSave: { profile, token in
                     try await appModel.saveProfile(profile, token: token)
                 },
+                onDiscoverCapabilities: { profile in
+                    try await appModel.discoverEnrollmentCapabilities(profile: profile)
+                },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
@@ -63,14 +66,20 @@ struct ContentView: View {
 
     private var sidebar: some View {
         List(selection: $appModel.navigation) {
+            if appModel.isServerAuthenticated {
+                Section {
+                    AuthorityContextBanner(appModel: appModel)
+                }
+            }
             Section("Control Room") {
-                ForEach(NornNavigation.allCases.filter { $0 != .activity }) { destination in
+                ForEach(appModel.availableNavigationDestinations) { destination in
                     Label(destination.title, systemImage: destination.symbol)
                         .tag(destination)
                         .accessibilityHint("Shows \(destination.title.lowercased())")
                 }
             }
 
+            if !appModel.isFleetAuthorityOnly {
             Section("Activity") {
                 VStack(alignment: .leading, spacing: 7) {
                     Label("Inspect Activity", systemImage: NornNavigation.activity.symbol)
@@ -86,6 +95,7 @@ struct ContentView: View {
                 .tag(NornNavigation.activity)
                 .accessibilityIdentifier("sidebar.activity")
                 .accessibilityHint("Shows the operations and services behind these totals")
+            }
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -113,8 +123,8 @@ struct ContentView: View {
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
-				canCreate: appModel.canPerformOperations && appModel.appCreationSupported,
-				supportsRecovery: appModel.canPerformOperations && appModel.durableAppRecoverySupported,
+				canCreate: appModel.canWriteRuntime && appModel.appCreationSupported,
+				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
 				onCreate: { appModel.isShowingCreateApp = true },
 				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
@@ -140,13 +150,13 @@ struct ContentView: View {
         case .platform:
             PlatformFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canRunPlatformMaintenance,
                 onQueue: queue
             )
         case .host:
             HostFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canReadRuntime,
                 metrics: appModel.hostMetrics,
                 isMetricsSupported: appModel.hostMetricsSupported,
                 onQueue: queue,
@@ -168,7 +178,7 @@ struct ContentView: View {
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
-                canPlan: appModel.canPerformOperations,
+                canPlan: appModel.canOperateFleet,
                 isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
@@ -220,6 +230,27 @@ struct ContentView: View {
     private func openOperation(_ operation: NornOperation) {
         appModel.selectedOperationID = operation.id
         appModel.navigation = .operations
+    }
+}
+
+private struct AuthorityContextBanner: View {
+    let appModel: NornAppModel
+
+    private var environment: String {
+        appModel.assertedEnvironmentID?.capitalized ?? "Environment not asserted"
+    }
+
+    private var authority: String {
+        if appModel.isFleetAuthorityOnly { return "Fleet authority" }
+        return "Mini runtime authority"
+    }
+
+    var body: some View {
+        Label("Authenticated: \(environment) · \(authority)", systemImage: "checkmark.shield.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(appModel.isFleetAuthorityOnly ? .purple : .green)
+            .accessibilityIdentifier("authority.context.banner")
+            .help("Environment and authority are asserted by the authenticated server response.")
     }
 }
 
