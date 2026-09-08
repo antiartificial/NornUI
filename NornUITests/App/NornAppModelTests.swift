@@ -246,6 +246,7 @@ final class NornAppModelTests: XCTestCase {
             CountingMutationClient(counter: profile.id == profileB.id ? bCalls : MutationCallCounter())
         })
         await model.start()
+        XCTAssertTrue(model.canManageAppRecovery, "A must have the exact recovery authority before its token is captured")
         let contextFromA = model.issueMutationContext()
 
         await model.selectProfile(id: profileB.id)
@@ -775,7 +776,7 @@ private struct CountingMutationClient: NornClientProtocol {
 
     func capabilities() async throws -> NornCapabilities {
         var capabilities = try await base.capabilities()
-        capabilities.features.append("durable-app-recovery")
+        capabilities.auth.principal?.scopes.append("api:write")
         return capabilities
     }
     func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
