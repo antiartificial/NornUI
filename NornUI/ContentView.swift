@@ -65,7 +65,7 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $appModel.navigation) {
+        List(selection: guardedNavigation) {
             if appModel.isServerAuthenticated {
                 Section {
                     AuthorityContextBanner(appModel: appModel)
@@ -105,6 +105,13 @@ struct ContentView: View {
         .navigationTitle("Norn")
     }
 
+    private var guardedNavigation: Binding<NornNavigation> {
+        Binding(
+            get: { appModel.navigation },
+            set: { appModel.navigate(to: $0) }
+        )
+    }
+
     @ViewBuilder
     private var detail: some View {
         switch appModel.navigation {
@@ -123,7 +130,7 @@ struct ContentView: View {
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
-				canCreate: appModel.canWriteRuntime && appModel.appCreationSupported,
+				canCreate: appModel.canManageApps,
 				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
 				canManageRecovery: appModel.canManageAppRecovery,
 				onCreate: { appModel.isShowingCreateApp = true },
@@ -139,7 +146,7 @@ struct ContentView: View {
 				environmentID: appModel.environmentID,
 				environmentProfile: appModel.environmentProfile,
 				isSupported: appModel.releasePipelineSupported,
-				isConnected: appModel.canPerformOperations,
+				isConnected: appModel.canReadLegacyReleaseEvidence,
 				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
 			)
 		case .operations:
@@ -158,6 +165,7 @@ struct ContentView: View {
             HostFeatureView(
                 snapshot: appModel.snapshot,
                 isConnected: appModel.canReadRuntime,
+                canQueueAssurance: appModel.canRunHostAssurance,
                 metrics: appModel.hostMetrics,
                 isMetricsSupported: appModel.hostMetricsSupported,
                 onQueue: queue,
@@ -180,7 +188,7 @@ struct ContentView: View {
                 environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canOperateFleet,
-                isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
+                isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
                 onPlan: { pool, desired, size, reason in

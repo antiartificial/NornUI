@@ -76,7 +76,8 @@ private struct NornCommands: Commands {
 				appModel.isShowingCreateApp = true
 			}
 			.keyboardShortcut("n", modifiers: .command)
-			.disabled(!appModel.canWriteRuntime || !appModel.appCreationSupported)
+			.disabled(!appModel.canManageApps)
+			.help(appModel.canManageApps ? "Create a disabled app draft" : "Requires authenticated api:write and the app-creation capability")
 
 			Divider()
             Button("Refresh Control Room") {
@@ -91,12 +92,14 @@ private struct NornCommands: Commands {
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(!appModel.canRunPlatformMaintenance)
+            .help(appModel.canRunPlatformMaintenance ? "Queue a platform smoke check" : "Requires an authenticated platform:operate scope")
 
             Button("Run Host Assurance") {
                 Task { await appModel.queue(.hostAssurance) }
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
             .disabled(!appModel.canRunHostAssurance)
+            .help(appModel.canRunHostAssurance ? "Queue host assurance" : "Requires an authenticated host:operate scope")
         }
 
         CommandGroup(after: .sidebar) {
