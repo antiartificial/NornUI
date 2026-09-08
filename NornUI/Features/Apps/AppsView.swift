@@ -16,7 +16,7 @@ struct AppsView: View {
     var onOpenOperation: (NornOperation) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pendingEnable: NornAppStatus?
+    @State private var draftEnableGate = NornProfileBoundMutationGate<String>()
     @State private var selectedAppName: String?
     @State private var searchText = ""
     @State private var presentation: AppListPresentation = .grouped
@@ -130,18 +130,24 @@ struct AppsView: View {
         }
         .task { normalizeSelection() }
         .onChange(of: visibleAppNames) { _, _ in normalizeSelection() }
+        .onChange(of: profileID) { _, _ in draftEnableGate.invalidate() }
+        .onChange(of: canCreate) { _, _ in draftEnableGate.invalidate() }
+        .onChange(of: apps) { _, _ in draftEnableGate.invalidate() }
         .confirmationDialog(
-            "Enable deployment for \(pendingEnable?.spec.name ?? "this app")?",
+            "Enable deployment for \(draftEnableGate.pending?.intent ?? "this app")?",
             isPresented: Binding(
-                get: { pendingEnable != nil },
-                set: { if !$0 { pendingEnable = nil } }
+                get: { draftEnableGate.pending != nil },
+                set: { if !$0 { draftEnableGate.dismiss() } }
             )
         ) {
             Button("Enable Deployment") {
-                if let app = pendingEnable { onEnable(app.spec.name) }
-                pendingEnable = nil
+                if let appID = draftEnableGate.confirmedIntent(profileID: profileID, isAuthorized: canCreate, isStillCurrent: { appID in
+                    apps.contains(where: { $0.id == appID && $0.spec.deploy == false })
+                }) {
+                    onEnable(appID)
+                }
             }
-            Button("Cancel", role: .cancel) { pendingEnable = nil }
+            Button("Cancel", role: .cancel) { draftEnableGate.dismiss() }
         } message: {
             Text("The app will become eligible for deploy and host-recovery workflows. Verify its source, build, secrets, and health checks first.")
         }
@@ -159,7 +165,10 @@ struct AppsView: View {
                             HStack(spacing: 5) {
                                 Text(app.spec.name)
                                     .font(.callout.weight(.medium))
-                                Button("Enable") { pendingEnable = app }
+                                Button("Enable") {
+                                    guard drafts.contains(where: { $0.id == app.id }) else { return }
+                                    draftEnableGate.present(app.id, profileID: profileID, isAuthorized: canCreate)
+                                }
                                     .disabled(!canCreate)
                                     .help(canCreate ? "Enable this app deployment" : "Requires authenticated api:write and app-creation capability")
                                     .buttonStyle(.link)

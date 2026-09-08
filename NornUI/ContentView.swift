@@ -59,7 +59,10 @@ struct ContentView: View {
             )
         }
 		.sheet(isPresented: $appModel.isShowingCreateApp) {
-			CreateAppSheet { request in await appModel.createApp(request) != nil }
+			CreateAppSheet(
+				profileID: appModel.selectedProfileID,
+				canCreate: appModel.canManageApps
+			) { request in await appModel.createApp(request) != nil }
 		}
         .task { await appModel.start() }
     }
@@ -162,6 +165,7 @@ struct ContentView: View {
             PlatformFeatureView(
                 snapshot: appModel.snapshot,
                 isConnected: appModel.canRunPlatformMaintenance,
+				profileID: appModel.selectedProfileID,
                 onQueue: queue
             )
         case .host:
@@ -191,6 +195,7 @@ struct ContentView: View {
                 environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
                 canPlan: appModel.canOperateFleet,
+				profileID: appModel.selectedProfileID,
                 isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,

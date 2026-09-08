@@ -93,3 +93,53 @@ struct NornProfileAppContext: Hashable {
     let appID: String
     let isActive: Bool
 }
+
+/// A mutation presentation belongs to the profile and UI context that opened
+/// it. Settings-window profile changes can otherwise leave a visible A intent
+/// whose callback dispatches through B's current client.
+struct NornProfileBoundMutationGate<Intent> {
+    struct Pending: Identifiable {
+        let profileID: UUID?
+        let intent: Intent
+        let contextGeneration: UInt64
+
+        var id: String { "\(profileID?.uuidString ?? "none"):\(contextGeneration)" }
+    }
+
+    private(set) var pending: Pending?
+    private(set) var contextGeneration: UInt64 = 0
+
+    mutating func present(
+        _ intent: Intent,
+        profileID: UUID?,
+        isAuthorized: Bool
+    ) {
+        guard isAuthorized else { return }
+        pending = .init(profileID: profileID, intent: intent, contextGeneration: contextGeneration)
+    }
+
+    mutating func invalidate() {
+        contextGeneration &+= 1
+        pending = nil
+    }
+
+    mutating func dismiss() {
+        pending = nil
+    }
+
+    mutating func confirmedIntent(
+        profileID: UUID?,
+        isAuthorized: Bool,
+        isStillCurrent: (Intent) -> Bool
+    ) -> Intent? {
+        defer { pending = nil }
+        guard let pending,
+              isAuthorized,
+              pending.profileID == profileID,
+              pending.contextGeneration == contextGeneration,
+              isStillCurrent(pending.intent) else {
+            return nil
+        }
+        return pending.intent
+    }
+}

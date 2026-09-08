@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct FleetFeatureView: View {
@@ -13,6 +14,7 @@ struct FleetFeatureView: View {
     let environmentID: String
     let isSupported: Bool
     let canPlan: Bool
+	let profileID: UUID?
     let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
@@ -21,7 +23,7 @@ struct FleetFeatureView: View {
     let onDispatchApply: (String, Bool) async -> URL?
 	let onOpenOperation: (NornOperation) -> Void
 
-    @State private var planningPool: PoolSelection?
+    @State private var planningGate = NornProfileBoundMutationGate<PoolSelection>()
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     private var pools: [PoolSelection] {
@@ -86,10 +88,21 @@ struct FleetFeatureView: View {
                     .disabled(isRefreshing)
             }
         }
-        .sheet(item: $planningPool) { selection in
+        .onChange(of: profileID) { _, _ in planningGate.invalidate() }
+        .onChange(of: canPlan) { _, _ in planningGate.invalidate() }
+        .onChange(of: isSupported) { _, _ in planningGate.invalidate() }
+        .onChange(of: pools) { _, _ in planningGate.invalidate() }
+        .sheet(item: Binding(get: { planningGate.pending }, set: { if $0 == nil { planningGate.dismiss() } })) { pending in
+            let selection = pending.intent
             FleetCapacitySheet(name: selection.name, pool: selection.pool) { desired, size, reason in
-                let succeeded = await onPlan(selection.name, desired, size, reason)
-                if succeeded { planningPool = nil }
+                guard let currentSelection = planningGate.confirmedIntent(
+                    profileID: profileID,
+                    isAuthorized: canPlan && isSupported && inventory.validation?.valid != false,
+                    isStillCurrent: { candidate in
+                        pools.contains { $0.name == candidate.name && $0.pool == candidate.pool }
+                    }
+                ) else { return false }
+                let succeeded = await onPlan(currentSelection.name, desired, size, reason)
                 return succeeded
             }
         }
@@ -189,7 +202,7 @@ struct FleetFeatureView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 270), spacing: 12)], spacing: 12) {
                 ForEach(pools) { selection in
                     FleetPoolCard(name: selection.name, pool: selection.pool, canPlan: canPlan && inventory.validation?.valid != false) {
-                        planningPool = selection
+                        planningGate.present(selection, profileID: profileID, isAuthorized: canPlan && isSupported && inventory.validation?.valid != false)
                     }
                 }
             }
@@ -566,7 +579,7 @@ private struct FleetPlanJourney: View {
     }
 }
 
-private struct PoolSelection: Identifiable {
+private struct PoolSelection: Identifiable, Hashable {
     let name: String
     let pool: NornFleetNodePool
     var id: String { name }
@@ -597,6 +610,7 @@ private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
             environmentID: "production",
             isSupported: true,
             canPlan: true,
+			profileID: nil,
             isStale: false,
             isRefreshing: false,
             onRefresh: {},

@@ -1,12 +1,16 @@
+import Foundation
 import SwiftUI
 
 struct CreateAppSheet: View {
 	@Environment(\.dismiss) private var dismiss
+	let profileID: UUID?
+	let canCreate: Bool
 	@State private var name = ""
 	@State private var kind: NornAppTemplateKind = .endpoint
 	@State private var port = 8080
 	@State private var isCreating = false
 	@State private var errorMessage: String?
+	@State private var mutationGate = NornProfileBoundMutationGate<NornCreateAppRequest>()
 	let onCreate: (NornCreateAppRequest) async -> Bool
 
 	private var normalizedName: String { name.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" } }
@@ -33,19 +37,35 @@ struct CreateAppSheet: View {
 			HStack {
 				Spacer()
 				Button("Cancel", role: .cancel) { dismiss() }.keyboardShortcut(.cancelAction)
-				Button("Create Draft") { create() }.keyboardShortcut(.defaultAction).disabled(!isValid || isCreating)
+				Button("Create Draft") { create() }
+					.keyboardShortcut(.defaultAction)
+					.disabled(!isValid || isCreating || !canCreate)
+					.help(canCreate ? "Create a disabled app draft" : "Requires authenticated api:write and the app-creation capability")
 			}
 		}
 		.padding(20)
 		.frame(width: 480)
 		.interactiveDismissDisabled(isCreating)
+		.onChange(of: profileID) { _, _ in
+			mutationGate.invalidate()
+			if !isCreating { dismiss() }
+		}
+		.onChange(of: canCreate) { _, _ in
+			mutationGate.invalidate()
+			if !isCreating { dismiss() }
+		}
 	}
 
 	private func create() {
+		let requested = NornCreateAppRequest(name: normalizedName, kind: kind, port: kind == .endpoint ? port : nil)
+		mutationGate.present(requested, profileID: profileID, isAuthorized: canCreate)
 		isCreating = true
 		errorMessage = nil
 		Task {
-			let request = NornCreateAppRequest(name: normalizedName, kind: kind, port: kind == .endpoint ? port : nil)
+			guard let request = mutationGate.confirmedIntent(profileID: profileID, isAuthorized: canCreate, isStillCurrent: { $0 == requested }) else {
+				isCreating = false
+				return
+			}
 			if await onCreate(request) { dismiss() } else { errorMessage = "The app could not be created. Review the server message and try again." }
 			isCreating = false
 		}

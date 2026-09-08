@@ -456,6 +456,70 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(loader.snapshots.map(\.filename), ["billing-current.dump"], "A delayed response must not make an old filename restorable in the current app")
     }
 
+    func testDraftEnableConfirmationCannotDispatchToAuthorizedProfileBWithTheSameAppName() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let appName = "orders"
+        var gate = NornProfileBoundMutationGate<String>()
+        var profileBMutationCalls = 0
+
+        gate.present(appName, profileID: profileA, isAuthorized: true)
+        if let appID = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == appName }) {
+            XCTAssertEqual(appID, appName)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0, "An A draft confirmation must not enable the same-named app through B's authorized client")
+    }
+
+    func testCreateDraftPresentationCannotDispatchToAuthorizedProfileB() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let request = NornCreateAppRequest(name: "orders", kind: .endpoint, port: 8080)
+        var gate = NornProfileBoundMutationGate<NornCreateAppRequest>()
+        var profileBMutationCalls = 0
+
+        gate.present(request, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == request }) {
+            XCTAssertEqual(dispatched, request)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
+    }
+
+    func testFleetCapacityPresentationCannotDispatchToAuthorizedProfileBWithTheSamePool() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let pool = "app"
+        var gate = NornProfileBoundMutationGate<String>()
+        var profileBMutationCalls = 0
+
+        gate.present(pool, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == pool }) {
+            XCTAssertEqual(dispatched, pool)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
+    }
+
+    func testPlatformActionPresentationCannotDispatchToAuthorizedProfileB() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let request = NornMaintenanceRequest.platformSmoke
+        var gate = NornProfileBoundMutationGate<NornMaintenanceRequest>()
+        var profileBMutationCalls = 0
+
+        gate.present(request, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == request }) {
+            XCTAssertEqual(dispatched, request)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
+    }
+
     func testDeviceEnrollmentPersistsOnlyManagedMetadataAndKeychainCredential() async throws {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
