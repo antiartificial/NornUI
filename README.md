@@ -73,10 +73,12 @@ work.
 For observation, provision `api:read,events:read`. Add `api:write` for Macs that
 may create apps, manage app recovery, or prepare and hand off fleet changes.
 Add `platform:operate` or `host:operate` only for Macs that should be allowed to
-queue those workflows. Add `fleet:operate` for fleet review/apply handoff and
-`apps:exec` only when the Mac should be able to request audited terminal
-sessions. An administrator may grant fewer scopes than the Mac requests and
-device enrollment can never grant `admin`.
+queue those workflows. Human fleet planning, review, and apply handoff uses
+`api:write`; `fleet:operate` is reserved for exact GitHub Actions runner
+identities and must not be granted to an engineer's Mac. Add `apps:exec` only
+when the Mac should be able to request audited terminal sessions. An
+administrator may grant fewer scopes than the Mac requests and device
+enrollment can never grant `admin`.
 
 Manual token entry remains available under **Access Token** for older servers
 or recovery. It is not the recommended onboarding path because a pasted token
@@ -87,7 +89,7 @@ does not receive native renewal or device-level revocation metadata.
 - Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.
   The Mac offers the next safe GitHub handoff the server supports, displays
   durable runner attempts and heartbeats, and exposes evidence-gated retry or
-  advance actions when the connected principal has `fleet:operate`.
+  advance actions when the connected human principal has `api:write`.
 - A successful GitHub dispatch is handoff proof only. It does not mark the
   first missing reconciliation phase active. Phase state comes from Norn's
   durable runner-attempt and reconciliation evidence, never from optimistic
