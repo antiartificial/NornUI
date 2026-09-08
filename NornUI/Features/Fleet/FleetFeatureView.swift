@@ -18,9 +18,10 @@ struct FleetFeatureView: View {
     let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
-    let onPlan: (String, Int, String, String) async -> Bool
-    let onOpenReview: (String) async -> URL?
-    let onDispatchApply: (String, Bool) async -> URL?
+	let issueMutationContext: () -> NornMutationContext?
+    let onPlan: (String, Int, String, String, NornMutationContext) async -> Bool
+    let onOpenReview: (String, NornMutationContext) async -> URL?
+    let onDispatchApply: (String, Bool, NornMutationContext) async -> URL?
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningGate = NornProfileBoundMutationGate<PoolSelection>()
@@ -94,7 +95,7 @@ struct FleetFeatureView: View {
         .onChange(of: pools) { _, _ in planningGate.invalidate() }
         .sheet(item: Binding(get: { planningGate.pending }, set: { if $0 == nil { planningGate.dismiss() } })) { pending in
             let selection = pending.intent
-            FleetCapacitySheet(name: selection.name, pool: selection.pool) { desired, size, reason in
+            FleetCapacitySheet(name: selection.name, pool: selection.pool, issueMutationContext: issueMutationContext) { desired, size, reason, context in
                 guard let currentSelection = planningGate.confirmedIntent(
                     profileID: profileID,
                     isAuthorized: canPlan && isSupported && inventory.validation?.valid != false,
@@ -102,7 +103,7 @@ struct FleetFeatureView: View {
                         pools.contains { $0.name == candidate.name && $0.pool == candidate.pool }
                     }
                 ) else { return false }
-                let succeeded = await onPlan(currentSelection.name, desired, size, reason)
+                let succeeded = await onPlan(currentSelection.name, desired, size, reason, context)
                 return succeeded
             }
         }
@@ -238,6 +239,7 @@ struct FleetFeatureView: View {
                             operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
                             canUseGitHub: canPlan && githubStatus.connected,
+							issueMutationContext: issueMutationContext,
                             onOpenReview: onOpenReview,
                             onDispatchApply: onDispatchApply,
 							onOpenOperation: onOpenOperation
@@ -297,7 +299,8 @@ private struct FleetPoolCard: View {
 private struct FleetCapacitySheet: View {
     let name: String
     let pool: NornFleetNodePool
-    let onSubmit: (Int, String, String) async -> Bool
+	let issueMutationContext: () -> NornMutationContext?
+    let onSubmit: (Int, String, String, NornMutationContext) async -> Bool
 
     @Environment(\.dismiss) private var dismiss
     @State private var desired: Int
@@ -305,9 +308,10 @@ private struct FleetCapacitySheet: View {
     @State private var reason = ""
     @State private var isSubmitting = false
 
-    init(name: String, pool: NornFleetNodePool, onSubmit: @escaping (Int, String, String) async -> Bool) {
+    init(name: String, pool: NornFleetNodePool, issueMutationContext: @escaping () -> NornMutationContext?, onSubmit: @escaping (Int, String, String, NornMutationContext) async -> Bool) {
         self.name = name
         self.pool = pool
+		self.issueMutationContext = issueMutationContext
         self.onSubmit = onSubmit
         _desired = State(initialValue: pool.desired)
         _size = State(initialValue: pool.size)
@@ -370,9 +374,10 @@ private struct FleetCapacitySheet: View {
                 Spacer()
                 if !reasonIsValid { Text("Add a short reason to continue.").font(.caption).foregroundStyle(.secondary) }
                 Button(actionTitle) {
+					guard let context = issueMutationContext() else { return }
                     isSubmitting = true
                     Task {
-                        _ = await onSubmit(desired, size, reason)
+                        _ = await onSubmit(desired, size, reason, context)
                         isSubmitting = false
                     }
                 }
@@ -404,8 +409,9 @@ private struct FleetPlanJourney: View {
     let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
-    let onOpenReview: (String) async -> URL?
-    let onDispatchApply: (String, Bool) async -> URL?
+	let issueMutationContext: () -> NornMutationContext?
+    let onOpenReview: (String, NornMutationContext) async -> URL?
+    let onDispatchApply: (String, Bool, NornMutationContext) async -> URL?
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
@@ -542,19 +548,19 @@ private struct FleetPlanJourney: View {
     }
 
     private func runOpenReview() {
-        guard !isWorking else { return }
+        guard !isWorking, let context = issueMutationContext() else { return }
         isWorking = true
         Task {
-            reviewURL = await onOpenReview(plan.id)
+            reviewURL = await onOpenReview(plan.id, context)
             isWorking = false
         }
     }
 
     private func runApply() {
-        guard !isWorking else { return }
+        guard !isWorking, let context = issueMutationContext() else { return }
         isWorking = true
         Task {
-            applyURL = await onDispatchApply(plan.id, isDestructive)
+            applyURL = await onDispatchApply(plan.id, isDestructive, context)
             isWorking = false
         }
     }
@@ -614,9 +620,10 @@ private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
             isStale: false,
             isRefreshing: false,
             onRefresh: {},
-            onPlan: { _, _, _, _ in true },
-            onOpenReview: { _ in nil },
-            onDispatchApply: { _, _ in nil },
+			issueMutationContext: { nil },
+            onPlan: { _, _, _, _, _ in true },
+            onOpenReview: { _, _ in nil },
+            onDispatchApply: { _, _, _ in nil },
 			onOpenOperation: { _ in }
         )
     }

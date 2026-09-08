@@ -12,7 +12,8 @@ struct AppsView: View {
     var onCreate: () -> Void = {}
     var onEnable: (String) -> Void = { _ in }
     var onLoadSnapshots: (String) async -> [NornAppSnapshot]? = { _ in nil }
-    var onQueueOperation: (NornAppOperationRequest) async -> NornOperation? = { _ in nil }
+    var issueMutationContext: () -> NornMutationContext? = { nil }
+    var onQueueOperation: (NornAppOperationRequest, NornMutationContext) async -> NornOperation? = { _, _ in nil }
     var onOpenOperation: (NornOperation) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -77,6 +78,7 @@ struct AppsView: View {
 					profileID: profileID,
 					isConnected: isRecoveryConnected,
                     onLoadSnapshots: onLoadSnapshots,
+                    issueMutationContext: issueMutationContext,
                     onQueue: onQueueOperation,
                     onOpenOperation: onOpenOperation
                 )
@@ -730,7 +732,8 @@ private struct AppRecoveryInspector: View {
 	let profileID: UUID?
 	let isConnected: Bool
 	let onLoadSnapshots: (String) async -> [NornAppSnapshot]?
-	let onQueue: (NornAppOperationRequest) async -> NornOperation?
+	let issueMutationContext: () -> NornMutationContext?
+	let onQueue: (NornAppOperationRequest, NornMutationContext) async -> NornOperation?
 	let onOpenOperation: (NornOperation) -> Void
 
 	@State private var snapshotLoader = AppRecoverySnapshotLoader()
@@ -866,8 +869,8 @@ private struct AppRecoveryInspector: View {
 		await snapshotLoader.reload(for: recoveryContext, operation: onLoadSnapshots)
 	}
 	private func queue(_ request: NornAppOperationRequest) {
-		guard !isQueuing else { return }; isQueuing = true
-		Task { if let operation = await onQueue(request) { onOpenOperation(operation) }; isQueuing = false }
+		guard !isQueuing, let context = issueMutationContext() else { return }; isQueuing = true
+		Task { if let operation = await onQueue(request, context) { onOpenOperation(operation) }; isQueuing = false }
 	}
 	private func executeConfirmation() {
 		guard canManage, isSupported, let confirmation else { self.confirmation = nil; return }; self.confirmation = nil

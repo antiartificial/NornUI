@@ -96,7 +96,7 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.connectionState, .online)
         XCTAssertEqual(model.snapshot.services.count, NornFixtures.snapshot.services.count)
 
-        let queued = await model.queue(.platformSmoke)
+        let queued = await model.queue(.platformSmoke, context: model.issueMutationContext())
         XCTAssertEqual(queued?.kind, "platform.smoke")
         XCTAssertEqual(model.navigation, .operations)
         XCTAssertEqual(model.selectedOperationID, queued?.id)
@@ -141,12 +141,12 @@ final class NornAppModelTests: XCTestCase {
 
         XCTAssertEqual(model.fleetInventory.document?.cluster.name, "production-nyc3")
         XCTAssertTrue(model.fleetSupported)
-        let plan = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom")
+        let plan = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom", context: model.issueMutationContext())
         XCTAssertEqual(plan?.payload?["proposed"], .object(["desired": .number(3)]))
         XCTAssertEqual(model.fleetPlans.first?.id, plan?.id)
         XCTAssertEqual(model.fleetReconciliations[plan?.id ?? ""], [])
 
-        let retry = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom")
+        let retry = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom", context: model.issueMutationContext())
         XCTAssertEqual(retry?.id, plan?.id, "the same intent must retain its idempotency key across an ambiguous retry")
     }
 
@@ -206,7 +206,7 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertFalse(model.isServerAuthenticated)
         XCTAssertFalse(model.canOperateFleet)
         XCTAssertEqual(model.availableNavigationDestinations, [.overview, .fleet])
-        let queued = await model.queue(.platformSmoke)
+        let queued = await model.queue(.platformSmoke, context: model.issueMutationContext())
         XCTAssertNil(queued)
     }
 
@@ -230,6 +230,35 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertTrue(model.fleetPlans.isEmpty)
         XCTAssertTrue(model.deployments.isEmpty)
         if case .offline = model.connectionState {} else { XCTFail("expected offline") }
+    }
+
+    func testProfileBoundMutationContextRejectsQueuedAIntentAfterAuthorizedSwitchToB() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profileA = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let profileB = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([profileA, profileB])
+        store.saveSelection(profileA.id)
+        let bCalls = MutationCallCounter()
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            CountingMutationClient(counter: profile.id == profileB.id ? bCalls : MutationCallCounter())
+        })
+        await model.start()
+        let contextFromA = model.issueMutationContext()
+
+        await model.selectProfile(id: profileB.id)
+        XCTAssertTrue(model.canRunHostAssurance)
+        XCTAssertTrue(model.canManageAppRecovery)
+
+        let host = await model.queue(.hostAssurance, context: contextFromA)
+        let app = await model.queueAppOperation(.snapshot(app: "mail-mcp"), context: contextFromA)
+
+        XCTAssertNil(host)
+        XCTAssertNil(app)
+        let calls = await bCalls.mutations()
+        XCTAssertEqual(calls, [], "An A context must not dispatch through authorized B, even for the same app name")
     }
 
     func testProfileSwitchDropsEveryDeferredFleetAndMetricsResponse() async {
@@ -292,7 +321,8 @@ final class NornAppModelTests: XCTestCase {
             await oldControl.block("queueMutation", failing: shouldFail)
             XCTAssertTrue(model.canRunHostAssurance)
 
-            async let mutation: NornOperation? = model.queue(.hostAssurance)
+            let context = model.issueMutationContext()
+            async let mutation: NornOperation? = model.queue(.hostAssurance, context: context)
             await oldControl.waitUntilCalled("queueMutation")
             await model.selectProfile(id: second.id)
             await oldControl.release("queueMutation")
@@ -324,8 +354,8 @@ final class NornAppModelTests: XCTestCase {
         let operation = NornFixtures.snapshot.operations[0]
         model.openOperation(operation)
         XCTAssertEqual(model.navigation, .fleet)
-        let hostOperation = await model.queue(.hostAssurance)
-        let appOperation = await model.queueAppOperation(.snapshot(app: "mail-mcp"))
+        let hostOperation = await model.queue(.hostAssurance, context: model.issueMutationContext())
+        let appOperation = await model.queueAppOperation(.snapshot(app: "mail-mcp"), context: model.issueMutationContext())
         XCTAssertNil(hostOperation)
         XCTAssertNil(appOperation)
     }
@@ -353,10 +383,10 @@ final class NornAppModelTests: XCTestCase {
             .restoreSnapshot(app: "mail-mcp", snapshot: "safe.dump"),
             .rollback(app: "mail-mcp", regions: [])
         ] {
-            let operation = await model.queueAppOperation(request)
+            let operation = await model.queueAppOperation(request, context: model.issueMutationContext())
             XCTAssertNil(operation)
         }
-        let assurance = await model.queue(.hostAssurance)
+        let assurance = await model.queue(.hostAssurance, context: model.issueMutationContext())
         XCTAssertNil(assurance)
 
         let writableDefaults = UserDefaults(suiteName: "\(suite).writer")!
@@ -731,6 +761,38 @@ private struct MockNornClient: NornClientProtocol {
             continuation.finish()
         }
     }
+}
+
+private actor MutationCallCounter {
+    private var values: [String] = []
+    func record(_ value: String) { values.append(value) }
+    func mutations() -> [String] { values }
+}
+
+private struct CountingMutationClient: NornClientProtocol {
+    let counter: MutationCallCounter
+    private let base = MockNornClient()
+
+    func capabilities() async throws -> NornCapabilities {
+        var capabilities = try await base.capabilities()
+        capabilities.features.append("durable-app-recovery")
+        return capabilities
+    }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation {
+        await counter.record("app:\(request.app)")
+        return try await base.queue(.hostAssurance, idempotencyKey: idempotencyKey)
+    }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation {
+        await counter.record("maintenance")
+        return try await base.queue(request, idempotencyKey: idempotencyKey)
+    }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { base.events(after: cursor) }
 }
 
 private struct FailingMetricsClient: NornClientProtocol {

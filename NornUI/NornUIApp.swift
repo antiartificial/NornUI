@@ -57,7 +57,8 @@ struct NornUIApp: App {
                 onCompleteEnrollment: { profile, enrollment in
                     try await appModel.completeDeviceEnrollment(profile: profile, enrollment: enrollment)
                 },
-                onRotate: { await appModel.rotateManagedCredentialNow() },
+                issueMutationContext: { appModel.issueMutationContext() },
+                onRotate: { context in await appModel.rotateManagedCredentialNow(context: context) },
                 onRemove: { id in
                     Task { await appModel.removeProfileAndCredential(id: id) }
                 }
@@ -88,14 +89,16 @@ private struct NornCommands: Commands {
             Divider()
 
             Button("Run Platform Smoke Check") {
-                Task { await appModel.queue(.platformSmoke) }
+                let context = appModel.issueMutationContext()
+                Task { await appModel.queue(.platformSmoke, context: context) }
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
             .disabled(!appModel.canRunPlatformMaintenance)
             .help(appModel.canRunPlatformMaintenance ? "Queue a platform smoke check" : "Requires an authenticated platform:operate scope")
 
             Button("Run Host Assurance") {
-                Task { await appModel.queue(.hostAssurance) }
+                let context = appModel.issueMutationContext()
+                Task { await appModel.queue(.hostAssurance, context: context) }
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
             .disabled(!appModel.canRunHostAssurance)

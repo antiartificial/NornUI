@@ -5,6 +5,14 @@ import Observation
 typealias NornClientFactory = @Sendable (NornServerProfile) async throws -> any NornClientProtocol
 typealias NornEnrollmentClientFactory = @Sendable (URL) async throws -> any NornEnrollmentClientProtocol
 
+/// A model-issued, single-connection authority lease for a user mutation.
+/// Views obtain it synchronously before creating a Task; the model checks it
+/// again immediately before every mutating client call.
+nonisolated struct NornMutationContext: Hashable, Sendable {
+    let profileID: UUID?
+    fileprivate let connectionGeneration: UInt64
+}
+
 nonisolated private enum NornRefreshValue<Value: Sendable>: Sendable {
     case value(Value)
     case failure
@@ -129,6 +137,11 @@ final class NornAppModel {
     var canRunHostAssurance: Bool { hasScope("host:operate") && !isFleetAuthorityOnly }
     var canManageApps: Bool { canWriteRuntime && appCreationSupported }
 
+    /// Capture this on the main actor before scheduling a mutation Task.
+    func issueMutationContext() -> NornMutationContext {
+        .init(profileID: selectedProfileID, connectionGeneration: connectionGeneration)
+    }
+
     var availableNavigationDestinations: [NornNavigation] {
         isFleetAuthorityOnly ? [.overview, .fleet] : NornNavigation.allCases.filter { $0 != .activity }
     }
@@ -186,23 +199,23 @@ final class NornAppModel {
 	}
 
 	@discardableResult
-	func preflightRelease(app: String, sourceSHA: String, artifact: String?) async -> NornOperation? {
-		await queueRelease(app: app, kind: "preflight", sourceSHA: sourceSHA, artifact: artifact) { client, request, key in
+	func preflightRelease(app: String, sourceSHA: String, artifact: String?, context: NornMutationContext) async -> NornOperation? {
+		await queueRelease(app: app, kind: "preflight", sourceSHA: sourceSHA, artifact: artifact, context: context) { client, request, key in
 			try await client.preflightRelease(app: app, request: request, idempotencyKey: key)
 		}
 	}
 
 	@discardableResult
-	func deployRelease(app: String, sourceSHA: String, artifact: String?) async -> NornOperation? {
-		await queueRelease(app: app, kind: "deployment", sourceSHA: sourceSHA, artifact: artifact) { client, request, key in
+	func deployRelease(app: String, sourceSHA: String, artifact: String?, context: NornMutationContext) async -> NornOperation? {
+		await queueRelease(app: app, kind: "deployment", sourceSHA: sourceSHA, artifact: artifact, context: context) { client, request, key in
 			try await client.deployRelease(app: app, request: request, idempotencyKey: key)
 		}
 	}
 
 	@discardableResult
-	func qualifyRelease(app: String, deploymentID: String) async -> NornReleaseQualification? {
-		guard let client, canMutateLegacyReleaseEvidence, environmentID == "staging" else { return nil }
-		let generation = connectionGeneration; let profileID = selectedProfileID
+	func qualifyRelease(app: String, deploymentID: String, context: NornMutationContext) async -> NornReleaseQualification? {
+		guard let client, isValidMutationContext(context, permits: canMutateLegacyReleaseEvidence && environmentID == "staging") else { return nil }
+		let generation = context.connectionGeneration; let profileID = context.profileID
 		lastError = nil
 		let intent = releaseIntent(app: app, kind: "qualification", values: [deploymentID])
 		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
@@ -219,8 +232,8 @@ final class NornAppModel {
 	}
 
 	@discardableResult
-	func promoteRelease(app: String, qualification: NornReleaseQualification) async -> NornOperation? {
-		guard canMutateLegacyReleaseEvidence, environmentID == "production", !qualification.isExpired else { return nil }
+	func promoteRelease(app: String, qualification: NornReleaseQualification, context: NornMutationContext) async -> NornOperation? {
+		guard isValidMutationContext(context, permits: canMutateLegacyReleaseEvidence && environmentID == "production"), !qualification.isExpired else { return nil }
         lastError = "Production promotion is upstream CI-owned and read-only in NornUI."
         return nil
 	}
@@ -230,10 +243,11 @@ final class NornAppModel {
 		kind: String,
 		sourceSHA: String,
 		artifact: String?,
+		context: NornMutationContext,
 		action: @escaping @Sendable (any NornClientProtocol, NornReleaseActionRequest, String) async throws -> NornOperation
 	) async -> NornOperation? {
-		guard let client, canMutateLegacyReleaseEvidence, environmentID == "staging" else { return nil }
-		let generation = connectionGeneration; let profileID = selectedProfileID
+		guard let client, isValidMutationContext(context, permits: canMutateLegacyReleaseEvidence && environmentID == "staging") else { return nil }
+		let generation = context.connectionGeneration; let profileID = context.profileID
 		let normalizedSHA = sourceSHA.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 		let trimmedArtifact = artifact?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 		let normalizedArtifact = trimmedArtifact.isEmpty ? nil : trimmedArtifact
@@ -280,9 +294,9 @@ final class NornAppModel {
 	}
 
 	@discardableResult
-	func queueAppOperation(_ request: NornAppOperationRequest) async -> NornOperation? {
-		guard let client, canManageAppRecovery else { return nil }
-		let generation = connectionGeneration; let profileID = selectedProfileID
+	func queueAppOperation(_ request: NornAppOperationRequest, context: NornMutationContext) async -> NornOperation? {
+		guard let client, isValidMutationContext(context, permits: canManageAppRecovery) else { return nil }
+		let generation = context.connectionGeneration; let profileID = context.profileID
 		lastError = nil
 		let intent = appOperationIntent(request)
 		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
@@ -334,9 +348,9 @@ final class NornAppModel {
     }
 
 	@discardableResult
-	func createApp(_ request: NornCreateAppRequest) async -> NornAppMutationReceipt? {
-		guard let client, canManageApps else { return nil }
-		let generation = connectionGeneration; let profileID = selectedProfileID
+	func createApp(_ request: NornCreateAppRequest, context: NornMutationContext) async -> NornAppMutationReceipt? {
+		guard let client, isValidMutationContext(context, permits: canManageApps) else { return nil }
+		let generation = context.connectionGeneration; let profileID = context.profileID
 		lastError = nil
 		do {
 			let receipt = try await client.createApp(request)
@@ -354,9 +368,9 @@ final class NornAppModel {
 		}
 	}
 
-	func setAppDeployment(app: String, enabled: Bool) async {
-		guard let client, canManageApps else { return }
-		let generation = connectionGeneration; let profileID = selectedProfileID
+	func setAppDeployment(app: String, enabled: Bool, context: NornMutationContext) async {
+		guard let client, isValidMutationContext(context, permits: canManageApps) else { return }
+		let generation = context.connectionGeneration; let profileID = context.profileID
 		lastError = nil
 		do {
 			_ = try await client.setAppDeployment(app: app, enabled: enabled)
@@ -401,7 +415,7 @@ final class NornAppModel {
             let nextClient = try await clientFactory(profile)
             guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
             client = nextClient
-            try await rotateSelectedCredentialIfNeeded(force: false)
+            try await rotateSelectedCredentialIfNeeded(force: false, context: issueMutationContext())
             guard isCurrentConnection(generation: generation, profileID: profile.id) else { return }
             isFixtureMode = false
             let refreshError = try await refreshAuthoritativeState(generation: generation, profileID: profile.id)
@@ -547,9 +561,9 @@ final class NornAppModel {
     }
 
     @discardableResult
-    func createFleetPullRequest(planID: String) async -> URL? {
-        guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
-        let generation = connectionGeneration; let profileID = selectedProfileID
+    func createFleetPullRequest(planID: String, context: NornMutationContext) async -> URL? {
+        guard let client, isValidMutationContext(context, permits: canOperateFleet && fleetGitHubSupported && fleetGitHubStatus.connected) else { return nil }
+        let generation = context.connectionGeneration; let profileID = context.profileID
         lastError = nil
         do {
             let operation = try await client.createFleetPullRequest(planID: planID)
@@ -564,9 +578,9 @@ final class NornAppModel {
     }
 
     @discardableResult
-    func dispatchFleetApply(planID: String, allowDestructive: Bool) async -> URL? {
-        guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
-        let generation = connectionGeneration; let profileID = selectedProfileID
+    func dispatchFleetApply(planID: String, allowDestructive: Bool, context: NornMutationContext) async -> URL? {
+        guard let client, isValidMutationContext(context, permits: canOperateFleet && fleetGitHubSupported && fleetGitHubStatus.connected) else { return nil }
+        let generation = context.connectionGeneration; let profileID = context.profileID
         lastError = nil
         do {
             let operation = try await client.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive)
@@ -581,9 +595,9 @@ final class NornAppModel {
     }
 
     @discardableResult
-    func planFleetCapacity(pool: String, desired: Int, size: String, reason: String) async -> NornOperation? {
-        guard let client, canOperateFleet else { return nil }
-        let generation = connectionGeneration; let profileID = selectedProfileID
+    func planFleetCapacity(pool: String, desired: Int, size: String, reason: String, context: NornMutationContext) async -> NornOperation? {
+        guard let client, isValidMutationContext(context, permits: canOperateFleet) else { return nil }
+        let generation = context.connectionGeneration; let profileID = context.profileID
         guard let current = fleetInventory.nodePools[pool] else {
             lastError = "The selected fleet pool is no longer available."
             return nil
@@ -636,9 +650,9 @@ final class NornAppModel {
     }
 
     @discardableResult
-    func queue(_ request: NornMaintenanceRequest) async -> NornOperation? {
-        guard let client, mayQueue(request) else { return nil }
-        let generation = connectionGeneration; let profileID = selectedProfileID
+    func queue(_ request: NornMaintenanceRequest, context: NornMutationContext) async -> NornOperation? {
+        guard let client, isValidMutationContext(context, permits: mayQueue(request)) else { return nil }
+        let generation = context.connectionGeneration; let profileID = context.profileID
         lastError = nil
         do {
             let operation = try await client.queue(request, idempotencyKey: UUID().uuidString)
@@ -738,10 +752,10 @@ final class NornAppModel {
         await selectProfile(id: managed.id)
     }
 
-    func rotateManagedCredentialNow() async {
-        guard selectedProfile?.isManagedDevice == true else { return }
-        let generation = connectionGeneration
-        let profileID = selectedProfileID
+    func rotateManagedCredentialNow(context: NornMutationContext) async {
+        guard isValidMutationContext(context, permits: selectedProfile?.isManagedDevice == true, requiresClient: false) else { return }
+        let generation = context.connectionGeneration
+        let profileID = context.profileID
         eventTask?.cancel()
         do {
             if client == nil, let profile = selectedProfile, let clientFactory {
@@ -749,7 +763,7 @@ final class NornAppModel {
                 guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
                 client = refreshedClient
             }
-            try await rotateSelectedCredentialIfNeeded(force: true)
+            try await rotateSelectedCredentialIfNeeded(force: true, context: context)
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             await connect()
         } catch {
@@ -815,12 +829,13 @@ final class NornAppModel {
         profileStore.saveSelection(selectedProfileID)
     }
 
-    private func rotateSelectedCredentialIfNeeded(force: Bool) async throws {
+    private func rotateSelectedCredentialIfNeeded(force: Bool, context: NornMutationContext) async throws {
         guard let profile = selectedProfile,
               shouldRotate(profile, force: force),
-              let client else { return }
-        let generation = connectionGeneration
-        let profileID = selectedProfileID
+              let client,
+              isValidMutationContext(context, permits: profile.isManagedDevice) else { return }
+        let generation = context.connectionGeneration
+        let profileID = context.profileID
         let issued = try await client.rotateCredential()
         guard isCurrentConnection(generation: generation, profileID: profileID), profile.id == profileID else {
             throw CancellationError()
@@ -1095,6 +1110,17 @@ final class NornAppModel {
 
     private func isCurrentConnection(generation: UInt64, profileID: UUID?) -> Bool {
         connectionGeneration == generation && selectedProfileID == profileID
+    }
+
+    /// Checks the lease, current connection, and the capability predicate in
+    /// one synchronous MainActor turn immediately before a mutating client
+    /// call. A Task that was created under profile A therefore cannot dispatch
+    /// through profile B's newly connected client.
+    private func isValidMutationContext(_ context: NornMutationContext, permits: Bool, requiresClient: Bool = true) -> Bool {
+        !Task.isCancelled
+            && permits
+            && (!requiresClient || client != nil)
+            && isCurrentConnection(generation: context.connectionGeneration, profileID: context.profileID)
     }
 
     private func transitionConnectionState(to nextState: NornConnectionState) {

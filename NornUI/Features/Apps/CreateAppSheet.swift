@@ -11,7 +11,8 @@ struct CreateAppSheet: View {
 	@State private var isCreating = false
 	@State private var errorMessage: String?
 	@State private var mutationGate = NornProfileBoundMutationGate<NornCreateAppRequest>()
-	let onCreate: (NornCreateAppRequest) async -> Bool
+	let issueMutationContext: () -> NornMutationContext?
+	let onCreate: (NornCreateAppRequest, NornMutationContext) async -> Bool
 
 	private var normalizedName: String { name.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" } }
 	private var isValid: Bool { normalizedName.range(of: "^[a-z0-9][a-z0-9-]*$", options: .regularExpression) != nil && (kind == .worker || (1...65535).contains(port)) }
@@ -59,6 +60,7 @@ struct CreateAppSheet: View {
 	private func create() {
 		let requested = NornCreateAppRequest(name: normalizedName, kind: kind, port: kind == .endpoint ? port : nil)
 		mutationGate.present(requested, profileID: profileID, isAuthorized: canCreate)
+		guard let context = issueMutationContext() else { return }
 		isCreating = true
 		errorMessage = nil
 		Task {
@@ -66,7 +68,7 @@ struct CreateAppSheet: View {
 				isCreating = false
 				return
 			}
-			if await onCreate(request) { dismiss() } else { errorMessage = "The app could not be created. Review the server message and try again." }
+			if await onCreate(request, context) { dismiss() } else { errorMessage = "The app could not be created. Review the server message and try again." }
 			isCreating = false
 		}
 	}

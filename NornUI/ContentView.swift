@@ -61,8 +61,9 @@ struct ContentView: View {
 		.sheet(isPresented: $appModel.isShowingCreateApp) {
 			CreateAppSheet(
 				profileID: appModel.selectedProfileID,
-				canCreate: appModel.canManageApps
-			) { request in await appModel.createApp(request) != nil }
+				canCreate: appModel.canManageApps,
+				issueMutationContext: { appModel.issueMutationContext() }
+			) { request, context in await appModel.createApp(request, context: context) != nil }
 		}
         .task { await appModel.start() }
     }
@@ -139,9 +140,13 @@ struct ContentView: View {
 				profileID: appModel.selectedProfileID,
 				isRecoveryConnected: appModel.canReadRuntime,
 				onCreate: { appModel.isShowingCreateApp = true },
-				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
+				onEnable: { app in
+					let context = appModel.issueMutationContext()
+					Task { await appModel.setAppDeployment(app: app, enabled: true, context: context) }
+				},
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
-				onQueueOperation: { await appModel.queueAppOperation($0) },
+				issueMutationContext: { appModel.issueMutationContext() },
+				onQueueOperation: { request, context in await appModel.queueAppOperation(request, context: context) },
 				onOpenOperation: openOperation
 			)
 		case .delivery:
@@ -199,16 +204,18 @@ struct ContentView: View {
                 isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
-                onPlan: { pool, desired, size, reason in
+                issueMutationContext: { appModel.issueMutationContext() },
+                onPlan: { pool, desired, size, reason, context in
                     await appModel.planFleetCapacity(
                         pool: pool,
                         desired: desired,
                         size: size,
-                        reason: reason
+                        reason: reason,
+                        context: context
                     ) != nil
                 },
-                onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
-                onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
+				onOpenReview: { planID, context in await appModel.createFleetPullRequest(planID: planID, context: context) },
+				onDispatchApply: { planID, allowDestructive, context in await appModel.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive, context: context) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }
@@ -241,7 +248,8 @@ struct ContentView: View {
     }
 
     private func queue(_ request: NornMaintenanceRequest) {
-        Task { await appModel.queue(request) }
+        let context = appModel.issueMutationContext()
+        Task { await appModel.queue(request, context: context) }
     }
 
     private func openOperation(_ operation: NornOperation) {
