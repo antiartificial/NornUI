@@ -203,7 +203,7 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     }
 
     var canOperateFleet: Bool {
-        !grantedScopes.isDisjoint(with: ["fleet:operate", "api:write", "admin"])
+        !grantedScopes.isDisjoint(with: ["api:write", "admin"])
     }
 
     var supportsFleetGitHub: Bool {

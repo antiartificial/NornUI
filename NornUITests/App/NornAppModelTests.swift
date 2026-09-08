@@ -210,6 +210,30 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertNil(queued)
     }
 
+    func testFleetCapacityUsesHumanAPIWriteNotRunnerOperateScope() async {
+        let cases: [([String], Bool)] = [
+            (["api:read", "fleet:operate"], false),
+            (["api:read", "api:write"], true),
+        ]
+        for (index, item) in cases.enumerated() {
+            let suite = "\(#function)-\(index)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let store = NornProfileStore(defaults: defaults)
+            let profile = NornServerProfile(name: "Fleet", baseURL: URL(string: "https://fleet.example.test")!)
+            store.saveProfiles([profile])
+            store.saveSelection(profile.id)
+            let principal = NornCapabilities.Authentication.Principal(
+                authenticated: true,
+                subject: "engineer",
+                scopes: item.0
+            )
+            let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient(principal: principal) })
+            await model.start()
+            XCTAssertEqual(model.canOperateFleet, item.1)
+        }
+    }
+
     func testProfileSwitchFailureClearsPriorDashboardAndFleetEvidence() async {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!

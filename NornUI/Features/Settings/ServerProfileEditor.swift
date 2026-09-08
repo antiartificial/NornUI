@@ -248,7 +248,7 @@ struct ServerProfileEditor: View {
                         Toggle("Manage apps and recovery", isOn: $allowAppChanges)
                         Toggle("Run platform maintenance", isOn: $allowPlatformOperations)
                         Toggle("Run host assurance", isOn: $allowHostOperations)
-                        Toggle("Manage fleet capacity", isOn: $allowFleetOperations)
+                        Toggle("Manage Fleet capacity (api:write)", isOn: $allowFleetOperations)
                         Toggle("Open audited terminal sessions", isOn: $allowTerminalSessions)
                     }
                 }

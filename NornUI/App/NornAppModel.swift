@@ -343,8 +343,7 @@ final class NornAppModel {
     var deploymentVisibilitySupported: Bool { snapshot.capabilities.supportsDeploymentVisibility }
     var canOperateFleet: Bool {
         guard canPerformOperations, isServerAuthenticated else { return false }
-        if isFleetAuthorityOnly { return hasScope("api:write") }
-        return hasScope("fleet:operate")
+        return hasScope("api:write")
     }
 
 	@discardableResult
