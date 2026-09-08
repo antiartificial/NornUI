@@ -72,7 +72,7 @@ private struct NornCommands: Commands {
     var body: some Commands {
         CommandMenu("Norn") {
 			Button("Create App…") {
-				appModel.navigation = .apps
+				appModel.navigate(to: .apps)
 				appModel.isShowingCreateApp = true
 			}
 			.keyboardShortcut("n", modifiers: .command)
@@ -103,7 +103,7 @@ private struct NornCommands: Commands {
             Divider()
             ForEach(appModel.availableNavigationDestinations) { destination in
                 Button("Show \(destination.title)") {
-                    appModel.navigation = destination
+                    appModel.navigate(to: destination)
                 }
                 .keyboardShortcut(navigationShortcut(for: destination), modifiers: .command)
             }

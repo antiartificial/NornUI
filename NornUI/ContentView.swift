@@ -114,10 +114,10 @@ struct ContentView: View {
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
-                onShowServices: { appModel.navigation = .apps },
-                onShowOperations: { appModel.navigation = .operations },
-                onShowReleases: { appModel.navigation = .platform },
-                onShowHost: { appModel.navigation = .host }
+                onShowServices: { appModel.navigate(to: .apps) },
+                onShowOperations: { appModel.navigate(to: .operations) },
+                onShowReleases: { appModel.navigate(to: .platform) },
+                onShowHost: { appModel.navigate(to: .host) }
             )
 		case .apps:
 			AppsView(
@@ -125,6 +125,7 @@ struct ContentView: View {
 				services: appModel.snapshot.services,
 				canCreate: appModel.canWriteRuntime && appModel.appCreationSupported,
 				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
+				canManageRecovery: appModel.canManageAppRecovery,
 				onCreate: { appModel.isShowingCreateApp = true },
 				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
@@ -200,7 +201,7 @@ struct ContentView: View {
             ActivityFeatureView(
                 snapshot: appModel.snapshot,
                 onOpenOperation: openOperation,
-                onShowApps: { appModel.navigation = .apps }
+                onShowApps: { appModel.navigate(to: .apps) }
             )
         }
     }
@@ -228,8 +229,7 @@ struct ContentView: View {
     }
 
     private func openOperation(_ operation: NornOperation) {
-        appModel.selectedOperationID = operation.id
-        appModel.navigation = .operations
+        appModel.openOperation(operation)
     }
 }
 
@@ -241,12 +241,12 @@ private struct AuthorityContextBanner: View {
     }
 
     private var authority: String {
-        if appModel.isFleetAuthorityOnly { return "Fleet authority" }
-        return "Mini runtime authority"
+        guard let asserted = appModel.assertedAuthority else { return "Authority mode not asserted" }
+        return asserted == "fleet-only" ? "Fleet-only authority" : asserted
     }
 
     var body: some View {
-        Label("Authenticated: \(environment) · \(authority)", systemImage: "checkmark.shield.fill")
+        Label("Authenticated: \(environment) · \(appModel.assertedEnvironmentProfile ?? "Profile not asserted") · \(authority)", systemImage: "checkmark.shield.fill")
             .font(.caption.weight(.semibold))
             .foregroundStyle(appModel.isFleetAuthorityOnly ? .purple : .green)
             .accessibilityIdentifier("authority.context.banner")

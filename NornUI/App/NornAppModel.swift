@@ -111,6 +111,7 @@ final class NornAppModel {
     var isServerAuthenticated: Bool { snapshot.capabilities.authenticatedPrincipal != nil }
     var assertedEnvironmentID: String? { snapshot.capabilities.assertedEnvironmentID }
     var assertedEnvironmentProfile: String? { snapshot.capabilities.assertedEnvironmentProfile }
+    var assertedAuthority: String? { snapshot.capabilities.authority }
 
     var canReadRuntime: Bool { hasScope("api:read") && !isFleetAuthorityOnly }
     var canWriteRuntime: Bool { hasScope("api:write") && !isFleetAuthorityOnly }
@@ -121,8 +122,25 @@ final class NornAppModel {
         isFleetAuthorityOnly ? [.overview, .fleet] : NornNavigation.allCases.filter { $0 != .activity }
     }
 
+    func navigate(to destination: NornNavigation) {
+        guard availableNavigationDestinations.contains(destination) else {
+            lastError = "This server authority does not expose \(destination.title)."
+            return
+        }
+        navigation = destination
+    }
+
+    func openOperation(_ operation: NornOperation) {
+        selectedOperationID = operation.id
+        navigate(to: .operations)
+    }
+
     var hostMetricsSupported: Bool {
         snapshot.capabilities.supportsHostMetrics
+    }
+
+    var canManageAppRecovery: Bool {
+        canWriteRuntime && durableAppRecoverySupported
     }
 
 	var appCreationSupported: Bool { snapshot.capabilities.supportsAppCreation }
@@ -157,6 +175,7 @@ final class NornAppModel {
 	@discardableResult
 	func qualifyRelease(app: String, deploymentID: String) async -> NornReleaseQualification? {
 		guard let client, canPerformOperations, releasePipelineSupported, environmentID == "staging" else { return nil }
+		let generation = connectionGeneration; let profileID = selectedProfileID
 		lastError = nil
 		let intent = releaseIntent(app: app, kind: "qualification", values: [deploymentID])
 		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
@@ -165,6 +184,7 @@ final class NornAppModel {
 			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
 			return qualification
 		} catch {
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
 			lastError = error.localizedDescription
 			return nil
 		}
@@ -234,18 +254,21 @@ final class NornAppModel {
 
 	@discardableResult
 	func queueAppOperation(_ request: NornAppOperationRequest) async -> NornOperation? {
-		guard let client, canWriteRuntime, durableAppRecoverySupported else { return nil }
+		guard let client, canManageAppRecovery else { return nil }
+		let generation = connectionGeneration; let profileID = selectedProfileID
 		lastError = nil
 		let intent = appOperationIntent(request)
 		let idempotencyKey = profileStore.durableIntentKey(scope: intent.scope, requestDigest: intent.digest)
 		do {
 			let operation = try await client.queueAppOperation(request, idempotencyKey: idempotencyKey)
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
 			profileStore.clearDurableIntent(scope: intent.scope, key: idempotencyKey)
 			upsert(operation)
 			selectedOperationID = operation.id
-			navigation = .operations
+			navigate(to: .operations)
 			return operation
 		} catch {
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
 			lastError = error.localizedDescription
 			return nil
 		}
@@ -286,14 +309,18 @@ final class NornAppModel {
 	@discardableResult
 	func createApp(_ request: NornCreateAppRequest) async -> NornAppMutationReceipt? {
 		guard let client, canWriteRuntime, appCreationSupported else { return nil }
+		let generation = connectionGeneration; let profileID = selectedProfileID
 		lastError = nil
 		do {
 			let receipt = try await client.createApp(request)
-			lastError = try await refreshAuthoritativeState()
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
+			lastError = try await refreshAuthoritativeState(generation: generation, profileID: profileID)
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
 			isShowingCreateApp = false
 			navigation = .apps
 			return receipt
 		} catch {
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
 			lastError = error.localizedDescription
 			return nil
 		}
@@ -301,11 +328,16 @@ final class NornAppModel {
 
 	func setAppDeployment(app: String, enabled: Bool) async {
 		guard let client, canWriteRuntime else { return }
+		let generation = connectionGeneration; let profileID = selectedProfileID
 		lastError = nil
 		do {
 			_ = try await client.setAppDeployment(app: app, enabled: enabled)
-			lastError = try await refreshAuthoritativeState()
-		} catch { lastError = error.localizedDescription }
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+			lastError = try await refreshAuthoritativeState(generation: generation, profileID: profileID)
+		} catch {
+			guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+			lastError = error.localizedDescription
+		}
 	}
 
     func start() async {
@@ -401,11 +433,16 @@ final class NornAppModel {
 
     func refreshHostMetrics() async {
         guard let client, connectionState == .online, hostMetricsSupported else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
         do {
-            hostMetrics = try await client.hostMetrics()
+            let metrics = try await client.hostMetrics()
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            hostMetrics = metrics
         } catch is CancellationError {
             return
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             // Preserve the most recent good sample. Host metrics are an optional
             // observational endpoint and must not take the whole UI offline.
             // A retained value is explicitly marked stale rather than displayed
@@ -447,15 +484,18 @@ final class NornAppModel {
             fleetGitHubStatus = refreshedGitHubStatus
             for plan in fleetPlans where fleetReconciliationSupported {
                 if let result = try? await client.fleetReconciliations(planID: plan.id) {
+                    guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
                     fleetReconciliations[plan.id] = result.reconciliations
                 }
             }
             for plan in fleetPlans where fleetRunnerAttemptsSupported {
                 if let result = try? await client.fleetRunnerAttempts(planID: plan.id) {
+                    guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
                     fleetRunnerAttempts[plan.id] = result.attempts
                 }
             }
-            await refreshDeploymentVisibility(using: client)
+            await refreshDeploymentVisibility(using: client, expectedGeneration: generation, expectedProfileID: profileID)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             lastError = nil
         } catch is CancellationError {
             return
@@ -469,12 +509,15 @@ final class NornAppModel {
     @discardableResult
     func createFleetPullRequest(planID: String) async -> URL? {
         guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        let generation = connectionGeneration; let profileID = selectedProfileID
         lastError = nil
         do {
             let operation = try await client.createFleetPullRequest(planID: planID)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             upsert(operation)
             return operation.payload?["url"]?.stringValue.flatMap(URL.init(string:))
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             lastError = error.localizedDescription
             return nil
         }
@@ -483,12 +526,15 @@ final class NornAppModel {
     @discardableResult
     func dispatchFleetApply(planID: String, allowDestructive: Bool) async -> URL? {
         guard let client, canOperateFleet, fleetGitHubSupported, fleetGitHubStatus.connected else { return nil }
+        let generation = connectionGeneration; let profileID = selectedProfileID
         lastError = nil
         do {
             let operation = try await client.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             upsert(operation)
             return operation.payload?["url"]?.stringValue.flatMap(URL.init(string:))
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             lastError = error.localizedDescription
             return nil
         }
@@ -497,6 +543,7 @@ final class NornAppModel {
     @discardableResult
     func planFleetCapacity(pool: String, desired: Int, size: String, reason: String) async -> NornOperation? {
         guard let client, canOperateFleet else { return nil }
+        let generation = connectionGeneration; let profileID = selectedProfileID
         guard let current = fleetInventory.nodePools[pool] else {
             lastError = "The selected fleet pool is no longer available."
             return nil
@@ -514,6 +561,7 @@ final class NornAppModel {
                 request: request,
                 idempotencyKey: fleetPlanIdempotencyKey(pool: pool, request: request)
             )
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             fleetPlans.removeAll { $0.id == operation.id }
             fleetPlans.insert(operation, at: 0)
             if fleetReconciliationSupported {
@@ -524,6 +572,7 @@ final class NornAppModel {
             }
             return operation
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             lastError = error.localizedDescription
             return nil
         }
@@ -549,15 +598,18 @@ final class NornAppModel {
     @discardableResult
     func queue(_ request: NornMaintenanceRequest) async -> NornOperation? {
         guard let client, mayQueue(request) else { return nil }
+        let generation = connectionGeneration; let profileID = selectedProfileID
         lastError = nil
         do {
             let operation = try await client.queue(request, idempotencyKey: UUID().uuidString)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             upsert(operation)
             selectedOperationID = operation.id
-            navigation = .operations
+            navigate(to: .operations)
             connectionState = .online
             return operation
         } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             lastError = error.localizedDescription
             return nil
         }
@@ -1005,6 +1057,7 @@ final class NornAppModel {
     }
 
     private func clearConnectionScopedState() {
+        lastError = nil
         snapshot = Self.emptySnapshot
         hostMetrics = nil
         clearFleetAndDeploymentState()
