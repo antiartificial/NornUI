@@ -3,6 +3,52 @@ import XCTest
 
 @MainActor
 final class NornAppModelTests: XCTestCase {
+    private func releaseQualification(id: String, app: String) -> NornReleaseQualification {
+        NornReleaseQualification(
+            schemaVersion: "norn.release-qualification/v2",
+            id: id,
+            deploymentID: "deployment-\(id)",
+            app: app,
+            sourceSHA: String(repeating: "a", count: 40),
+            artifact: "registry.example/\(app)@sha256:\(String(repeating: "b", count: 64))",
+            environment: "staging",
+            issuedAt: "2026-09-01T00:00:00Z",
+            expiresAt: "2026-12-01T00:00:00Z",
+            keyID: "test-key",
+            signature: "test-signature",
+            candidate: NornReleaseCandidate(
+                provider: "github-actions",
+                repository: "example/\(app)",
+                repositoryID: "1",
+                ownerID: "2",
+                repositoryVisibility: "private",
+                runID: "3",
+                runAttempt: "1",
+                workflowRef: "example/\(app)/.github/workflows/release.yml@\(String(repeating: "c", count: 40))",
+                workflowSHA: String(repeating: "c", count: 40),
+                signerWorkflowRef: "example/\(app)/.github/workflows/sign.yml@\(String(repeating: "d", count: 40))",
+                signerWorkflowSHA: String(repeating: "d", count: 40),
+                ref: "refs/heads/main",
+                attestation: NornReleaseAttestation(
+                    mode: "github-private",
+                    verifier: "test verifier",
+                    verifierIdentity: nil,
+                    issuer: "https://token.actions.githubusercontent.com",
+                    subjectDigest: "sha256:\(String(repeating: "b", count: 64))",
+                    materialSHA: String(repeating: "a", count: 40),
+                    provenanceURI: nil,
+                    sbomURI: nil,
+                    bundle: nil
+                )
+            ),
+            dsse: NornDSSEEnvelope(
+                payloadType: "application/vnd.norn.release-qualification.v2+json",
+                payload: "payload-\(id)",
+                signatures: [.init(keyID: "test-key", sig: "test-signature")]
+            )
+        )
+    }
+
     func testFixtureModeStartsOnlineWithoutAConfiguredServer() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -391,21 +437,24 @@ final class NornAppModelTests: XCTestCase {
         let app = "orders"
         let first = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
         let second = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
+        let firstEvidence = releaseQualification(id: "A-evidence", app: app)
+        let secondEvidence = releaseQualification(id: "B-evidence", app: app)
 
-        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [] } }
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [firstEvidence] } }
         await control.waitUntilStarted("A")
-        loader.invalidate(for: second)
-        XCTAssertNil(loader.loadedContext, "Changing profiles must clear signed evidence before the replacement request returns")
 
-        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [] } }
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [secondEvidence] } }
         await control.waitUntilStarted("B")
+        XCTAssertTrue(loader.qualifications.isEmpty, "The coordinated B transition clears A evidence before B returns")
         await control.release("B")
         await secondLoad.value
         XCTAssertEqual(loader.loadedContext, second)
+        XCTAssertEqual(loader.qualifications.map(\.id), ["B-evidence"])
 
         await control.release("A")
         await firstLoad.value
         XCTAssertEqual(loader.loadedContext, second, "Delayed evidence from profile A must not appear under profile B")
+        XCTAssertEqual(loader.qualifications.map(\.id), ["B-evidence"], "Only B's signed evidence may be rendered after A returns")
     }
 
     func testReleaseQualificationLoaderDropsDelayedEvidenceAfterAppSwitch() async {
@@ -414,12 +463,13 @@ final class NornAppModelTests: XCTestCase {
         let profileID = UUID()
         let first = NornProfileAppContext(profileID: profileID, appID: "orders", isActive: true)
         let second = NornProfileAppContext(profileID: profileID, appID: "billing", isActive: true)
+        let firstEvidence = releaseQualification(id: "orders-evidence", app: "orders")
+        let secondEvidence = releaseQualification(id: "billing-evidence", app: "billing")
 
-        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [] } }
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [firstEvidence] } }
         await control.waitUntilStarted("A")
-        loader.invalidate(for: second)
 
-        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [] } }
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [secondEvidence] } }
         await control.waitUntilStarted("B")
         await control.release("B")
         await secondLoad.value
@@ -427,6 +477,7 @@ final class NornAppModelTests: XCTestCase {
         await firstLoad.value
 
         XCTAssertEqual(loader.loadedContext, second, "Evidence fetched for orders must not appear while billing is selected")
+        XCTAssertEqual(loader.qualifications.map(\.id), ["billing-evidence"])
     }
 
     func testAppRecoverySnapshotLoaderCannotRestoreDelayedFilenamesIntoNewApp() async {
@@ -440,13 +491,12 @@ final class NornAppModelTests: XCTestCase {
         var currentSnapshot = NornFixtures.appSnapshots[0]
         currentSnapshot.filename = "billing-current.dump"
 
-        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [oldSnapshot] } }
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [oldSnapshot] } }
         await control.waitUntilStarted("A")
-        loader.invalidate(for: second)
-        XCTAssertTrue(loader.snapshots.isEmpty, "Changing the selected app must clear restore candidates immediately")
 
-        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [currentSnapshot] } }
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [currentSnapshot] } }
         await control.waitUntilStarted("B")
+        XCTAssertTrue(loader.snapshots.isEmpty, "The coordinated B transition clears restore candidates before B returns")
         await control.release("B")
         await secondLoad.value
         await control.release("A")
@@ -454,6 +504,18 @@ final class NornAppModelTests: XCTestCase {
 
         XCTAssertEqual(loader.loadedContext, second)
         XCTAssertEqual(loader.snapshots.map(\.filename), ["billing-current.dump"], "A delayed response must not make an old filename restorable in the current app")
+    }
+
+    func testReleaseAppSelectionNormalizesStaleASelectionForBDifferentAppSet() {
+        var appA = NornFixtures.snapshot.apps[0]
+        appA.spec.name = "orders"
+        var appB = NornFixtures.snapshot.apps[0]
+        appB.spec.name = "billing"
+
+        let selectedOnA = NornReleaseAppSelection.normalized("orders", in: [appA])
+        let selectedOnB = NornReleaseAppSelection.normalized(selectedOnA, in: [appB])
+
+        XCTAssertEqual(selectedOnB, "billing", "A nonempty stale selection must normalize to B's available application")
     }
 
     func testDraftEnableConfirmationCannotDispatchToAuthorizedProfileBWithTheSameAppName() {

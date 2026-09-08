@@ -22,11 +22,14 @@ final class ReleaseQualificationEvidenceLoader {
         isLoading = false
     }
 
-    func load(
+    /// Performs the whole context transition in one operation. Callers must
+    /// not separately invalidate from a SwiftUI modifier: modifier ordering
+    /// could otherwise invalidate this replacement request after it starts.
+    func reload(
         for requestedContext: NornProfileAppContext,
         operation: (String) async -> [NornReleaseQualification]
     ) async {
-        if context != requestedContext { invalidate(for: requestedContext) }
+        invalidate(for: requestedContext)
         guard requestedContext.isActive else { return }
 
         let generation = requestGeneration
@@ -64,11 +67,14 @@ final class AppRecoverySnapshotLoader {
         isLoading = false
     }
 
-    func load(
+    /// Performs the whole context transition in one operation. See the
+    /// qualification loader for why this is intentionally not split between
+    /// an onChange invalidation and a task body.
+    func reload(
         for requestedContext: NornProfileAppContext,
         operation: (String) async -> [NornAppSnapshot]?
     ) async {
-        if context != requestedContext { invalidate(for: requestedContext) }
+        invalidate(for: requestedContext)
         guard requestedContext.isActive else { return }
 
         let generation = requestGeneration
@@ -92,6 +98,13 @@ struct NornProfileAppContext: Hashable {
     let profileID: UUID?
     let appID: String
     let isActive: Bool
+}
+
+enum NornReleaseAppSelection {
+    static func normalized(_ selectedApp: String, in apps: [NornAppStatus]) -> String {
+        guard apps.contains(where: { $0.id == selectedApp }) else { return apps.first?.id ?? "" }
+        return selectedApp
+    }
 }
 
 /// A mutation presentation belongs to the profile and UI context that opened

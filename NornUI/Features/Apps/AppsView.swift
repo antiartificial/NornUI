@@ -751,7 +751,10 @@ private struct AppRecoveryInspector: View {
 	private var recoveryContext: NornProfileAppContext {
 		.init(profileID: profileID, appID: app.id, isActive: isConnected && isSupported && hasDatabase)
 	}
-	private var ordered: [NornAppSnapshot] { snapshotLoader.snapshots.sorted { $0.timestamp > $1.timestamp } }
+	private var displayedSnapshots: [NornAppSnapshot] {
+		snapshotLoader.loadedContext == recoveryContext ? snapshotLoader.snapshots : []
+	}
+	private var ordered: [NornAppSnapshot] { displayedSnapshots.sorted { $0.timestamp > $1.timestamp } }
 	private var pruneCandidates: [NornAppSnapshot] { Array(ordered.dropFirst(keep)) }
 	private var hasDatabase: Bool { app.spec.infrastructure?.postgres != nil }
 
@@ -775,8 +778,7 @@ private struct AppRecoveryInspector: View {
 		}
 		.background(.background.secondary)
 		.task(id: recoveryContext) { await reload() }
-		.onChange(of: recoveryContext) { _, context in
-			snapshotLoader.invalidate(for: context)
+		.onChange(of: recoveryContext) { _, _ in
 			confirmation = nil
 		}
 		.onChange(of: canManage) { _, hasAuthority in
@@ -861,7 +863,7 @@ private struct AppRecoveryInspector: View {
 
 	private func reload() async {
 		keep = max(1, app.spec.snapshots?.keep ?? 3)
-		await snapshotLoader.load(for: recoveryContext, operation: onLoadSnapshots)
+		await snapshotLoader.reload(for: recoveryContext, operation: onLoadSnapshots)
 	}
 	private func queue(_ request: NornAppOperationRequest) {
 		guard !isQueuing else { return }; isQueuing = true
