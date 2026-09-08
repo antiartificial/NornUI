@@ -133,6 +133,8 @@ struct ContentView: View {
 				canCreate: appModel.canManageApps,
 				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
 				canManageRecovery: appModel.canManageAppRecovery,
+				profileID: appModel.selectedProfileID,
+				isRecoveryConnected: appModel.canReadRuntime,
 				onCreate: { appModel.isShowingCreateApp = true },
 				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
@@ -147,6 +149,7 @@ struct ContentView: View {
 				environmentProfile: appModel.environmentProfile,
 				isSupported: appModel.releasePipelineSupported,
 				isConnected: appModel.canReadLegacyReleaseEvidence,
+				profileID: appModel.selectedProfileID,
 				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
 			)
 		case .operations:

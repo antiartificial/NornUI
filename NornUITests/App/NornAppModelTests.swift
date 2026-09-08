@@ -372,6 +372,7 @@ final class NornAppModelTests: XCTestCase {
         let counter = EventReconnectCounter()
         let model = NornAppModel(profileStore: store, clientFactory: { _ in EventReconnectFailureClient(counter: counter) })
         await model.start()
+        model.hostMetrics = NornFixtures.hostMetrics
         await counter.waitUntilRefreshStarts()
         for _ in 0..<50 {
             if case .offline = model.connectionState { break }
@@ -380,7 +381,79 @@ final class NornAppModelTests: XCTestCase {
         if case .offline = model.connectionState {} else { XCTFail("expected reconnect refresh failure") }
         XCTAssertTrue(model.hasStaleCachedConnectionState)
         XCTAssertFalse(model.snapshot.services.isEmpty)
+        XCTAssertTrue(model.hostMetrics?.stale == true, "Retained host metrics must be marked stale through reconnect and offline transitions")
         XCTAssertNotNil(model.lastError)
+    }
+
+    func testReleaseQualificationLoaderDropsDelayedEvidenceAfterProfileSwitch() async {
+        let loader = ReleaseQualificationEvidenceLoader()
+        let control = ContextLoadControl()
+        let app = "orders"
+        let first = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
+        let second = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
+
+        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [] } }
+        await control.waitUntilStarted("A")
+        loader.invalidate(for: second)
+        XCTAssertNil(loader.loadedContext, "Changing profiles must clear signed evidence before the replacement request returns")
+
+        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [] } }
+        await control.waitUntilStarted("B")
+        await control.release("B")
+        await secondLoad.value
+        XCTAssertEqual(loader.loadedContext, second)
+
+        await control.release("A")
+        await firstLoad.value
+        XCTAssertEqual(loader.loadedContext, second, "Delayed evidence from profile A must not appear under profile B")
+    }
+
+    func testReleaseQualificationLoaderDropsDelayedEvidenceAfterAppSwitch() async {
+        let loader = ReleaseQualificationEvidenceLoader()
+        let control = ContextLoadControl()
+        let profileID = UUID()
+        let first = NornProfileAppContext(profileID: profileID, appID: "orders", isActive: true)
+        let second = NornProfileAppContext(profileID: profileID, appID: "billing", isActive: true)
+
+        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [] } }
+        await control.waitUntilStarted("A")
+        loader.invalidate(for: second)
+
+        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [] } }
+        await control.waitUntilStarted("B")
+        await control.release("B")
+        await secondLoad.value
+        await control.release("A")
+        await firstLoad.value
+
+        XCTAssertEqual(loader.loadedContext, second, "Evidence fetched for orders must not appear while billing is selected")
+    }
+
+    func testAppRecoverySnapshotLoaderCannotRestoreDelayedFilenamesIntoNewApp() async {
+        let loader = AppRecoverySnapshotLoader()
+        let control = ContextLoadControl()
+        let profileID = UUID()
+        let first = NornProfileAppContext(profileID: profileID, appID: "orders", isActive: true)
+        let second = NornProfileAppContext(profileID: profileID, appID: "billing", isActive: true)
+        var oldSnapshot = NornFixtures.appSnapshots[0]
+        oldSnapshot.filename = "orders-only.dump"
+        var currentSnapshot = NornFixtures.appSnapshots[0]
+        currentSnapshot.filename = "billing-current.dump"
+
+        let firstLoad = Task { await loader.load(for: first) { _ in await control.wait(for: "A"); return [oldSnapshot] } }
+        await control.waitUntilStarted("A")
+        loader.invalidate(for: second)
+        XCTAssertTrue(loader.snapshots.isEmpty, "Changing the selected app must clear restore candidates immediately")
+
+        let secondLoad = Task { await loader.load(for: second) { _ in await control.wait(for: "B"); return [currentSnapshot] } }
+        await control.waitUntilStarted("B")
+        await control.release("B")
+        await secondLoad.value
+        await control.release("A")
+        await firstLoad.value
+
+        XCTAssertEqual(loader.loadedContext, second)
+        XCTAssertEqual(loader.snapshots.map(\.filename), ["billing-current.dump"], "A delayed response must not make an old filename restorable in the current app")
     }
 
     func testDeviceEnrollmentPersistsOnlyManagedMetadataAndKeychainCredential() async throws {
@@ -646,6 +719,35 @@ private actor DeferredResponseControl {
     func release(_ endpoint: String) {
         blocked.remove(endpoint)
         let waiters = responseWaiters.removeValue(forKey: endpoint) ?? []
+        waiters.forEach { $0.resume() }
+    }
+}
+
+/// Continuation-controlled loader responses keep context races deterministic;
+/// no test depends on task scheduling delays or wall-clock sleeps.
+private actor ContextLoadControl {
+    private var started: Set<String> = []
+    private var startWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var responseWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func wait(for key: String) async {
+        started.insert(key)
+        let observers = startWaiters.removeValue(forKey: key) ?? []
+        observers.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            responseWaiters[key, default: []].append(continuation)
+        }
+    }
+
+    func waitUntilStarted(_ key: String) async {
+        guard !started.contains(key) else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters[key, default: []].append(continuation)
+        }
+    }
+
+    func release(_ key: String) {
+        let waiters = responseWaiters.removeValue(forKey: key) ?? []
         waiters.forEach { $0.resume() }
     }
 }

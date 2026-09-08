@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SwiftUI
 
 /// Delivery mutation authority belongs to protected GitHub workflows. Keeping
@@ -25,16 +26,19 @@ struct ReleasePipelineFeatureView: View {
     let environmentProfile: String
     let isSupported: Bool
     let isConnected: Bool
+    let profileID: UUID?
     var onLoadQualifications: (String) async -> [NornReleaseQualification] = { _ in [] }
 
     @State private var appName = ""
-    @State private var qualifications: [NornReleaseQualification] = []
-    @State private var isLoadingQualifications = false
+    @State private var qualificationLoader = ReleaseQualificationEvidenceLoader()
 
     private var isStaging: Bool { environmentID == "staging" }
     private var isProduction: Bool { environmentID == "production" }
     private var isManagedFleet: Bool { ReleasePipelineFeaturePolicy.requiresManagedFleet(in: environmentID) }
     private var selectedApp: String { appName.isEmpty ? apps.first?.spec.name ?? "" : appName }
+    private var qualificationContext: NornProfileAppContext {
+        .init(profileID: profileID, appID: selectedApp, isActive: isSupported && isConnected && !selectedApp.isEmpty)
+    }
 
     var body: some View {
         ScrollView {
@@ -57,9 +61,9 @@ struct ReleasePipelineFeatureView: View {
             .frame(maxWidth: 1_120, alignment: .leading)
         }
         .navigationTitle("Delivery")
-        .task { await loadQualifications() }
-        .onChange(of: appName) { _, _ in
-            Task { await loadQualifications() }
+        .task(id: qualificationContext) { await loadQualifications() }
+        .onChange(of: qualificationContext) { _, context in
+            qualificationLoader.invalidate(for: context)
         }
     }
 
@@ -137,11 +141,11 @@ struct ReleasePipelineFeatureView: View {
 
     private var qualificationsCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Label("Staging qualifications", systemImage: "checklist").font(.headline); Spacer(); Button("Refresh", systemImage: "arrow.clockwise") { Task { await loadQualifications() } }.buttonStyle(.borderless).disabled(isLoadingQualifications) }
+            HStack { Label("Staging qualifications", systemImage: "checklist").font(.headline); Spacer(); Button("Refresh", systemImage: "arrow.clockwise") { Task { await loadQualifications() } }.buttonStyle(.borderless).disabled(qualificationLoader.isLoading) }
             Text("Evidence pairs a deployment, source SHA, artifact digest, and qualification receipt. It is displayed for review and may be copied without changing release state.").font(.subheadline).foregroundStyle(.secondary)
-            if isLoadingQualifications { ProgressView("Loading qualification evidence…") }
-            else if qualifications.isEmpty { ContentUnavailableView("No qualifications", systemImage: "clipboard", description: Text("Complete a staging deployment and record its qualification to make promotion evidence available.")) }
-            else { ForEach(qualifications) { qualificationRow($0) } }
+            if qualificationLoader.isLoading { ProgressView("Loading qualification evidence…") }
+            else if qualificationLoader.qualifications.isEmpty { ContentUnavailableView("No qualifications", systemImage: "clipboard", description: Text("Complete a staging deployment and record its qualification to make promotion evidence available.")) }
+            else { ForEach(qualificationLoader.qualifications) { qualificationRow($0) } }
         }
         .padding(18)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -184,10 +188,7 @@ struct ReleasePipelineFeatureView: View {
     }
 
     private func loadQualifications() async {
-        guard isSupported, !selectedApp.isEmpty else { return }
-        isLoadingQualifications = true
-        qualifications = await onLoadQualifications(selectedApp)
-        isLoadingQualifications = false
+        await qualificationLoader.load(for: qualificationContext, operation: onLoadQualifications)
     }
 
     private func copy(_ value: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(value, forType: .string) }

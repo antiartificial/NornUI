@@ -376,7 +376,7 @@ final class NornAppModel {
             return
         }
         guard !profiles.isEmpty, clientFactory != nil else {
-            connectionState = .idle
+            transitionConnectionState(to: .idle)
             return
         }
         await connect()
@@ -754,7 +754,7 @@ final class NornAppModel {
             await connect()
         } catch {
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
-            connectionState = .offline(error.localizedDescription)
+            transitionConnectionState(to: .offline(error.localizedDescription))
             lastError = error.localizedDescription
         }
     }
@@ -1027,14 +1027,14 @@ final class NornAppModel {
                     }
                     guard !Task.isCancelled else { return }
                     guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
-                    self.connectionState = .reconnecting
+                    self.transitionConnectionState(to: .reconnecting)
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
                 } catch is CancellationError {
                     return
                 } catch {
                     guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
-                    self.connectionState = .reconnecting
+                    self.transitionConnectionState(to: .reconnecting)
                     self.lastError = error.localizedDescription
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
@@ -1048,7 +1048,7 @@ final class NornAppModel {
                     let refreshError = try await self.refreshAuthoritativeState(generation: generation, profileID: profile.id)
                     guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
                     self.lastError = refreshError
-                    self.connectionState = .online
+                    self.transitionConnectionState(to: .online)
                     self.startHostMetricsPollingIfNeeded()
                     self.startFleetPollingIfNeeded()
                     retry = 0
@@ -1056,7 +1056,7 @@ final class NornAppModel {
                     return
                 } catch {
                     guard self.isCurrentConnection(generation: generation, profileID: profile.id) else { return }
-                    self.connectionState = .offline(error.localizedDescription)
+                    self.transitionConnectionState(to: .offline(error.localizedDescription))
                     self.lastError = error.localizedDescription
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
@@ -1095,6 +1095,16 @@ final class NornAppModel {
 
     private func isCurrentConnection(generation: UInt64, profileID: UUID?) -> Bool {
         connectionGeneration == generation && selectedProfileID == profileID
+    }
+
+    private func transitionConnectionState(to nextState: NornConnectionState) {
+        if connectionState == .online, nextState != .online {
+            // Metrics are profile-keyed observational data. A same-profile
+            // reconnect/offline transition retains the last sample only with
+            // an explicit stale marker; profile boundaries clear it outright.
+            hostMetrics?.stale = true
+        }
+        connectionState = nextState
     }
 
     private func hasScope(_ scope: String) -> Bool {
