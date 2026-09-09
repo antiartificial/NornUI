@@ -17,7 +17,7 @@ final class NornClientTests: XCTestCase {
                 request,
                 status: 200,
                 body: """
-                {"protocolVersion":1,"serverVersion":"v2.16.2-control","features":["event-cursor-replay","principal-scope-discovery-v1"],"auth":{"scopes":["api:read","fleet:operate"],"websocketBearerHeader":true,"websocketQueryToken":false,"principal":{"authenticated":true,"subject":"operator","scopes":["api:read","fleet:operate"]}},"endpoints":{"events":"/api/v1/events"}}
+                {"protocolVersion":1,"serverVersion":"v2.16.2-control","features":["event-cursor-replay","principal-scope-discovery-v1"],"auth":{"scopes":["api:read","api:write"],"websocketBearerHeader":true,"websocketQueryToken":false,"principal":{"authenticated":true,"subject":"operator","scopes":["api:read","api:write"]}},"endpoints":{"events":"/api/v1/events"}}
                 """
             )
         }
@@ -26,11 +26,57 @@ final class NornClientTests: XCTestCase {
         let capabilities = try await client.capabilities()
 
         XCTAssertEqual(capabilities.protocolVersion, 1)
-        XCTAssertEqual(capabilities.auth.principal?.scopes, ["api:read", "fleet:operate"])
+        XCTAssertEqual(capabilities.auth.principal?.scopes, ["api:read", "api:write"])
         XCTAssertTrue(capabilities.canOperateFleet)
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/capabilities")
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
+    }
+
+    func testFleetControlsUseHumanAPIWriteInsteadOfRunnerOperateScope() {
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.auth.principal?.scopes = ["api:read", "fleet:operate"]
+        XCTAssertFalse(capabilities.canOperateFleet)
+        capabilities.auth.principal?.scopes = ["api:read", "api:write"]
+        XCTAssertTrue(capabilities.canOperateFleet)
+
+        let requested = NornEnrollmentScopes.requested(
+            capabilities: capabilities,
+            requestsAPIWrite: false,
+            requestsPlatformOperations: false,
+            requestsHostOperations: false,
+            requestsFleetOperations: true,
+            requestsTerminalSessions: false
+        )
+        XCTAssertEqual(requested, ["api:read", "events:read", "api:write"])
+        XCTAssertFalse(requested.contains("fleet:operate"), "fleet:operate is reserved for bound CI runner identities")
+    }
+
+    func testCompatibilityCapabilitiesWithoutPrincipalDoNotClaimAuthentication() throws {
+        let data = Data("""
+        {"protocolVersion":1,"serverVersion":"compat","features":[],"auth":{"scopes":["api:read","api:write"],"websocketBearerHeader":true,"websocketQueryToken":false},"endpoints":{}}
+        """.utf8)
+        let capabilities = try JSONDecoder().decode(NornCapabilities.self, from: data)
+        XCTAssertNil(capabilities.authenticatedPrincipal)
+        XCTAssertTrue(capabilities.grantedScopes.isEmpty)
+        XCTAssertFalse(capabilities.canOperateFleet)
+    }
+
+    func testTailscaleURLRequiresHTTPSAndEnrollmentSurfacesCertificateErrors() async throws {
+        XCTAssertTrue(NornClient.isAllowedBaseURL(try XCTUnwrap(URL(string: "https://mini.tail1234.ts.net"))))
+        XCTAssertFalse(NornClient.isAllowedBaseURL(try XCTUnwrap(URL(string: "http://mini.tail1234.ts.net"))))
+        NornURLProtocol.setHandler { _ in throw URLError(.serverCertificateUntrusted) }
+        let enrollment = try NornEnrollmentClient(
+            baseURL: try XCTUnwrap(URL(string: "https://mini.tail1234.ts.net")),
+            session: makeSession()
+        )
+        do {
+            _ = try await enrollment.capabilities()
+            XCTFail("expected certificate preflight failure")
+        } catch let error as NornEnrollmentClientError {
+            guard case .transport(let message) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertFalse(message.isEmpty)
+        }
     }
 
     func testHostMetricsUsesAuthenticatedV1RouteAndDecodesContract() async throws {

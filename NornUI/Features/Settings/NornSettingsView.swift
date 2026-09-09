@@ -5,9 +5,11 @@ struct NornSettingsView: View {
     let selectedProfileID: UUID?
     let onSelect: (UUID?) async -> Void
     let onManualSave: (NornServerProfile, String) async throws -> Void
+    let onDiscoverCapabilities: ServerProfileEditor.CapabilityDiscovery
     let onStartEnrollment: ServerProfileEditor.EnrollmentStart
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
-    let onRotate: () async -> Void
+    let issueMutationContext: () -> NornMutationContext?
+    let onRotate: (NornMutationContext) async -> Void
     let onRemove: (UUID) -> Void
 
     @State private var isAddingServer = false
@@ -86,7 +88,8 @@ struct NornSettingsView: View {
                     }
                     if profile.isManagedDevice {
                         Button("Rotate Device Credential Now", systemImage: "arrow.triangle.2.circlepath") {
-                            Task { await onRotate() }
+                            guard let context = issueMutationContext() else { return }
+                            Task { await onRotate(context) }
                         }
                     } else {
                         Button("Replace with Device Enrollment…", systemImage: "person.badge.key.fill") {
@@ -131,6 +134,7 @@ struct NornSettingsView: View {
             profile: profile,
             startsWithPairing: true,
             onManualSave: onManualSave,
+            onDiscoverCapabilities: onDiscoverCapabilities,
             onStartEnrollment: onStartEnrollment,
             onCompleteEnrollment: onCompleteEnrollment
         )

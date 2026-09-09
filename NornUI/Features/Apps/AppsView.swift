@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 
 struct AppsView: View {
@@ -5,14 +6,18 @@ struct AppsView: View {
     let services: [NornService]
     var canCreate = false
     var supportsRecovery = false
+    var canManageRecovery = false
+	var profileID: UUID? = nil
+	var isRecoveryConnected = false
     var onCreate: () -> Void = {}
     var onEnable: (String) -> Void = { _ in }
     var onLoadSnapshots: (String) async -> [NornAppSnapshot]? = { _ in nil }
-    var onQueueOperation: (NornAppOperationRequest) async -> NornOperation? = { _ in nil }
+    var issueMutationContext: () -> NornMutationContext? = { nil }
+    var onQueueOperation: (NornAppOperationRequest, NornMutationContext) async -> NornOperation? = { _, _ in nil }
     var onOpenOperation: (NornOperation) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pendingEnable: NornAppStatus?
+    @State private var draftEnableGate = NornProfileBoundMutationGate<String>()
     @State private var selectedAppName: String?
     @State private var searchText = ""
     @State private var presentation: AppListPresentation = .grouped
@@ -69,7 +74,11 @@ struct AppsView: View {
                         services: services.filter { $0.app == selectedApp.spec.name }
                     ),
                     isSupported: supportsRecovery,
+                    canManage: canManageRecovery,
+					profileID: profileID,
+					isConnected: isRecoveryConnected,
                     onLoadSnapshots: onLoadSnapshots,
+                    issueMutationContext: issueMutationContext,
                     onQueue: onQueueOperation,
                     onOpenOperation: onOpenOperation
                 )
@@ -118,23 +127,29 @@ struct AppsView: View {
                     Label("Create App", systemImage: "plus")
                 }
                 .disabled(!canCreate)
-                .help(canCreate ? "Create a disabled app draft" : "This server does not support app creation")
+                .help(canCreate ? "Create a disabled app draft" : "Requires authenticated api:write and the app-creation capability")
             }
         }
         .task { normalizeSelection() }
         .onChange(of: visibleAppNames) { _, _ in normalizeSelection() }
+        .onChange(of: profileID) { _, _ in draftEnableGate.invalidate() }
+        .onChange(of: canCreate) { _, _ in draftEnableGate.invalidate() }
+        .onChange(of: apps) { _, _ in draftEnableGate.invalidate() }
         .confirmationDialog(
-            "Enable deployment for \(pendingEnable?.spec.name ?? "this app")?",
+            "Enable deployment for \(draftEnableGate.pending?.intent ?? "this app")?",
             isPresented: Binding(
-                get: { pendingEnable != nil },
-                set: { if !$0 { pendingEnable = nil } }
+                get: { draftEnableGate.pending != nil },
+                set: { if !$0 { draftEnableGate.dismiss() } }
             )
         ) {
             Button("Enable Deployment") {
-                if let app = pendingEnable { onEnable(app.spec.name) }
-                pendingEnable = nil
+                if let appID = draftEnableGate.confirmedIntent(profileID: profileID, isAuthorized: canCreate, isStillCurrent: { appID in
+                    apps.contains(where: { $0.id == appID && $0.spec.deploy == false })
+                }) {
+                    onEnable(appID)
+                }
             }
-            Button("Cancel", role: .cancel) { pendingEnable = nil }
+            Button("Cancel", role: .cancel) { draftEnableGate.dismiss() }
         } message: {
             Text("The app will become eligible for deploy and host-recovery workflows. Verify its source, build, secrets, and health checks first.")
         }
@@ -152,7 +167,12 @@ struct AppsView: View {
                             HStack(spacing: 5) {
                                 Text(app.spec.name)
                                     .font(.callout.weight(.medium))
-                                Button("Enable") { pendingEnable = app }
+                                Button("Enable") {
+                                    guard drafts.contains(where: { $0.id == app.id }) else { return }
+                                    draftEnableGate.present(app.id, profileID: profileID, isAuthorized: canCreate)
+                                }
+                                    .disabled(!canCreate)
+                                    .help(canCreate ? "Enable this app deployment" : "Requires authenticated api:write and app-creation capability")
                                     .buttonStyle(.link)
                             }
                             .padding(.horizontal, 9)
@@ -700,18 +720,25 @@ private struct AppWorkloadBadge: View {
     }
 }
 
+private enum AppRecoveryAuthority {
+	static let disabledExplanation = "Requires an authenticated principal with api:write and the durable app recovery capability."
+}
+
 private struct AppRecoveryInspector: View {
 	let app: NornAppStatus
 	let workloadState: AppWorkloadState
 	let isSupported: Bool
+	let canManage: Bool
+	let profileID: UUID?
+	let isConnected: Bool
 	let onLoadSnapshots: (String) async -> [NornAppSnapshot]?
-	let onQueue: (NornAppOperationRequest) async -> NornOperation?
+	let issueMutationContext: () -> NornMutationContext?
+	let onQueue: (NornAppOperationRequest, NornMutationContext) async -> NornOperation?
 	let onOpenOperation: (NornOperation) -> Void
 
-	@State private var snapshots: [NornAppSnapshot] = []
+	@State private var snapshotLoader = AppRecoverySnapshotLoader()
 	@State private var keep = 3
 	@State private var migrationRef = "HEAD"
-	@State private var isLoading = false
 	@State private var isQueuing = false
 	@State private var confirmation: Confirmation?
 
@@ -724,7 +751,13 @@ private struct AppRecoveryInspector: View {
 			switch self { case .prune: "prune"; case let .restore(snapshot): "restore-\(snapshot.id)"; case .migrate: "migrate"; case .rollback: "rollback" }
 		}
 	}
-	private var ordered: [NornAppSnapshot] { snapshots.sorted { $0.timestamp > $1.timestamp } }
+	private var recoveryContext: NornProfileAppContext {
+		.init(profileID: profileID, appID: app.id, isActive: isConnected && isSupported && hasDatabase)
+	}
+	private var displayedSnapshots: [NornAppSnapshot] {
+		snapshotLoader.loadedContext == recoveryContext ? snapshotLoader.snapshots : []
+	}
+	private var ordered: [NornAppSnapshot] { displayedSnapshots.sorted { $0.timestamp > $1.timestamp } }
 	private var pruneCandidates: [NornAppSnapshot] { Array(ordered.dropFirst(keep)) }
 	private var hasDatabase: Bool { app.spec.infrastructure?.postgres != nil }
 
@@ -747,7 +780,13 @@ private struct AppRecoveryInspector: View {
 			.padding(18)
 		}
 		.background(.background.secondary)
-		.task(id: app.id) { await reload() }
+		.task(id: recoveryContext) { await reload() }
+		.onChange(of: recoveryContext) { _, _ in
+			confirmation = nil
+		}
+		.onChange(of: canManage) { _, hasAuthority in
+			if !hasAuthority { confirmation = nil }
+		}
 		.confirmationDialog(confirmationTitle, isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
 			Button(confirmationActionTitle, role: .destructive) { executeConfirmation() }
 			Button("Cancel", role: .cancel) { confirmation = nil }
@@ -774,10 +813,10 @@ private struct AppRecoveryInspector: View {
 	private var quickActions: some View {
 		GroupBox("Data Safety") {
 			VStack(alignment: .leading, spacing: 10) {
-				Button("Create Snapshot", systemImage: "camera.fill") { queue(.snapshot(app: app.id)) }.disabled(isQueuing)
+				Button("Create Snapshot", systemImage: "camera.fill") { queue(.snapshot(app: app.id)) }.disabled(isQueuing || !canManage).help(canManage ? "Queue a durable snapshot" : AppRecoveryAuthority.disabledExplanation).accessibilityHint(canManage ? "Queues a durable snapshot" : AppRecoveryAuthority.disabledExplanation)
 				if app.spec.migrations?.isEmpty == false {
 					TextField("Migration ref", text: $migrationRef).textFieldStyle(.roundedBorder)
-					Button("Review Schema Migration…", systemImage: "cylinder.split.1x2") { confirmation = .migrate }.disabled(isQueuing || migrationRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+					Button("Review Schema Migration…", systemImage: "cylinder.split.1x2") { confirmation = .migrate }.disabled(!canManage || isQueuing || migrationRef.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).help(canManage ? "Review the migration before it is queued" : AppRecoveryAuthority.disabledExplanation).accessibilityHint(canManage ? "Shows migration impact before it is queued" : AppRecoveryAuthority.disabledExplanation)
 				}
 				Text("Norn creates a safety snapshot before restore or migration and serializes changes across control-plane replicas.").font(.caption).foregroundStyle(.secondary)
 			}
@@ -791,7 +830,7 @@ private struct AppRecoveryInspector: View {
 				Stepper("Keep newest \(keep)", value: $keep, in: 1...1000)
 				Label(pruneCandidates.isEmpty ? "Nothing will be pruned" : "\(pruneCandidates.count) snapshot\(pruneCandidates.count == 1 ? "" : "s") will be pruned", systemImage: pruneCandidates.isEmpty ? "checkmark.circle" : "exclamationmark.triangle")
 						.font(.caption).foregroundStyle(pruneCandidates.isEmpty ? Color.secondary : Color.orange)
-				Button("Review Prune…", systemImage: "trash", role: .destructive) { confirmation = .prune }.disabled(pruneCandidates.isEmpty || isQueuing)
+				Button("Review Prune…", systemImage: "trash", role: .destructive) { confirmation = .prune }.disabled(!canManage || pruneCandidates.isEmpty || isQueuing).help(canManage ? "Review the snapshots that will be pruned" : AppRecoveryAuthority.disabledExplanation).accessibilityHint(canManage ? "Shows prune impact before it is queued" : AppRecoveryAuthority.disabledExplanation)
 			}
 			.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
 		}
@@ -799,7 +838,7 @@ private struct AppRecoveryInspector: View {
 
 	@ViewBuilder private var snapshotList: some View {
 		GroupBox("Local Snapshots") {
-			if isLoading { ProgressView().frame(maxWidth: .infinity).padding() }
+			if snapshotLoader.isLoading { ProgressView().frame(maxWidth: .infinity).padding() }
 			else if ordered.isEmpty { ContentUnavailableView("No Snapshots", systemImage: "camera", description: Text("Create a baseline before risky changes.")).padding(.vertical, 12) }
 			else {
 				VStack(spacing: 0) {
@@ -807,7 +846,7 @@ private struct AppRecoveryInspector: View {
 						HStack {
 							Image(systemName: index >= keep ? "trash.circle" : "checkmark.circle.fill").foregroundStyle(index >= keep ? .orange : .green)
 							VStack(alignment: .leading) { Text(snapshot.createdAt?.formatted(date: .abbreviated, time: .shortened) ?? snapshot.timestamp).lineLimit(1); Text(ByteCountFormatter.string(fromByteCount: snapshot.size, countStyle: .file)).font(.caption).foregroundStyle(.secondary) }
-							Spacer(); Button("Restore", systemImage: "arrow.uturn.backward") { confirmation = .restore(snapshot) }.labelStyle(.iconOnly).buttonStyle(.borderless).help("Restore this snapshot")
+							Spacer(); Button("Restore", systemImage: "arrow.uturn.backward") { confirmation = .restore(snapshot) }.disabled(!canManage).labelStyle(.iconOnly).buttonStyle(.borderless).help(canManage ? "Restore this snapshot" : AppRecoveryAuthority.disabledExplanation)
 						}.padding(.vertical, 8)
 						if index < ordered.count - 1 { Divider() }
 					}
@@ -819,7 +858,7 @@ private struct AppRecoveryInspector: View {
 	private var rollbackSection: some View {
 		GroupBox("Application Recovery") {
 			VStack(alignment: .leading, spacing: 8) {
-				Button("Review Rollback…", systemImage: "arrow.uturn.backward", role: .destructive) { confirmation = .rollback }.disabled(!isSupported || isQueuing || app.spec.deploy == false)
+				Button("Review Rollback…", systemImage: "arrow.uturn.backward", role: .destructive) { confirmation = .rollback }.disabled(!canManage || !isSupported || isQueuing || app.spec.deploy == false).help(canManage ? "Review the application rollback before it is queued" : AppRecoveryAuthority.disabledExplanation).accessibilityHint(canManage ? "Shows rollback impact before it is queued" : AppRecoveryAuthority.disabledExplanation)
 				Text("Rolls every declared region back to the previous successful image and waits for readiness before promotion.").font(.caption).foregroundStyle(.secondary)
 			}.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
 		}
@@ -827,16 +866,14 @@ private struct AppRecoveryInspector: View {
 
 	private func reload() async {
 		keep = max(1, app.spec.snapshots?.keep ?? 3)
-		guard isSupported, hasDatabase else { snapshots = []; return }
-		isLoading = true; defer { isLoading = false }
-		if let result = await onLoadSnapshots(app.id) { snapshots = result }
+		await snapshotLoader.reload(for: recoveryContext, operation: onLoadSnapshots)
 	}
 	private func queue(_ request: NornAppOperationRequest) {
-		guard !isQueuing else { return }; isQueuing = true
-		Task { if let operation = await onQueue(request) { onOpenOperation(operation) }; isQueuing = false }
+		guard !isQueuing, let context = issueMutationContext() else { return }; isQueuing = true
+		Task { if let operation = await onQueue(request, context) { onOpenOperation(operation) }; isQueuing = false }
 	}
 	private func executeConfirmation() {
-		guard let confirmation else { return }; self.confirmation = nil
+		guard canManage, isSupported, let confirmation else { self.confirmation = nil; return }; self.confirmation = nil
 		switch confirmation {
 		case .prune: queue(.pruneSnapshots(app: app.id, keep: keep))
 		case let .restore(snapshot): queue(.restoreSnapshot(app: app.id, snapshot: snapshot.filename))

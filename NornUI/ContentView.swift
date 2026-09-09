@@ -47,6 +47,9 @@ struct ContentView: View {
                 onManualSave: { profile, token in
                     try await appModel.saveProfile(profile, token: token)
                 },
+                onDiscoverCapabilities: { profile in
+                    try await appModel.discoverEnrollmentCapabilities(profile: profile)
+                },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
@@ -56,21 +59,31 @@ struct ContentView: View {
             )
         }
 		.sheet(isPresented: $appModel.isShowingCreateApp) {
-			CreateAppSheet { request in await appModel.createApp(request) != nil }
+			CreateAppSheet(
+				profileID: appModel.selectedProfileID,
+				canCreate: appModel.canManageApps,
+				issueMutationContext: { appModel.issueMutationContext() }
+			) { request, context in await appModel.createApp(request, context: context) != nil }
 		}
         .task { await appModel.start() }
     }
 
     private var sidebar: some View {
-        List(selection: $appModel.navigation) {
+        List(selection: guardedNavigation) {
+            if appModel.isServerAuthenticated {
+                Section {
+                    AuthorityContextBanner(appModel: appModel)
+                }
+            }
             Section("Control Room") {
-                ForEach(NornNavigation.allCases.filter { $0 != .activity }) { destination in
+                ForEach(appModel.availableNavigationDestinations) { destination in
                     Label(destination.title, systemImage: destination.symbol)
                         .tag(destination)
                         .accessibilityHint("Shows \(destination.title.lowercased())")
                 }
             }
 
+            if !appModel.isFleetAuthorityOnly {
             Section("Activity") {
                 VStack(alignment: .leading, spacing: 7) {
                     Label("Inspect Activity", systemImage: NornNavigation.activity.symbol)
@@ -87,12 +100,20 @@ struct ContentView: View {
                 .accessibilityIdentifier("sidebar.activity")
                 .accessibilityHint("Shows the operations and services behind these totals")
             }
+            }
         }
         .safeAreaInset(edge: .bottom) {
             ConnectionCard(appModel: appModel)
                 .padding(10)
         }
         .navigationTitle("Norn")
+    }
+
+    private var guardedNavigation: Binding<NornNavigation> {
+        Binding(
+            get: { appModel.navigation },
+            set: { appModel.navigate(to: $0) }
+        )
     }
 
     @ViewBuilder
@@ -104,21 +125,28 @@ struct ContentView: View {
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
-                onShowServices: { appModel.navigation = .apps },
-                onShowOperations: { appModel.navigation = .operations },
-                onShowReleases: { appModel.navigation = .platform },
-                onShowHost: { appModel.navigation = .host }
+                onShowServices: { appModel.navigate(to: .apps) },
+                onShowOperations: { appModel.navigate(to: .operations) },
+                onShowReleases: { appModel.navigate(to: .platform) },
+                onShowHost: { appModel.navigate(to: .host) }
             )
 		case .apps:
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
-				canCreate: appModel.canPerformOperations && appModel.appCreationSupported,
-				supportsRecovery: appModel.canPerformOperations && appModel.durableAppRecoverySupported,
+				canCreate: appModel.canManageApps,
+				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
+				canManageRecovery: appModel.canManageAppRecovery,
+				profileID: appModel.selectedProfileID,
+				isRecoveryConnected: appModel.canReadRuntime,
 				onCreate: { appModel.isShowingCreateApp = true },
-				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
+				onEnable: { app in
+					let context = appModel.issueMutationContext()
+					Task { await appModel.setAppDeployment(app: app, enabled: true, context: context) }
+				},
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
-				onQueueOperation: { await appModel.queueAppOperation($0) },
+				issueMutationContext: { appModel.issueMutationContext() },
+				onQueueOperation: { request, context in await appModel.queueAppOperation(request, context: context) },
 				onOpenOperation: openOperation
 			)
 		case .delivery:
@@ -128,7 +156,8 @@ struct ContentView: View {
 				environmentID: appModel.environmentID,
 				environmentProfile: appModel.environmentProfile,
 				isSupported: appModel.releasePipelineSupported,
-				isConnected: appModel.canPerformOperations,
+				isConnected: appModel.canReadLegacyReleaseEvidence,
+				profileID: appModel.selectedProfileID,
 				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
 			)
 		case .operations:
@@ -140,13 +169,15 @@ struct ContentView: View {
         case .platform:
             PlatformFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canRunPlatformMaintenance,
+				profileID: appModel.selectedProfileID,
                 onQueue: queue
             )
         case .host:
             HostFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canReadRuntime,
+                canQueueAssurance: appModel.canRunHostAssurance,
                 metrics: appModel.hostMetrics,
                 isMetricsSupported: appModel.hostMetricsSupported,
                 onQueue: queue,
@@ -168,20 +199,23 @@ struct ContentView: View {
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
-                canPlan: appModel.canPerformOperations,
-                isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
+                canPlan: appModel.canOperateFleet,
+				profileID: appModel.selectedProfileID,
+                isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
-                onPlan: { pool, desired, size, reason in
+                issueMutationContext: { appModel.issueMutationContext() },
+                onPlan: { pool, desired, size, reason, context in
                     await appModel.planFleetCapacity(
                         pool: pool,
                         desired: desired,
                         size: size,
-                        reason: reason
+                        reason: reason,
+                        context: context
                     ) != nil
                 },
-                onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
-                onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
+				onOpenReview: { planID, context in await appModel.createFleetPullRequest(planID: planID, context: context) },
+				onDispatchApply: { planID, allowDestructive, context in await appModel.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive, context: context) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }
@@ -190,7 +224,7 @@ struct ContentView: View {
             ActivityFeatureView(
                 snapshot: appModel.snapshot,
                 onOpenOperation: openOperation,
-                onShowApps: { appModel.navigation = .apps }
+                onShowApps: { appModel.navigate(to: .apps) }
             )
         }
     }
@@ -214,12 +248,33 @@ struct ContentView: View {
     }
 
     private func queue(_ request: NornMaintenanceRequest) {
-        Task { await appModel.queue(request) }
+        let context = appModel.issueMutationContext()
+        Task { await appModel.queue(request, context: context) }
     }
 
     private func openOperation(_ operation: NornOperation) {
-        appModel.selectedOperationID = operation.id
-        appModel.navigation = .operations
+        appModel.openOperation(operation)
+    }
+}
+
+private struct AuthorityContextBanner: View {
+    let appModel: NornAppModel
+
+    private var environment: String {
+        appModel.assertedEnvironmentID?.capitalized ?? "Environment not asserted"
+    }
+
+    private var authority: String {
+        guard let asserted = appModel.assertedAuthority else { return "Authority mode not asserted" }
+        return asserted == "fleet-only" ? "Fleet-only authority" : asserted
+    }
+
+    var body: some View {
+        Label("Authenticated: \(environment) · \(appModel.assertedEnvironmentProfile ?? "Profile not asserted") · \(authority)", systemImage: "checkmark.shield.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(appModel.isFleetAuthorityOnly ? .purple : .green)
+            .accessibilityIdentifier("authority.context.banner")
+            .help("Environment and authority are asserted by the authenticated server response.")
     }
 }
 

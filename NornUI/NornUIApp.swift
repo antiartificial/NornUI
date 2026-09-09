@@ -50,13 +50,15 @@ struct NornUIApp: App {
                 selectedProfileID: appModel.selectedProfileID,
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onDiscoverCapabilities: { try await appModel.discoverEnrollmentCapabilities(profile: $0) },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
                 onCompleteEnrollment: { profile, enrollment in
                     try await appModel.completeDeviceEnrollment(profile: profile, enrollment: enrollment)
                 },
-                onRotate: { await appModel.rotateManagedCredentialNow() },
+                issueMutationContext: { appModel.issueMutationContext() },
+                onRotate: { context in await appModel.rotateManagedCredentialNow(context: context) },
                 onRemove: { id in
                     Task { await appModel.removeProfileAndCredential(id: id) }
                 }
@@ -71,11 +73,12 @@ private struct NornCommands: Commands {
     var body: some Commands {
         CommandMenu("Norn") {
 			Button("Create App…") {
-				appModel.navigation = .apps
+				appModel.navigate(to: .apps)
 				appModel.isShowingCreateApp = true
 			}
 			.keyboardShortcut("n", modifiers: .command)
-			.disabled(!appModel.canPerformOperations || !appModel.appCreationSupported)
+			.disabled(!appModel.canManageApps)
+			.help(appModel.canManageApps ? "Create a disabled app draft" : "Requires authenticated api:write and the app-creation capability")
 
 			Divider()
             Button("Refresh Control Room") {
@@ -86,26 +89,43 @@ private struct NornCommands: Commands {
             Divider()
 
             Button("Run Platform Smoke Check") {
-                Task { await appModel.queue(.platformSmoke) }
+                let context = appModel.issueMutationContext()
+                Task { await appModel.queue(.platformSmoke, context: context) }
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
-            .disabled(!appModel.canPerformOperations)
+            .disabled(!appModel.canRunPlatformMaintenance)
+            .help(appModel.canRunPlatformMaintenance ? "Queue a platform smoke check" : "Requires an authenticated platform:operate scope")
 
             Button("Run Host Assurance") {
-                Task { await appModel.queue(.hostAssurance) }
+                let context = appModel.issueMutationContext()
+                Task { await appModel.queue(.hostAssurance, context: context) }
             }
             .keyboardShortcut("a", modifiers: [.command, .shift])
-            .disabled(!appModel.canPerformOperations)
+            .disabled(!appModel.canRunHostAssurance)
+            .help(appModel.canRunHostAssurance ? "Queue host assurance" : "Requires an authenticated host:operate scope")
         }
 
         CommandGroup(after: .sidebar) {
             Divider()
-            ForEach(Array(NornNavigation.allCases.enumerated()), id: \.element.id) { index, destination in
+            ForEach(appModel.availableNavigationDestinations) { destination in
                 Button("Show \(destination.title)") {
-                    appModel.navigation = destination
+                    appModel.navigate(to: destination)
                 }
-                .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                .keyboardShortcut(navigationShortcut(for: destination), modifiers: .command)
             }
+        }
+    }
+
+    private func navigationShortcut(for destination: NornNavigation) -> KeyEquivalent {
+        switch destination {
+        case .overview: "1"
+        case .apps: "2"
+        case .operations: "3"
+        case .fleet: "4"
+        case .platform: "5"
+        case .host: "6"
+        case .activity: "7"
+        case .delivery: "8"
         }
     }
 }

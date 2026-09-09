@@ -15,6 +15,7 @@ struct HostFeatureView: View {
     let operations: [NornOperation]
     let observedAt: Date?
     let isConnected: Bool
+    let canQueueAssurance: Bool
     let metrics: NornHostMetrics?
     let isMetricsSupported: Bool
     var onQueue: (NornMaintenanceRequest) -> Void = { _ in }
@@ -27,6 +28,7 @@ struct HostFeatureView: View {
     init(
         snapshot: NornDashboardSnapshot,
         isConnected: Bool = true,
+        canQueueAssurance: Bool? = nil,
         metrics: NornHostMetrics? = nil,
         isMetricsSupported: Bool? = nil,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
@@ -38,6 +40,7 @@ struct HostFeatureView: View {
         self.operations = snapshot.operations
         self.observedAt = snapshot.observedAt
         self.isConnected = isConnected
+        self.canQueueAssurance = canQueueAssurance ?? isConnected
         self.metrics = metrics
         self.isMetricsSupported = isMetricsSupported ?? snapshot.capabilities.supportsHostMetrics
         self.onQueue = onQueue
@@ -51,6 +54,7 @@ struct HostFeatureView: View {
         operations: [NornOperation],
         observedAt: Date? = nil,
         isConnected: Bool = true,
+        canQueueAssurance: Bool? = nil,
         metrics: NornHostMetrics? = nil,
         isMetricsSupported: Bool = false,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
@@ -62,6 +66,7 @@ struct HostFeatureView: View {
         self.operations = operations
         self.observedAt = observedAt
         self.isConnected = isConnected
+        self.canQueueAssurance = canQueueAssurance ?? isConnected
         self.metrics = metrics
         self.isMetricsSupported = isMetricsSupported
         self.onQueue = onQueue
@@ -249,8 +254,9 @@ struct HostFeatureView: View {
             HStack {
                 Button("Run Assurance") { queueAssurance() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!isConnected || activeAssurance != nil)
-                    .accessibilityHint("Queues a durable host assurance operation")
+                    .disabled(!canQueueAssurance || activeAssurance != nil)
+                    .help(canQueueAssurance ? "Queue a durable host assurance operation" : "Requires an authenticated host:operate scope")
+                    .accessibilityHint(canQueueAssurance ? "Queues a durable host assurance operation" : "Requires an authenticated host:operate scope")
                 if let latestAssurance {
                     Button("Open Receipt") { onOpenOperation(latestAssurance) }
                         .buttonStyle(.bordered)
@@ -259,6 +265,10 @@ struct HostFeatureView: View {
 
             if !isConnected {
                 Label("Reconnect to queue assurance.", systemImage: "wifi.slash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if !canQueueAssurance {
+                Label("Host assurance requires authenticated host:operate.", systemImage: "lock")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
