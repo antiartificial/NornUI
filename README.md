@@ -42,7 +42,10 @@ The current working milestone includes:
   schema migrations, and regional application rollback. Retry-safe intents are
   retained locally until Norn accepts the operation and returns its receipt.
 - Periodically refreshed host CPU, memory, storage, process, and container
-  metrics when the connected server advertises that capability.
+  metrics when the connected server advertises that capability, with persisted
+  per-profile history and optional service resource timelines.
+- Configurable Overview refresh cadence, coalesced refresh requests, and
+  event-cursor reconciliation when reconnecting after a retention gap.
 - Offline cached state, explicit request errors, explicit fixture-backed previews and UI tests,
   keyboard navigation, context menus, VoiceOver labels, semantic status, and
   Reduce Motion/Reduce Transparency support.

@@ -62,6 +62,11 @@ actor NornClient: NornClientProtocol {
         try await get("api/v1/host/metrics")
     }
 
+    func resourceSuggestions() async throws -> [NornResourceSuggestion] {
+        let response: NornResourceSuggestionList = try await get("api/resources/suggestions")
+        return response.suggestions
+    }
+
     func health() async throws -> NornHealth {
         try await get("api/health")
     }
@@ -163,7 +168,9 @@ actor NornClient: NornClientProtocol {
 	func fleetReconciliations(planID: String) async throws -> NornFleetReconciliationList {
 		let value = planID.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !value.isEmpty else { throw NornClientError.invalidResponse }
-		return try await get("api/v1/fleet/plans/\(value.pathComponentEncoded)/reconciliations")
+		let response: NornFleetReconciliationList = try await get("api/v1/fleet/plans/\(value.pathComponentEncoded)/reconciliations")
+		guard response.schemaVersion == "norn.fleet-reconciliation/v1" else { throw NornClientError.invalidResponse }
+		return response
 	}
 
 	func fleetRunnerAttempts(planID: String) async throws -> NornFleetRunnerAttemptList {
@@ -239,6 +246,27 @@ actor NornClient: NornClientProtocol {
 		try await releaseQueue(app: app, path: "promotions", body: request, idempotencyKey: idempotencyKey)
 	}
 
+	/// Reads the compatibility log stream without following it. It is a snapshot
+	/// of the current Nomad job output, not a durable historical log archive.
+	func appLogs(app: String) async throws -> String {
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		let maximumDisplayedBytes = 256 * 1_024
+		let (data, isTruncated) = try await performBoundedData(
+			path: "api/apps/\(value.pathComponentEncoded)/logs",
+			maximumBytes: maximumDisplayedBytes
+		)
+		let logs = String(decoding: data, as: UTF8.self)
+		return isTruncated ? "[Showing first 256 KB of app output]\n\(logs)" : logs
+	}
+
+	/// Restarts active Nomad allocations using Norn's compatibility control
+	/// surface. This direct action deliberately has no durable operation receipt.
+	func restartApp(app: String) async throws {
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		try await performEmpty(path: "api/apps/\(value.pathComponentEncoded)/restart", method: "POST", body: Data("{}".utf8))
+	}
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] {
 		try await get("api/v1/apps/\(app.pathComponentEncoded)/snapshots")
 	}
@@ -309,9 +337,46 @@ actor NornClient: NornClientProtocol {
         }
     }
 
+    func eventStreamInfo() async throws -> NornEventStreamInfo {
+        try await get("api/v1/events/info")
+    }
+
     private func get<Value: Decodable>(_ path: String) async throws -> Value {
         try await perform(path: path, method: "GET")
     }
+
+	private func performBoundedData(path: String, maximumBytes: Int) async throws -> (Data, Bool) {
+		let request = try await authorizedRequest(url: url(path: path), method: "GET")
+		do {
+			let (bytes, response) = try await session.bytes(for: request)
+			guard let http = response as? HTTPURLResponse else {
+				throw NornClientError.invalidResponse
+			}
+
+			var iterator = bytes.makeAsyncIterator()
+			if !(200 ... 299).contains(http.statusCode) {
+				var problem = Data()
+				while problem.count < 64 * 1_024, let byte = try await iterator.next() {
+					problem.append(byte)
+				}
+				throw Self.httpError(response: http, body: problem)
+			}
+
+			var data = Data()
+			data.reserveCapacity(maximumBytes)
+			while data.count < maximumBytes, let byte = try await iterator.next() {
+				data.append(byte)
+			}
+			let isTruncated = try await iterator.next() != nil
+			return (data, isTruncated)
+		} catch is CancellationError {
+			throw CancellationError()
+		} catch let error as NornClientError {
+			throw error
+		} catch {
+			throw NornClientError.transport(message: Self.transportMessage(error))
+		}
+	}
 
     private func queue<Body: Encodable>(
         path: String,

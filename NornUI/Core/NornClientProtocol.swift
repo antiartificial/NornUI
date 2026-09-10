@@ -3,6 +3,7 @@ import Foundation
 protocol NornClientProtocol: Sendable {
     func capabilities() async throws -> NornCapabilities
     func hostMetrics() async throws -> NornHostMetrics
+    func resourceSuggestions() async throws -> [NornResourceSuggestion]
     func health() async throws -> NornHealth
 	func hostStatus() async throws -> NornHostStatus
     func serviceManifest() async throws -> NornServiceManifest
@@ -29,13 +30,21 @@ protocol NornClientProtocol: Sendable {
 	func deployRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation
 	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification
 	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation
+	/// Compatibility runtime observability. This is intentionally separate from
+	/// durable app operations because the server streams the current Nomad logs.
+	func appLogs(app: String) async throws -> String
+	/// Compatibility runtime control. Restarts active Nomad allocations directly
+	/// and does not create a durable operation receipt.
+	func restartApp(app: String) async throws
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot]
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation
     func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation
+    func eventStreamInfo() async throws -> NornEventStreamInfo
     func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error>
 }
 
 extension NornClientProtocol {
+	func resourceSuggestions() async throws -> [NornResourceSuggestion] { [] }
 	func rotateCredential() async throws -> NornIssuedToken { throw NornClientError.invalidResponse }
 	func revokeCredential() async throws { throw NornClientError.invalidResponse }
 	func hostStatus() async throws -> NornHostStatus { throw NornClientError.invalidResponse }
@@ -61,6 +70,9 @@ extension NornClientProtocol {
 	func deployRelease(app: String, request: NornReleaseActionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification { throw NornClientError.invalidResponse }
 	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
+	func appLogs(app: String) async throws -> String { throw NornClientError.invalidResponse }
+	func restartApp(app: String) async throws { throw NornClientError.invalidResponse }
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
+	func eventStreamInfo() async throws -> NornEventStreamInfo { throw NornClientError.invalidResponse }
 }

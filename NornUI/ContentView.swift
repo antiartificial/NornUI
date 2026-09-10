@@ -123,17 +123,24 @@ struct ContentView: View {
             OverviewView(
                 snapshot: appModel.selectedProfile == nil && !appModel.isFixtureMode ? nil : appModel.snapshot,
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
+                updateMode: $appModel.overviewUpdateMode,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
                 onShowServices: { appModel.navigate(to: .apps) },
                 onShowOperations: { appModel.navigate(to: .operations) },
                 onShowReleases: { appModel.navigate(to: .platform) },
-                onShowHost: { appModel.navigate(to: .host) }
+                onShowHost: { appModel.navigate(to: .host) },
+                onOpenService: appModel.openService,
+                onOpenOperation: openOperation
             )
+			.onAppear { appModel.setOverviewVisible(true) }
+			.onDisappear { appModel.setOverviewVisible(false) }
 		case .apps:
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
+				selectedAppName: $appModel.selectedAppName,
+				selectedService: $appModel.selectedService,
 				canCreate: appModel.canManageApps,
 				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
 				canManageRecovery: appModel.canManageAppRecovery,
@@ -163,6 +170,7 @@ struct ContentView: View {
 		case .operations:
             OperationsFeatureView(
                 snapshot: appModel.snapshot,
+				selectedOperationID: $appModel.selectedOperationID,
                 onRefresh: refresh,
                 onOpenOperation: openOperation
             )
@@ -177,15 +185,27 @@ struct ContentView: View {
             HostFeatureView(
                 snapshot: appModel.snapshot,
                 isConnected: appModel.canReadRuntime,
-                canQueueAssurance: appModel.canRunHostAssurance,
                 metrics: appModel.hostMetrics,
+				metricHistory: appModel.hostMetricsHistory,
+				serviceMetricHistory: appModel.serviceMetricsHistory,
+				serviceMetricsCollectionEnabled: $appModel.serviceMetricsCollectionEnabled,
+				refreshInterval: $appModel.hostMetricsRefreshInterval,
                 isMetricsSupported: appModel.hostMetricsSupported,
+                canReadRuntime: appModel.canReadRuntime,
+                canWriteRuntime: appModel.canWriteRuntime,
+                canRunAssurance: appModel.canRunHostAssurance,
+				profileID: appModel.selectedProfileID,
                 onQueue: queue,
                 onOpenOperation: openOperation,
+				onOpenService: appModel.openService,
+				onLoadServiceLogs: { await appModel.appLogs(for: $0) },
+				issueMutationContext: { appModel.issueMutationContext() },
+				onRestartApp: { service, context in
+					return await appModel.restartAppAllocations(for: service, context: context)
+				},
                 onRefresh: refreshHost
             )
-            .onAppear { appModel.setHostMetricsVisible(true) }
-            .onDisappear { appModel.setHostMetricsVisible(false) }
+			.id(appModel.selectedProfileID)
         case .fleet:
             FleetFeatureView(
                 inventory: appModel.fleetInventory,

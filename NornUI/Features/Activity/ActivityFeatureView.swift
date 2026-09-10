@@ -20,7 +20,7 @@ struct ActivityFeatureView: View {
 
     private var serviceGroups: [ServiceStateGroup] {
         let matching = snapshot.services.filter(matches)
-        let grouped = Dictionary(grouping: matching) { $0.status.lowercased() }
+        let grouped = Dictionary(grouping: matching) { $0.displayStatus.lowercased() }
         return grouped.map { status, services in
             ServiceStateGroup(
                 status: status,
@@ -88,9 +88,9 @@ struct ActivityFeatureView: View {
                 status: snapshot.activeOperations.isEmpty ? .neutral : .active
             )
             ActivitySummary(
-                title: "Passing services",
-                value: "\(snapshot.passingServices) / \(snapshot.services.count)",
-                status: snapshot.passingServices == snapshot.services.count ? .healthy : .attention
+                title: "Need attention",
+                value: "\(snapshot.services.filter(\.needsAttention).count)",
+                status: snapshot.services.contains(where: \.needsAttention) ? .attention : .healthy
             )
         }
         .accessibilityIdentifier("activity.summary")
@@ -139,7 +139,7 @@ struct ActivityFeatureView: View {
                                             .accessibilityIdentifier("activity.service.\(service.id)")
                                     }
                                     .buttonStyle(.plain)
-                                    .accessibilityLabel("\(service.app), \(service.process), \(service.status)")
+                                    .accessibilityLabel("\(service.app), \(service.process), \(service.displayStatus)")
                                 }
                             }
                             .padding(.leading, 8)
@@ -203,6 +203,7 @@ struct ActivityFeatureView: View {
             || service.process.localizedStandardContains(searchText)
             || service.name.localizedStandardContains(searchText)
             || service.status.localizedStandardContains(searchText)
+            || service.displayStatus.localizedStandardContains(searchText)
             || service.reachability.exposure.localizedStandardContains(searchText)
     }
 

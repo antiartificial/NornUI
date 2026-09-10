@@ -233,6 +233,7 @@ struct OperationsFeatureView: View {
     let operations: [NornOperation]
     let releases: [NornRelease]
     let observedAt: Date?
+    @Binding private var requestedOperationID: String?
     var onRefresh: () -> Void = {}
     var onOpenOperation: (NornOperation) -> Void = { _ in }
     var onCopyOperationID: (NornOperation) -> Void = { _ in }
@@ -249,6 +250,7 @@ struct OperationsFeatureView: View {
 
     init(
         snapshot: NornDashboardSnapshot,
+        selectedOperationID: Binding<String?> = .constant(nil),
         onRefresh: @escaping () -> Void = {},
         onOpenOperation: @escaping (NornOperation) -> Void = { _ in },
         onCopyOperationID: @escaping (NornOperation) -> Void = { _ in }
@@ -256,6 +258,7 @@ struct OperationsFeatureView: View {
         self.operations = snapshot.operations
         self.releases = NornRelease.canonicalHistory(snapshot.releases)
         self.observedAt = snapshot.observedAt
+        self._requestedOperationID = selectedOperationID
         self.onRefresh = onRefresh
         self.onOpenOperation = onOpenOperation
         self.onCopyOperationID = onCopyOperationID
@@ -265,6 +268,7 @@ struct OperationsFeatureView: View {
         operations: [NornOperation],
         releases: [NornRelease] = [],
         observedAt: Date? = nil,
+        selectedOperationID: Binding<String?> = .constant(nil),
         onRefresh: @escaping () -> Void = {},
         onOpenOperation: @escaping (NornOperation) -> Void = { _ in },
         onCopyOperationID: @escaping (NornOperation) -> Void = { _ in }
@@ -272,6 +276,7 @@ struct OperationsFeatureView: View {
         self.operations = operations
         self.releases = NornRelease.canonicalHistory(releases)
         self.observedAt = observedAt
+        self._requestedOperationID = selectedOperationID
         self.onRefresh = onRefresh
         self.onOpenOperation = onOpenOperation
         self.onCopyOperationID = onCopyOperationID
@@ -351,7 +356,26 @@ struct OperationsFeatureView: View {
                 .accessibilityHint("Fetches the newest durable operation receipts and release artifacts")
             }
         }
+        .task { revealRequestedOperation() }
+        .onChange(of: requestedOperationID) { _, _ in revealRequestedOperation() }
+        .onChange(of: selection) { _, value in
+            guard let value,
+                  let operation = activities.first(where: { $0.id == value })?.operation else { return }
+            requestedOperationID = operation.id
+        }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: filteredActivities)
+    }
+
+    private func revealRequestedOperation() {
+        guard let requestedOperationID,
+              let activity = activities.first(where: { $0.operation?.id == requestedOperationID }) else { return }
+        filter = .all
+        kindFilter = .all
+        targetFilter = nil
+        startedFilter = .all
+        elapsedFilter = .all
+        searchText = ""
+        selection = activity.id
     }
 
     private var operationSummary: some View {
