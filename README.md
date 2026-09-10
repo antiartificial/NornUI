@@ -47,6 +47,9 @@ The current working milestone includes:
   resource timelines. Chart preparation stays off the main UI thread and
   renders a bounded number of points for the visible range. Earlier/Later
   controls load adjacent ranges without a month-wide chart scroll surface.
+  Drag across the plot to zoom into a range, Option-scroll to zoom around the
+  pointer, or use the zoom buttons and Reset zoom. Live chart updates and
+  hover details animate subtly and respect Reduce Motion.
 - Configurable Overview refresh cadence, coalesced refresh requests, and
   event-cursor reconciliation when reconnecting after a retention gap.
 - Offline cached state, explicit request errors, explicit fixture-backed previews and UI tests,

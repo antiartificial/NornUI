@@ -70,6 +70,51 @@ final class NornUIUITests: XCTestCase {
     }
 
     @MainActor
+    func testHostChartZoomAndHoverWithMonthOfHistory() throws {
+        let app = fixtureApp()
+        app.launchEnvironment["NORN_UI_HISTORY_STRESS"] = "1"
+        app.launchArguments += ["-norn.hostMetricsWindow.v1", "3600"]
+        app.launch()
+        app.activate()
+        app.typeKey("6", modifierFlags: .command)
+
+        let chart = app.descendants(matching: .any)["host.history.chart"]
+        XCTAssertTrue(chart.waitForExistence(timeout: 5))
+        let reset = app.buttons["host.history.reset-zoom"]
+        XCTAssertTrue(reset.waitForExistence(timeout: 5))
+        XCTAssertFalse(reset.isEnabled)
+
+        let left = chart.coordinate(withNormalizedOffset: CGVector(dx: 0.25, dy: 0.45))
+        let right = chart.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.45))
+        left.press(forDuration: 0.1, thenDragTo: right)
+        XCTAssertTrue(reset.isEnabled, "Dragging a plotted range should enable zoom reset")
+        XCTAssertTrue(chart.exists)
+        reset.click()
+        XCTAssertFalse(reset.isEnabled)
+
+        let center = chart.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45))
+        center.hover()
+        XCUIElement.perform(withKeyModifiers: .option) {
+            center.scroll(byDeltaX: 0, deltaY: 20)
+        }
+        XCTAssertTrue(reset.isEnabled, "Option-scroll over the plot should zoom")
+        reset.click()
+        XCTAssertFalse(reset.isEnabled)
+
+        app.buttons["host.history.zoom-in"].click()
+        XCTAssertTrue(chart.exists)
+        app.buttons["host.history.zoom-out"].click()
+        XCTAssertTrue(chart.exists)
+        chart.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.45)).hover()
+        XCTAssertTrue(app.descendants(matching: .any)["host.history.hover-readout"].waitForExistence(timeout: 3))
+
+        let navigationStart = Date()
+        app.typeKey("3", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["operations.header"].waitForExistence(timeout: 5))
+        XCTAssertLessThan(Date().timeIntervalSince(navigationStart), 5, "Animated chart interaction must not block navigation")
+    }
+
+    @MainActor
     func testOperationsUsesAvailableDetailHeight() throws {
         let app = fixtureApp()
         app.launch()
