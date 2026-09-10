@@ -91,6 +91,12 @@ final class NornAppModel {
     var fleetGitHubStatus: NornFleetGitHubStatus
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
+    var selectedDeploymentID: String?
+    var activeDeploymentOperations: [NornOperation] = []
+    var isDeploymentActivityRefreshing = false
+    var deploymentActivityError: String?
+    var deploymentStepLoadingIDs: Set<String> = []
+    var deploymentStepErrors: [String: String] = [:]
     var isFleetRefreshing = false
     var selectedOperationID: String?
     var selectedAppName: String?
@@ -109,6 +115,13 @@ final class NornAppModel {
     @ObservationIgnored private var client: (any NornClientProtocol)?
     @ObservationIgnored private var eventTask: Task<Void, Never>?
     @ObservationIgnored private var hostMetricsTask: Task<Void, Never>?
+    @ObservationIgnored private var deploymentActivityTask: Task<Void, Never>?
+    @ObservationIgnored private var deploymentStepTask: Task<Void, Never>?
+    @ObservationIgnored private var deploymentListTask: Task<[NornDeployment], Error>?
+    @ObservationIgnored private var deploymentListTaskID: UUID?
+    @ObservationIgnored private var deploymentStepRequestID: UUID?
+    @ObservationIgnored private var deploymentActivityRequestID: UUID?
+    @ObservationIgnored private var isDeploymentActivityVisible = false
     @ObservationIgnored private var fleetTask: Task<Void, Never>?
     @ObservationIgnored private var overviewRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var overviewEventRefreshTask: Task<Void, Never>?
@@ -171,6 +184,9 @@ final class NornAppModel {
     deinit {
         eventTask?.cancel()
         hostMetricsTask?.cancel()
+        deploymentActivityTask?.cancel()
+        deploymentStepTask?.cancel()
+        deploymentListTask?.cancel()
         fleetTask?.cancel()
         overviewRefreshTask?.cancel()
         overviewEventRefreshTask?.cancel()
@@ -522,6 +538,7 @@ final class NornAppModel {
         stopOverviewUpdating()
         stopHostMetricsPolling()
         stopFleetPolling()
+        stopDeploymentActivityPolling()
         client = nil
         clearConnectionScopedState()
         hostMetrics = nil
@@ -556,6 +573,7 @@ final class NornAppModel {
             startOverviewUpdatingIfNeeded()
             startHostMetricsPollingIfNeeded()
             startFleetPollingIfNeeded()
+            startDeploymentActivityPollingIfNeeded()
         } catch is CancellationError {
             return
         } catch {
@@ -594,6 +612,7 @@ final class NornAppModel {
                 startOverviewUpdatingIfNeeded()
                 startHostMetricsPollingIfNeeded()
                 startFleetPollingIfNeeded()
+                startDeploymentActivityPollingIfNeeded()
             } catch is CancellationError {
                 return
             } catch {
@@ -604,6 +623,7 @@ final class NornAppModel {
                 stopOverviewUpdating()
                 stopHostMetricsPolling()
                 stopFleetPolling()
+                stopDeploymentActivityPolling()
                 return
             }
         } while shouldRefreshAgain && isCurrentConnection(generation: generation, profileID: profileID)
@@ -1162,6 +1182,7 @@ final class NornAppModel {
             stopOverviewUpdating()
             stopHostMetricsPolling()
             stopFleetPolling()
+            stopDeploymentActivityPolling()
             client = nil
             clearConnectionScopedState()
             connectionState = .idle
@@ -1206,6 +1227,7 @@ final class NornAppModel {
         eventTask?.cancel()
         stopHostMetricsPolling()
         stopFleetPolling()
+        stopDeploymentActivityPolling()
         client = nil
         clearConnectionScopedState()
         stopOverviewUpdating()
@@ -1427,13 +1449,147 @@ final class NornAppModel {
         }
     }
 
-    /// Deployment checkpoints are optional. A failed compatibility request
-    /// clears its evidence without taking the authoritative v1 connection offline.
+    /// Apps and Delivery share one bounded, visibility-scoped refresh loop.
+    func setDeploymentActivityVisible(_ isVisible: Bool, profileID: UUID?) {
+        guard profileID == selectedProfileID else { return }
+        isDeploymentActivityVisible = isVisible
+        if isVisible {
+            startDeploymentActivityPollingIfNeeded()
+            selectDeployment(id: selectedDeploymentID)
+        } else {
+            stopDeploymentActivityPolling()
+        }
+    }
+
+    func selectDeployment(id: String?) {
+        selectedDeploymentID = id
+        deploymentStepTask?.cancel()
+        deploymentStepRequestID = nil
+        deploymentStepLoadingIDs.removeAll()
+        guard let id, isDeploymentActivityVisible, connectionState == .online,
+              !isFixtureMode, snapshot.capabilities.supportsDeploymentVisibility else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        deploymentStepTask = Task { [weak self] in
+            await self?.loadDeploymentSteps(id: id, generation: generation, profileID: profileID)
+        }
+    }
+
+    private func loadDeploymentSteps(id: String, generation: UInt64, profileID: UUID?) async {
+        guard let client, isDeploymentActivityVisible,
+              isCurrentConnection(generation: generation, profileID: profileID) else { return }
+        let requestID = UUID()
+        deploymentStepRequestID = requestID
+        deploymentStepLoadingIDs.insert(id)
+        defer {
+            if deploymentStepRequestID == requestID {
+                deploymentStepLoadingIDs.remove(id)
+                deploymentStepRequestID = nil
+            }
+        }
+        do {
+            let steps = try await client.deploymentSteps(deploymentID: id)
+            guard !Task.isCancelled, deploymentStepRequestID == requestID,
+                  selectedDeploymentID == id, isDeploymentActivityVisible,
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            deploymentSteps[id] = steps
+            deploymentStepErrors[id] = nil
+        } catch {
+            guard !Task.isCancelled, deploymentStepRequestID == requestID,
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            deploymentStepErrors[id] = error.localizedDescription
+        }
+    }
+
+    func refreshDeploymentActivity() async {
+        guard let client, isDeploymentActivityVisible, !isFleetAuthorityOnly,
+              connectionState == .online, deploymentActivityRequestID == nil else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        let requestID = UUID()
+        deploymentActivityRequestID = requestID
+        isDeploymentActivityRefreshing = true
+        defer {
+            if deploymentActivityRequestID == requestID {
+                deploymentActivityRequestID = nil
+                isDeploymentActivityRefreshing = false
+            }
+        }
+        async let apps = captureRefreshValue { try await client.apps() }
+        async let operations = captureRefreshValue { try await client.operations(activeOnly: false, limit: 100) }
+        async let active = captureRefreshValue { try await client.operations(activeOnly: true, limit: 100) }
+        async let services = captureRefreshValue { try await client.serviceManifest() }
+        async let listing: Void = refreshDeploymentVisibility(using: client, expectedGeneration: generation, expectedProfileID: profileID, expectedActivityRequestID: requestID)
+        let result = await (apps, operations, active, services, listing)
+        guard !Task.isCancelled, isDeploymentActivityVisible,
+              deploymentActivityRequestID == requestID,
+              isCurrentConnection(generation: generation, profileID: profileID) else { return }
+        var failures: [String] = []
+        if case let .value(value) = result.0 { snapshot.apps = value } else { failures.append("apps") }
+        if case let .value(value) = result.1 {
+            // Preserve newer event receipts delivered while this request was in flight.
+            var merged = Dictionary(value.map { ($0.id, $0) }, uniquingKeysWith: { _, newer in newer })
+            for operation in snapshot.operations where eventMutatedOperationIDs.contains(operation.id) {
+                if merged[operation.id].map({ $0.updatedAt < operation.updatedAt }) ?? true {
+                    merged[operation.id] = operation
+                }
+            }
+            snapshot.operations = merged.values.sorted { $0.updatedAt > $1.updatedAt }
+        } else { failures.append("operation history") }
+        if case let .value(value) = result.2 {
+            activeDeploymentOperations = value.filter { $0.kind.hasPrefix("app.") && $0.status.isActive }
+            for operation in value where !snapshot.operations.contains(where: { $0.id == operation.id }) {
+                snapshot.operations.append(operation)
+            }
+        } else {
+            activeDeploymentOperations = []
+            failures.append("active operations (current activity unavailable)")
+        }
+        if case let .value(value) = result.3 { snapshot.services = value.services }
+        else { failures.append("services") }
+        snapshot.observedAt = .now
+        if !failures.isEmpty {
+            deploymentActivityError = "Could not refresh \(failures.joined(separator: ", ")). Showing the last available information."
+        }
+        if let id = selectedDeploymentID, deploymentStepRequestID == nil {
+            selectDeployment(id: id)
+        }
+    }
+
+    private func startDeploymentActivityPollingIfNeeded() {
+        guard isDeploymentActivityVisible, !isFixtureMode, !isFleetAuthorityOnly,
+              connectionState == .online, client != nil, deploymentActivityTask == nil else { return }
+        deploymentActivityTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isDeploymentActivityVisible else { return }
+                await self.refreshDeploymentActivity()
+                let active = !self.activeDeploymentOperations.isEmpty
+                do { try await Task.sleep(for: .seconds(active ? 5 : 15)) }
+                catch { return }
+            }
+        }
+    }
+
+    private func stopDeploymentActivityPolling() {
+        activeDeploymentOperations = []
+        deploymentActivityTask?.cancel()
+        deploymentActivityTask = nil
+        deploymentStepTask?.cancel()
+        deploymentStepTask = nil
+        deploymentStepRequestID = nil
+        deploymentStepLoadingIDs.removeAll()
+        deploymentActivityRequestID = nil
+        isDeploymentActivityRefreshing = false
+    }
+
+    /// Publish the bounded deployment inventory independently of optional step detail.
+    /// Concurrent general/view refreshes share the same request.
     private func refreshDeploymentVisibility(
         using client: any NornClientProtocol,
         expectedGeneration: UInt64? = nil,
         expectedProfileID: UUID? = nil,
-        expectedRefreshSequence: UInt64? = nil
+        expectedRefreshSequence: UInt64? = nil,
+        expectedActivityRequestID: UUID? = nil
     ) async {
         let generation = expectedGeneration ?? connectionGeneration
         let profileID = expectedProfileID ?? selectedProfileID
@@ -1444,26 +1600,36 @@ final class NornAppModel {
             deploymentSteps = [:]
             return
         }
-        do {
-            let current = try await client.deployments()
-            var steps: [String: [NornDeploymentStep]] = [:]
-            for deployment in current.prefix(12) {
-                let deploymentStepResult = try? await client.deploymentSteps(deploymentID: deployment.id)
-                guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
-                steps[deployment.id] = deploymentStepResult ?? []
+        let task: Task<[NornDeployment], Error>
+        let requestID: UUID
+        if let existing = deploymentListTask, let existingID = deploymentListTaskID {
+            task = existing
+            requestID = existingID
+        } else {
+            task = Task { try await client.deployments() }
+            requestID = UUID()
+            deploymentListTask = task
+            deploymentListTaskID = requestID
+        }
+        defer {
+            if deploymentListTaskID == requestID {
+                deploymentListTask = nil
+                deploymentListTaskID = nil
             }
-            guard isCurrentConnection(generation: generation, profileID: profileID),
+        }
+        do {
+            let current = try await task.value
+            guard !Task.isCancelled,
+                  expectedActivityRequestID == nil || (isDeploymentActivityVisible && deploymentActivityRequestID == expectedActivityRequestID),
+                  isCurrentConnection(generation: generation, profileID: profileID),
                   expectedRefreshSequence == nil || expectedRefreshSequence == authoritativeRefreshSequence else { return }
-            deployments = current
-            deploymentSteps = steps
-        } catch is CancellationError {
-            return
+            deployments = current.sorted { $0.startedAt > $1.startedAt }
+            deploymentActivityError = nil
         } catch {
-            // A compatibility failure cannot be attributed safely after a
-            // profile change, so show it as unavailable rather than cached.
-            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
-            deployments = []
-            deploymentSteps = [:]
+            guard !Task.isCancelled,
+                  expectedActivityRequestID == nil || (isDeploymentActivityVisible && deploymentActivityRequestID == expectedActivityRequestID),
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            deploymentActivityError = "Deployment history could not refresh: \(error.localizedDescription)"
         }
     }
 
@@ -1491,6 +1657,7 @@ final class NornAppModel {
                     self.stopOverviewUpdating()
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
+                    self.stopDeploymentActivityPolling()
                 } catch is CancellationError {
                     return
                 } catch {
@@ -1500,6 +1667,7 @@ final class NornAppModel {
                     self.stopOverviewUpdating()
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
+                    self.stopDeploymentActivityPolling()
                 }
 
                 retry += 1
@@ -1514,6 +1682,7 @@ final class NornAppModel {
                     self.startOverviewUpdatingIfNeeded()
                     self.startHostMetricsPollingIfNeeded()
                     self.startFleetPollingIfNeeded()
+                    self.startDeploymentActivityPollingIfNeeded()
                     retry = 0
                 } catch is CancellationError {
                     return
@@ -1524,6 +1693,7 @@ final class NornAppModel {
                     self.stopOverviewUpdating()
                     self.stopHostMetricsPolling()
                     self.stopFleetPolling()
+                    self.stopDeploymentActivityPolling()
                 }
             }
         }
@@ -1702,6 +1872,14 @@ final class NornAppModel {
     }
 
     private func clearFleetAndDeploymentState() {
+        stopDeploymentActivityPolling()
+        deploymentListTask?.cancel()
+        deploymentListTask = nil
+        deploymentListTaskID = nil
+        selectedDeploymentID = nil
+        activeDeploymentOperations = []
+        deploymentActivityError = nil
+        deploymentStepErrors = [:]
         fleetInventory = .unconfigured
         fleetPlans = []
         fleetReconciliations = [:]

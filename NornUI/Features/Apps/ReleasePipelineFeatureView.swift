@@ -27,10 +27,32 @@ struct ReleasePipelineFeatureView: View {
     let isSupported: Bool
     let isConnected: Bool
     let profileID: UUID?
+    var requestedDeploymentID: String? = nil
+    var operations: [NornOperation] = []
+    var deploymentSteps: [String: [NornDeploymentStep]] = [:]
+    var loadingDeploymentIDs: Set<String> = []
+    var deploymentStepErrors: [String: String] = [:]
+    var deploymentActivityError: String? = nil
+    var isLoadingDeploymentActivity = false
+    var onSelectDeployment: (NornDeployment) -> Void = { _ in }
     var onLoadQualifications: (String) async -> [NornReleaseQualification] = { _ in [] }
 
     @State private var appName = ""
     @State private var qualificationLoader = ReleaseQualificationEvidenceLoader()
+    @State private var selectedDeploymentID: String?
+
+    private var recentDeployments: [NornDeployment] {
+        deployments.sorted {
+            let lhs = $0.finishedAt ?? $0.startedAt
+            let rhs = $1.finishedAt ?? $1.startedAt
+            if lhs != rhs { return lhs > rhs }
+            return $0.id < $1.id
+        }
+    }
+
+    private var selectedDeployment: NornDeployment? {
+        recentDeployments.first { $0.id == (selectedDeploymentID ?? requestedDeploymentID) } ?? recentDeployments.first
+    }
 
     private var isStaging: Bool { environmentID == "staging" }
     private var isProduction: Bool { environmentID == "production" }
@@ -48,6 +70,7 @@ struct ReleasePipelineFeatureView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                deploymentActivity
                 if !isManagedFleet {
                     environmentCard
                     localDevelopmentLane
@@ -68,6 +91,97 @@ struct ReleasePipelineFeatureView: View {
         .task { normalizeSelectedApp() }
         .task(id: qualificationContext) { await loadQualifications() }
         .onChange(of: apps) { _, _ in normalizeSelectedApp() }
+        .onChange(of: selectedDeployment?.id, initial: true) { _, _ in
+            if let selectedDeployment { onSelectDeployment(selectedDeployment) }
+        }
+        .onChange(of: profileID) { _, _ in selectedDeploymentID = nil }
+        .onChange(of: requestedDeploymentID, initial: true) { _, value in
+            if let value, deployments.contains(where: { $0.id == value }) { selectedDeploymentID = value }
+        }
+    }
+
+    private var deploymentActivity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Recent application deployments", systemImage: "shippingbox")
+                .font(.headline)
+            if isLoadingDeploymentActivity { ProgressView("Refreshing deployment activity…").controlSize(.small) }
+            if let deploymentActivityError {
+                Label(deploymentActivityError, systemImage: "exclamationmark.triangle")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            inFlightOperations
+            if let deployment = selectedDeployment {
+                Picker("Deployment", selection: Binding(
+                    get: { selectedDeployment?.id },
+                    set: { selectedDeploymentID = $0 }
+                )) {
+                    ForEach(recentDeployments) { item in
+                        Text("\(item.app) · \(item.status.rawValue) · \(item.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .tag(Optional(item.id))
+                    }
+                }
+                .accessibilityIdentifier("delivery.deployment-picker")
+                HStack {
+                    Text(deployment.app).font(.title3.weight(.semibold))
+                    Spacer()
+                    Text(String(deployment.commitSHA.prefix(8)))
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                Text("Last reported \(deployment.status.rawValue) · Started \(deployment.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(.secondary)
+                DeploymentPipelineGraph(
+                    deployment: deployment,
+                    steps: deploymentSteps[deployment.id] ?? [],
+                    isLoading: loadingDeploymentIDs.contains(deployment.id),
+                    errorMessage: deploymentStepErrors[deployment.id],
+                    isLive: isConnected && !deployment.sagaID.isEmpty && operations.contains {
+                        $0.status.isActive && $0.sagaID == deployment.sagaID
+                    }
+                )
+            } else {
+                Text("No application deployments reported by this environment yet.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("delivery.deployment-activity")
+    }
+
+    private var inFlightOperations: some View {
+        let active = operations.filter { $0.status.isActive && $0.kind.hasPrefix("app.") }
+            .sorted { $0.startedAt > $1.startedAt }
+        return VStack(alignment: .leading, spacing: 8) {
+            if !active.isEmpty {
+                Label(isConnected ? "In flight" : "Last reported in flight", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.subheadline.weight(.semibold))
+                ForEach(active) { operation in
+                    let deployment = deployments.first { !$0.sagaID.isEmpty && $0.sagaID == operation.sagaID }
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(operation.app ?? operation.kind).font(.subheadline.weight(.medium))
+                            Text(operation.message ?? operation.kind.replacingOccurrences(of: ".", with: " "))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text(operation.status.rawValue.capitalized).font(.caption.weight(.medium))
+                            if operation.status == .running && isConnected {
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    Text(Duration.seconds(max(0, context.date.timeIntervalSince(operation.startedAt)))
+                                        .formatted(.units(allowed: [.hours, .minutes, .seconds], width: .abbreviated)))
+                                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                        if let deployment {
+                            Button("View") { selectedDeploymentID = deployment.id }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.accentColor.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
+        }
     }
 
     private var header: some View {

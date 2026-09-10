@@ -197,7 +197,10 @@ actor NornClient: NornClientProtocol {
 	}
 
 	func deployments() async throws -> [NornDeployment] {
-		let result: NornDeploymentList = try await get("api/v1/deployments")
+        var components = URLComponents(url: try url(path: "api/v1/deployments"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: "100")]
+        guard let endpoint = components?.url else { throw NornClientError.invalidBaseURL }
+        let result: NornDeploymentList = try await perform(url: endpoint, method: "GET")
 		return result.deployments
 	}
 

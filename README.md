@@ -38,6 +38,11 @@ The current working milestone includes:
   explicit deployment-enable action.
 - Searchable app inventory with grouped app/process/allocation disclosures,
   an optional flat presentation, active-only filtering, and sortable columns.
+  Recent deployments lead the default order, including apps still waiting for
+  inventory. Apps and Delivery refresh while visible and show active application
+  work plus a selectable graph of reported deployment steps and their timings.
+  Only the selected deployment loads checkpoint detail; disconnected or old
+  nonterminal records are labeled as last reported rather than live.
 - Durable app snapshots, retention pruning, exact-snapshot restore, standalone
   schema migrations, and regional application rollback. Retry-safe intents are
   retained locally until Norn accepts the operation and returns its receipt.

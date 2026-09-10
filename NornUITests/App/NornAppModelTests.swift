@@ -811,6 +811,70 @@ final class NornAppModelTests: XCTestCase {
         }
     }
 
+    func testDeploymentInventoryDoesNotLoadStepsUntilSelected() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let control = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in InterleavingClient(marker: "A", control: control) })
+        await model.start()
+        XCTAssertEqual(model.deployments.first?.id, "A-deployment")
+        let eagerlyLoaded = await control.wasCalled("deploymentSteps")
+        XCTAssertFalse(eagerlyLoaded, "Inventory must publish without serial detail requests")
+
+        await control.block("deploymentSteps", failing: true)
+        model.setDeploymentActivityVisible(true, profileID: profile.id)
+        model.selectDeployment(id: "A-deployment")
+        await control.waitUntilCalled("deploymentSteps")
+        XCTAssertTrue(model.deploymentStepLoadingIDs.contains("A-deployment"))
+        await control.release("deploymentSteps")
+        for _ in 0..<100 where model.deploymentStepErrors["A-deployment"] == nil {
+            await Task.yield()
+        }
+        XCTAssertNotNil(model.deploymentStepErrors["A-deployment"], "A failed detail request must not masquerade as empty steps")
+        model.setDeploymentActivityVisible(false, profileID: profile.id)
+        XCTAssertTrue(model.deploymentStepLoadingIDs.isEmpty)
+    }
+
+    func testLeavingDeploymentActivityClearsActiveClaims() async {
+        let model = NornAppModel(fixture: NornFixtures.snapshot)
+        var operation = NornFixtures.snapshot.operations[0]
+        operation.kind = "app.deploy"
+        operation.status = .running
+        model.activeDeploymentOperations = [operation]
+        model.setDeploymentActivityVisible(false, profileID: model.selectedProfileID)
+        XCTAssertTrue(model.activeDeploymentOperations.isEmpty)
+        XCTAssertTrue(model.deploymentStepLoadingIDs.isEmpty)
+    }
+
+    func testDeploymentStepResponseCannotCrossProfileBoundary() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([first, second])
+        store.saveSelection(first.id)
+        let oldControl = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            InterleavingClient(marker: profile.id == first.id ? "A" : "B", control: profile.id == first.id ? oldControl : DeferredResponseControl())
+        })
+        await model.start()
+        await oldControl.block("deploymentSteps")
+        model.setDeploymentActivityVisible(true, profileID: first.id)
+        model.selectDeployment(id: "A-deployment")
+        await oldControl.waitUntilCalled("deploymentSteps")
+        await model.selectProfile(id: second.id)
+        await oldControl.release("deploymentSteps")
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(model.deploymentSteps["A-deployment"])
+        XCTAssertNil(model.selectedDeploymentID)
+        model.setDeploymentActivityVisible(false, profileID: second.id)
+    }
+
     func testProfileSwitchDropsDeferredMutationSuccessAndFailure() async {
         for shouldFail in [false, true] {
             let suite = "\(#function).\(shouldFail)"
@@ -1680,6 +1744,8 @@ private actor DeferredResponseControl {
         }
         if failures.contains(endpoint) { throw DeferredResponseError.unavailable }
     }
+
+    func wasCalled(_ endpoint: String) -> Bool { calls.contains(endpoint) }
 
     func waitUntilCalled(_ endpoint: String) async {
         guard !calls.contains(endpoint) else { return }
