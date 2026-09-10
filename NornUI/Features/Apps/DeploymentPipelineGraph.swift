@@ -10,6 +10,10 @@ struct DeploymentPipelineGraph: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedStepID: String?
+    @State private var followsProgress = true
+    @State private var graphContentSize = CGSize.zero
+    @State private var graphViewportSize = CGSize.zero
+    @State private var hasPositionedGraph = false
 
     private var orderedSteps: [NornDeploymentStep] {
         steps.filter { $0.deploymentID == deployment.id }.sorted {
@@ -19,13 +23,21 @@ struct DeploymentPipelineGraph: View {
     }
 
     private var selectedStep: NornDeploymentStep? {
-        orderedSteps.first { $0.id == selectedStepID }
-            ?? orderedSteps.last { $0.status == .running || $0.status == .failed }
-            ?? orderedSteps.last
+        if followsProgress { return orderedSteps.first { $0.id == attentionStepID } }
+        return orderedSteps.first { $0.id == selectedStepID }
+            ?? orderedSteps.first { $0.id == attentionStepID }
     }
 
     private var attentionStepID: String? {
-        orderedSteps.last { $0.status == .running || $0.status == .failed }?.id
+        DeploymentStepFocus.attentionID(in: orderedSteps)
+    }
+
+    private var scrollRequest: GraphScrollRequest {
+        GraphScrollRequest(
+            deploymentID: deployment.id,
+            targetID: followsProgress ? attentionStepID : selectedStep?.id,
+            contentSize: graphContentSize, viewportSize: graphViewportSize
+        )
     }
 
     var body: some View {
@@ -66,7 +78,7 @@ struct DeploymentPipelineGraph: View {
             } else {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal) {
-                        LazyHStack(spacing: 0) {
+                        HStack(spacing: 0) {
                             ForEach(Array(orderedSteps.enumerated()), id: \.element.id) { index, step in
                                 if index > 0 {
                                     Image(systemName: "arrow.right")
@@ -77,17 +89,41 @@ struct DeploymentPipelineGraph: View {
                             }
                         }
                         .padding(.vertical, 4)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: {
+                            graphContentSize = $0
+                        }
                     }
                     .scrollIndicators(.visible)
-                    .onChange(of: attentionStepID, initial: true) { old, value in
-                        guard let value else { return }
-                        withAnimation(reduceMotion || old == nil ? nil : .easeInOut(duration: 0.2)) {
-                            proxy.scrollTo(value, anchor: .center)
+                    .onGeometryChange(for: CGSize.self) { $0.size } action: {
+                        graphViewportSize = $0
+                    }
+                    .task(id: scrollRequest) {
+                        // Layout must establish the target before scrolling, including when
+                        // the latest step arrives in the same update as a wider graph.
+                        guard let target = scrollRequest.targetID,
+                              graphContentSize.width > 0, graphViewportSize.width > 0 else { return }
+                        do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
+                        guard !Task.isCancelled else { return }
+                        withAnimation(reduceMotion || !hasPositionedGraph ? nil : .easeInOut(duration: 0.2)) {
+                            proxy.scrollTo(target, anchor: .center)
                         }
+                        hasPositionedGraph = true
                     }
                 }
                 .frame(height: 108)
                 .accessibilityIdentifier("deployment.journey.graph")
+
+                HStack(spacing: 8) {
+                    Toggle("Follow progress", isOn: $followsProgress)
+                        .toggleStyle(.button)
+                        .controlSize(.small)
+                        .help("Keep the current deployment step visible. Selecting a past step pauses following.")
+                        .accessibilityIdentifier("deployment.journey.follow")
+                    if !followsProgress {
+                        Text("Inspecting a step")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
 
                 if let step = selectedStep {
                     stepDetail(step)
@@ -98,14 +134,21 @@ struct DeploymentPipelineGraph: View {
         }
         .padding(14)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .onChange(of: deployment.id) { _, _ in selectedStepID = nil }
+        .onChange(of: deployment.id) { _, _ in
+            selectedStepID = nil
+            followsProgress = true
+            hasPositionedGraph = false
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("deployment.journey")
     }
 
     private func stepNode(_ step: NornDeploymentStep) -> some View {
         Button {
-            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) { selectedStepID = step.id }
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
+                selectedStepID = step.id
+                followsProgress = step.id == attentionStepID
+            }
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 Label(step.step.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " "), systemImage: symbol(step.status))
@@ -215,5 +258,19 @@ nonisolated enum DeploymentStepTiming {
         guard let seconds = seconds(step, now: now, runsClock: runsClock) else { return "Time unreported" }
         if seconds < 1 { return "<1s" }
         return Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .narrow))
+    }
+}
+
+private struct GraphScrollRequest: Equatable {
+    let deploymentID: String
+    let targetID: String?
+    let contentSize: CGSize
+    let viewportSize: CGSize
+}
+
+nonisolated enum DeploymentStepFocus {
+    /// A retried deployment can retain failed steps; current work takes precedence.
+    static func attentionID(in orderedSteps: [NornDeploymentStep]) -> String? {
+        orderedSteps.last { $0.status == .running }?.id ?? orderedSteps.last?.id
     }
 }

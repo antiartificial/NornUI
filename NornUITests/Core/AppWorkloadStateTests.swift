@@ -151,6 +151,65 @@ final class AppWorkloadStateTests: XCTestCase {
         XCTAssertEqual(AppWorkloadState.aggregate(app: app, services: [web, cron]), .healthy)
     }
 
+    func testRegisteredWebAndRunningUnregisteredWorkerKeepAppHealthy() {
+        let web = makeService(process: "web", type: "service", status: "passing")
+        let worker = makeService(process: "worker", type: "worker", status: "unknown")
+        let app = workerApp(running: 1, active: 1)
+
+        XCTAssertEqual(AppWorkloadState.resolve(service: worker, app: app), .active)
+        XCTAssertEqual(AppWorkloadState.aggregate(app: app, services: [web, worker]), .healthy)
+    }
+
+    func testWorkerFailureIsNotHiddenByRunningAllocation() {
+        let worker = makeService(process: "worker", type: "worker", status: "critical")
+        let app = workerApp(running: 1, active: 1)
+
+        XCTAssertEqual(AppWorkloadState.resolve(service: worker, app: app), .critical)
+        XCTAssertEqual(AppWorkloadState.aggregate(app: app, services: [worker]), .critical)
+    }
+
+    func testPendingWorkerDoesNotClaimToBeRunning() {
+        let worker = makeService(process: "worker", type: "worker", status: "unknown")
+        XCTAssertEqual(AppWorkloadState.resolve(service: worker, app: workerApp(running: 0, active: 1)), .unknown)
+    }
+
+    func testMissingWorkerCountsDoNotMeanScaledToZeroOrOnDemand() {
+        let worker = makeService(process: "worker", type: "worker", status: "unknown")
+        let app = makeApp(
+            deploy: true, nomadStatus: "running", healthy: true,
+            allocationSummary: .init(running: 1, active: 1, retained: 0, total: 1,
+                                     byProcess: ["web": .init(running: 1, active: 1, retained: 0, total: 1)])
+        )
+        XCTAssertEqual(AppWorkloadState.resolve(service: worker, app: app), .unknown)
+    }
+
+    func testZeroScalingMinimumDoesNotHideRunningWorker() {
+        let worker = makeService(process: "worker", type: "worker", status: "unknown")
+        var app = workerApp(running: 1, active: 1)
+        app.spec.processes = ["worker": .init(schedule: nil, function: nil, scaling: .init(min: 0))]
+
+        XCTAssertEqual(AppWorkloadState.resolve(service: worker, app: app), .active)
+        XCTAssertEqual(AppWorkloadState.aggregate(app: app, services: [worker]), .active)
+    }
+
+    func testWebServiceStillNeedsHealthEvidenceDespiteRunningAllocation() {
+        let web = makeService(process: "worker", type: "service", status: "unknown")
+        XCTAssertEqual(AppWorkloadState.resolve(service: web, app: workerApp(running: 1, active: 1)), .unknown)
+    }
+
+    private func workerApp(running: Int, active: Int) -> NornAppStatus {
+        makeApp(
+            deploy: true, nomadStatus: "running", healthy: true,
+            allocationSummary: .init(
+                running: running + 1, active: active + 1, retained: 0, total: active + 1,
+                byProcess: [
+                    "web": .init(running: 1, active: 1, retained: 0, total: 1),
+                    "worker": .init(running: running, active: active, retained: 0, total: active)
+                ]
+            )
+        )
+    }
+
     private func makeApp(
         deploy: Bool,
         nomadStatus: String,

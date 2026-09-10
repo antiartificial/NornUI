@@ -148,3 +148,5 @@ Xcode build.
 - Removing a server confirms before deleting its profile, Keychain token, and
   local device identity. Use `norn access revoke-device <id> --confirm` from an
   administrator session when server access must also end immediately.
+
+Overview includes a bounded Happening now panel: up to three active platform operations, matching deployment step graphs, and two recent completion receipts. Live mode refreshes only the visible graphs asynchronously; manual and interval modes do not start the live activity loop. Graphs follow current progress by default and allow pausing to inspect earlier steps. Background workers without HTTP health checks use their process allocation evidence for status.

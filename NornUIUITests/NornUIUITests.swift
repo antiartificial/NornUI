@@ -164,6 +164,7 @@ final class NornUIUITests: XCTestCase {
         let app = fixtureApp()
         app.launch()
 
+        XCTAssertTrue(app.descendants(matching: .any)["overview.activity.hud"].waitForExistence(timeout: 5))
         let operationsPulse = app.buttons["overview.pulse.active-operations"]
         XCTAssertTrue(operationsPulse.waitForExistence(timeout: 5))
         operationsPulse.click()

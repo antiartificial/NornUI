@@ -93,6 +93,7 @@ final class NornAppModel {
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
     var activeDeploymentOperations: [NornOperation] = []
+    var activePlatformOperations: [NornOperation] = []
     var isDeploymentActivityRefreshing = false
     var deploymentActivityError: String?
     var deploymentStepLoadingIDs: Set<String> = []
@@ -1466,7 +1467,7 @@ final class NornAppModel {
         deploymentStepTask?.cancel()
         deploymentStepRequestID = nil
         deploymentStepLoadingIDs.removeAll()
-        guard let id, isDeploymentActivityVisible, connectionState == .online,
+        guard let id, navigation != .overview, isDeploymentActivityVisible, connectionState == .online,
               !isFixtureMode, snapshot.capabilities.supportsDeploymentVisibility else { return }
         let generation = connectionGeneration
         let profileID = selectedProfileID
@@ -1537,12 +1538,20 @@ final class NornAppModel {
             snapshot.operations = merged.values.sorted { $0.updatedAt > $1.updatedAt }
         } else { failures.append("operation history") }
         if case let .value(value) = result.2 {
-            activeDeploymentOperations = value.filter { $0.kind.hasPrefix("app.") && $0.status.isActive }
+            var current = Dictionary(value.map { ($0.id, $0) }, uniquingKeysWith: { _, newer in newer })
+            for operation in snapshot.operations where eventMutatedOperationIDs.contains(operation.id) {
+                if current[operation.id].map({ $0.updatedAt < operation.updatedAt }) ?? operation.status.isActive {
+                    current[operation.id] = operation
+                }
+            }
+            activePlatformOperations = current.values.filter { $0.status.isActive }.sorted { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt }
+            activeDeploymentOperations = activePlatformOperations.filter { $0.kind.hasPrefix("app.") }
             for operation in value where !snapshot.operations.contains(where: { $0.id == operation.id }) {
                 snapshot.operations.append(operation)
             }
         } else {
             activeDeploymentOperations = []
+            activePlatformOperations = []
             failures.append("active operations (current activity unavailable)")
         }
         if case let .value(value) = result.3 { snapshot.services = value.services }
@@ -1551,7 +1560,28 @@ final class NornAppModel {
         if !failures.isEmpty {
             deploymentActivityError = "Could not refresh \(failures.joined(separator: ", ")). Showing the last available information."
         }
-        if let id = selectedDeploymentID, deploymentStepRequestID == nil {
+        if navigation == .overview, snapshot.capabilities.supportsDeploymentVisibility {
+            // Fetch only the graphs displayed in the HUD, concurrently and off the UI thread.
+            let visible = activePlatformOperations.prefix(3).compactMap { operation in
+                deployments.filter { !$0.sagaID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.sagaID == operation.sagaID }
+                    .max { $0.startedAt < $1.startedAt }
+            }
+            await withTaskGroup(of: (String, [NornDeploymentStep]?, String?).self) { group in
+                for deployment in visible {
+                    group.addTask {
+                        do { return (deployment.id, try await client.deploymentSteps(deploymentID: deployment.id), nil) }
+                        catch { return (deployment.id, nil, error.localizedDescription) }
+                    }
+                }
+                for await (id, steps, error) in group {
+                    guard !Task.isCancelled, isDeploymentActivityVisible, navigation == .overview,
+                          deploymentActivityRequestID == requestID,
+                          isCurrentConnection(generation: generation, profileID: profileID) else { continue }
+                    if let steps { deploymentSteps[id] = steps }
+                    deploymentStepErrors[id] = error
+                }
+            }
+        } else if let id = selectedDeploymentID, deploymentStepRequestID == nil {
             selectDeployment(id: id)
         }
     }
@@ -1563,7 +1593,7 @@ final class NornAppModel {
             while !Task.isCancelled {
                 guard let self, self.isDeploymentActivityVisible else { return }
                 await self.refreshDeploymentActivity()
-                let active = !self.activeDeploymentOperations.isEmpty
+                let active = !self.activePlatformOperations.isEmpty
                 do { try await Task.sleep(for: .seconds(active ? 5 : 15)) }
                 catch { return }
             }
@@ -1572,6 +1602,7 @@ final class NornAppModel {
 
     private func stopDeploymentActivityPolling() {
         activeDeploymentOperations = []
+        activePlatformOperations = []
         deploymentActivityTask?.cancel()
         deploymentActivityTask = nil
         deploymentStepTask?.cancel()
@@ -1623,7 +1654,7 @@ final class NornAppModel {
                   expectedActivityRequestID == nil || (isDeploymentActivityVisible && deploymentActivityRequestID == expectedActivityRequestID),
                   isCurrentConnection(generation: generation, profileID: profileID),
                   expectedRefreshSequence == nil || expectedRefreshSequence == authoritativeRefreshSequence else { return }
-            deployments = current.sorted { $0.startedAt > $1.startedAt }
+            deployments = current.sorted { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt }
             deploymentActivityError = nil
         } catch {
             guard !Task.isCancelled,
@@ -1799,6 +1830,12 @@ final class NornAppModel {
            let updated = try? await client.operation(id: operationID) {
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             upsert(updated)
+            if isDeploymentActivityVisible {
+                activePlatformOperations.removeAll { $0.id == updated.id }
+                if updated.status.isActive { activePlatformOperations.append(updated) }
+                activePlatformOperations.sort { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt > $1.startedAt }
+                activeDeploymentOperations = activePlatformOperations.filter { $0.kind.hasPrefix("app.") }
+            }
             eventMutatedOperationIDs.insert(operationID)
         }
         guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
@@ -1878,6 +1915,7 @@ final class NornAppModel {
         deploymentListTaskID = nil
         selectedDeploymentID = nil
         activeDeploymentOperations = []
+        activePlatformOperations = []
         deploymentActivityError = nil
         deploymentStepErrors = [:]
         fleetInventory = .unconfigured

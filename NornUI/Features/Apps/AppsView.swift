@@ -751,7 +751,11 @@ private struct AppServiceRow: View {
     }
 
     private var allocationSummary: String {
-        let count = service.instances?.count ?? 0
+        let count = app?.allocationSummary?.byProcess?[service.process]?.running
+            ?? service.instances?.count ?? 0
+        if service.type == "worker", workloadState == .active {
+            return count > 0 ? "Background worker · \(count) running" : "Background worker"
+        }
         if service.type == "cron" { return "Scheduled job" }
         if service.type == "function" { return "On-demand job" }
         return count == 0 ? service.process : "\(count) allocation\(count == 1 ? "" : "s")"
@@ -852,6 +856,14 @@ enum AppWorkloadState: String, Equatable {
         if ["passing", "ok", "up", "healthy"].contains(rawStatus) { return .healthy }
         if rawStatus == "running" { return .active }
 
+        // Background workers need not register an HTTP service in Consul.
+        // Use this process's scheduler evidence without claiming HTTP health
+        // or assuming the worker is an on-demand job.
+        if service.type.lowercased() == "worker",
+           (app?.allocationSummary?.byProcess?[service.process]?.running ?? 0) > 0 {
+            return .active
+        }
+
         switch service.type.lowercased() {
         case "cron": return .scheduled
         case "function": return .onDemand
@@ -892,18 +904,22 @@ enum AppWorkloadState: String, Equatable {
     private static func isScaledToZero(service: NornService, app: NornAppStatus?) -> Bool {
         guard let app else { return false }
         guard !["cron", "function"].contains(service.type.lowercased()) else { return false }
-        if app.spec.processes?[service.process]?.scaling?.min == 0 { return true }
-        guard app.nomadStatus?.lowercased() == "running" else { return false }
-        if let processCounts = app.allocationSummary?.byProcess {
-            return (processCounts[service.process]?.active ?? 0) == 0
+        guard service.instances?.isEmpty != false else { return false }
+        if let counts = app.allocationSummary?.byProcess?[service.process] {
+            return counts.active == 0 && counts.running == 0
+                && app.nomadStatus?.lowercased() == "running"
         }
-        return app.allocationSummary?.active == 0 && service.instances?.isEmpty != false
+        // An omitted process entry is missing evidence, not a zero count.
+        // A zero scaling minimum describes permission to idle, not current state.
+        return app.nomadStatus?.lowercased() == "running"
+            && app.allocationSummary?.active == 0
+            && app.allocationSummary?.running == 0
     }
 
     private static func isAppScaledToZero(_ app: NornAppStatus) -> Bool {
         if allProcesses(in: app, match: { $0.schedule?.isEmpty == false || $0.function != nil }) { return false }
-        if allProcesses(in: app, match: { $0.scaling?.min == 0 }) { return true }
-        return app.nomadStatus?.lowercased() == "running" && app.allocationSummary?.active == 0
+        return app.nomadStatus?.lowercased() == "running"
+            && app.allocationSummary?.active == 0 && app.allocationSummary?.running == 0
     }
 
     private static func allProcesses(

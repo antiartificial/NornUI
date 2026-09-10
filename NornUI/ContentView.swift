@@ -68,6 +68,7 @@ struct ContentView: View {
         .task { await appModel.start() }
         .onChange(of: appModel.navigation, initial: true) { _, _ in updateDeploymentActivityVisibility() }
         .onChange(of: appModel.selectedProfileID) { _, _ in updateDeploymentActivityVisibility() }
+        .onChange(of: appModel.overviewUpdateMode) { _, _ in updateDeploymentActivityVisibility() }
         .onDisappear { appModel.setDeploymentActivityVisible(false, profileID: appModel.selectedProfileID) }
     }
 
@@ -114,7 +115,7 @@ struct ContentView: View {
 
     private func updateDeploymentActivityVisibility() {
         appModel.setDeploymentActivityVisible(
-            appModel.navigation == .apps || appModel.navigation == .delivery,
+            appModel.navigation == .apps || appModel.navigation == .delivery || (appModel.navigation == .overview && appModel.overviewUpdateMode == .live),
             profileID: appModel.selectedProfileID
         )
     }
@@ -135,6 +136,15 @@ struct ContentView: View {
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
                 updateMode: $appModel.overviewUpdateMode,
                 isRefreshing: appModel.isRefreshing,
+                activeOperations: appModel.isFixtureMode ? appModel.snapshot.activeOperations : appModel.activePlatformOperations,
+                deployments: appModel.deployments,
+                deploymentSteps: appModel.deploymentSteps,
+                deploymentStepErrors: appModel.deploymentStepErrors,
+                activityError: appModel.deploymentActivityError,
+                onOpenDeployment: { deployment in
+                    appModel.selectDeployment(id: deployment.id)
+                    appModel.navigate(to: .delivery)
+                },
                 onRefresh: refresh,
                 onShowServices: { appModel.navigate(to: .apps) },
                 onShowOperations: { appModel.navigate(to: .operations) },
