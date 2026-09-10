@@ -2,6 +2,7 @@ import Foundation
 
 protocol NornClientProtocol: Sendable {
     func capabilities() async throws -> NornCapabilities
+    func hostMetricsHistory(range: NornHistoryRange) async throws -> NornHostHistoryPage
     func hostMetrics() async throws -> NornHostMetrics
     func resourceSuggestions() async throws -> [NornResourceSuggestion]
     func health() async throws -> NornHealth
@@ -45,6 +46,7 @@ protocol NornClientProtocol: Sendable {
 }
 
 extension NornClientProtocol {
+    func hostMetricsHistory(range: NornHistoryRange) async throws -> NornHostHistoryPage { throw NornClientError.invalidResponse }
 	func resourceSuggestions() async throws -> [NornResourceSuggestion] { [] }
 	func rotateCredential() async throws -> NornIssuedToken { throw NornClientError.invalidResponse }
 	func revokeCredential() async throws { throw NornClientError.invalidResponse }

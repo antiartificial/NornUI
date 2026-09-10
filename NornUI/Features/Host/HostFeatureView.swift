@@ -22,6 +22,8 @@ struct HostFeatureView: View {
     /// Advances whenever a history page is replaced or published, including
     /// corrections that keep the same count and final timestamp.
     let historyRevision: UInt64
+    let historyStatus: String?
+    let includeLatestHistorySample: Bool
     @Binding var serviceMetricsCollectionEnabled: Bool
     @Binding var refreshInterval: NornHostMetricsRefreshInterval
     let isMetricsSupported: Bool
@@ -60,6 +62,8 @@ struct HostFeatureView: View {
         metricHistory: [NornHostMetricSample] = [],
         serviceMetricHistory: [NornServiceMetricSample] = [],
         historyRevision: UInt64 = 0,
+        historyStatus: String? = nil,
+        includeLatestHistorySample: Bool = true,
         serviceMetricsCollectionEnabled: Binding<Bool> = .constant(false),
         refreshInterval: Binding<NornHostMetricsRefreshInterval> = .constant(.seconds10),
         isMetricsSupported: Bool? = nil,
@@ -85,6 +89,8 @@ struct HostFeatureView: View {
         self.metricHistory = metricHistory
         self.serviceMetricHistory = serviceMetricHistory
         self.historyRevision = historyRevision
+        self.historyStatus = historyStatus
+        self.includeLatestHistorySample = includeLatestHistorySample
         self._serviceMetricsCollectionEnabled = serviceMetricsCollectionEnabled
         self._refreshInterval = refreshInterval
         self.isMetricsSupported = isMetricsSupported ?? snapshot.capabilities.supportsHostMetrics
@@ -112,6 +118,8 @@ struct HostFeatureView: View {
         metricHistory: [NornHostMetricSample] = [],
         serviceMetricHistory: [NornServiceMetricSample] = [],
         historyRevision: UInt64 = 0,
+        historyStatus: String? = nil,
+        includeLatestHistorySample: Bool = true,
         serviceMetricsCollectionEnabled: Binding<Bool> = .constant(false),
         refreshInterval: Binding<NornHostMetricsRefreshInterval> = .constant(.seconds10),
         isMetricsSupported: Bool = false,
@@ -137,6 +145,8 @@ struct HostFeatureView: View {
         self.metricHistory = metricHistory
         self.serviceMetricHistory = serviceMetricHistory
         self.historyRevision = historyRevision
+        self.historyStatus = historyStatus
+        self.includeLatestHistorySample = includeLatestHistorySample
         self._serviceMetricsCollectionEnabled = serviceMetricsCollectionEnabled
         self._refreshInterval = refreshInterval
         self.isMetricsSupported = isMetricsSupported
@@ -347,6 +357,8 @@ struct HostFeatureView: View {
                         samples: metricHistory,
                         serviceSamples: serviceMetricHistory,
                         historyRevision: historyRevision,
+                        historyStatus: historyStatus,
+                        includeLatestHistorySample: includeLatestHistorySample,
                         serviceMetricsCollectionEnabled: $serviceMetricsCollectionEnabled,
                         latest: metrics,
                         window: $selectedWindow,
@@ -997,10 +1009,44 @@ private enum HostMetricsChartStyle: String, CaseIterable, Identifiable {
     var symbol: String { self == .line ? "chart.xyaxis.line" : "chart.bar" }
 }
 
+/// One animated compositing layer rather than a timer or animation per sample.
+private struct HostHistoryLoadingPlaceholder: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isBright = false
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.accentColor.opacity(0.035))
+            VStack(spacing: 26) {
+                ForEach(0..<3) { _ in
+                    Rectangle().fill(.secondary.opacity(0.10)).frame(height: 1)
+                }
+            }
+            .padding(.horizontal, 12)
+            VStack(spacing: 6) {
+                Label("Loading history", systemImage: "clock.arrow.circlepath")
+                    .font(.subheadline.weight(.medium))
+                Text("Bringing this time range into view…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 142)
+        .opacity(reduceMotion || isBright ? 1 : 0.55)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: isBright)
+        .onAppear { isBright = true }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("host.history.loading")
+    }
+}
+
 private struct HostMetricsHistoryChart: View {
     let samples: [NornHostMetricSample]
     let serviceSamples: [NornServiceMetricSample]
     let historyRevision: UInt64
+    let historyStatus: String?
+    let includeLatestHistorySample: Bool
     @Binding var serviceMetricsCollectionEnabled: Bool
     let latest: NornHostMetrics
     @Binding var window: NornHostMetricsWindow
@@ -1034,7 +1080,8 @@ private struct HostMetricsHistoryChart: View {
             samples: [], serviceSamples: [], latest: latest, window: window,
             requestedViewportStart: viewport.start,
             includesServiceMetrics: false,
-            viewportDuration: viewport.duration
+            viewportDuration: viewport.duration,
+            includeLatestSample: includeLatestHistorySample
         )
     }
     private var hoveredHostSample: NornHostMetricSample? {
@@ -1049,7 +1096,8 @@ private struct HostMetricsHistoryChart: View {
             hostCount: samples.count, hostLast: samples.last?.observedAt, serviceCount: serviceSamples.count,
             serviceLast: serviceSamples.last?.observedAt, historyRevision: historyRevision, latest: latest, window: window,
             viewport: viewport.start, viewportDuration: viewport.duration,
-            includesServiceMetrics: serviceMetricsCollectionEnabled
+            includesServiceMetrics: serviceMetricsCollectionEnabled,
+            includeLatestHistorySample: includeLatestHistorySample
         )
     }
     private var historyRequestKey: HostChartHistoryRequestKey {
@@ -1078,14 +1126,24 @@ private struct HostMetricsHistoryChart: View {
 
             metricLegend
 
+            if let historyStatus {
+                Text(historyStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("host.history.status")
+            }
+
             if chartData.hostSamples.count < 2 {
-                ContentUnavailableView(
-                    isLoadingHistory ? "Loading history" : "No history in this range",
-                    systemImage: "chart.xyaxis.line",
-                    description: Text(isLoadingHistory
-                        ? "Current readings remain available while this range loads."
-                        : "Choose another time range or wait for more samples."))
-                    .frame(maxWidth: .infinity, minHeight: 128)
+                if isLoadingHistory {
+                    HostHistoryLoadingPlaceholder()
+                        .transition(.opacity)
+                } else {
+                    ContentUnavailableView(
+                        "No history in this range",
+                        systemImage: "chart.xyaxis.line",
+                        description: Text("Choose another time range or wait for more samples."))
+                        .frame(maxWidth: .infinity, minHeight: 142)
+                }
             } else {
                 Chart {
                     ForEach(chartData.hostSamples) { sample in
@@ -1211,6 +1269,7 @@ private struct HostMetricsHistoryChart: View {
                     }
                 }
                 .frame(minHeight: 142)
+                .transition(.opacity)
                 .accessibilityIdentifier("host.history.chart")
                 .accessibilityLabel("Norn mini CPU and memory use for the selected history range. CPU high water \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
                 .accessibilityValue("\(chartData.viewportStart.formatted(date: .abbreviated, time: .shortened)) to \(chartData.viewportEnd.formatted(date: .abbreviated, time: .shortened)); \(Int(chartData.viewportEnd.timeIntervalSince(chartData.viewportStart))) seconds")
@@ -1236,6 +1295,7 @@ private struct HostMetricsHistoryChart: View {
             let viewportInput = viewport.start
             let viewportDurationInput = viewport.duration
             let includesServiceMetrics = serviceMetricsCollectionEnabled
+            let includeLatestSample = includeLatestHistorySample
             let preparationTask = Task.detached(priority: .userInitiated) {
                 HostMetricsChartPreparation.prepare(
                     samples: hostInput,
@@ -1244,7 +1304,8 @@ private struct HostMetricsHistoryChart: View {
                     window: windowInput,
                     requestedViewportStart: viewportInput,
                     includesServiceMetrics: includesServiceMetrics,
-                    viewportDuration: viewportDurationInput
+                    viewportDuration: viewportDurationInput,
+                    includeLatestSample: includeLatestSample
                 )
             }
             let result = await withTaskCancellationHandler(
@@ -1252,17 +1313,24 @@ private struct HostMetricsHistoryChart: View {
                 onCancel: { preparationTask.cancel() }
             )
             guard !Task.isCancelled else { return }
-            if reduceMotion {
-                prepared = result
+            // Interpolate small live updates only. Historical pages can replace
+            // hundreds of marks; a short container reveal avoids animating them all.
+            let previousCount = prepared?.hostSamples.count ?? 0
+            let previousDuration = prepared.map { $0.viewportEnd.timeIntervalSince($0.viewportStart) }
+            let isSmallUpdate = previousCount >= 2
+                && abs(result.hostSamples.count - previousCount) <= 2
+                && abs((prepared?.viewportStart ?? result.viewportStart).timeIntervalSince(result.viewportStart)) <= 60
+                && previousDuration == result.viewportEnd.timeIntervalSince(result.viewportStart)
+                && result.hostSamples.count <= 240
+            if !reduceMotion && isSmallUpdate {
+                withAnimation(.easeInOut(duration: 0.24)) { prepared = result }
             } else {
-                withAnimation(.easeInOut(duration: 0.24)) {
-                    prepared = result
-                }
+                prepared = result
             }
         }
         .task(id: historyRequestKey) {
             let requestID = UUID()
-            let viewportEnd = viewport.end
+            let viewportEnd = requestedViewportStart == nil ? Date() : viewport.end
             historyRequestID = requestID
             isLoadingHistory = true
             try? await Task.sleep(for: .milliseconds(80))
@@ -1277,8 +1345,11 @@ private struct HostMetricsHistoryChart: View {
             if followsLatest { requestedViewportStart = nil }
             hoveredDate = nil
         }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: chartData.hostSamples.count >= 2)
         .onDisappear {
             hoveredDate = nil
+            historyRequestID = nil
+            isLoadingHistory = false
         }
     }
 
@@ -1299,10 +1370,12 @@ private struct HostMetricsHistoryChart: View {
             .buttonStyle(.plain)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .help("Opt in to fleet-wide Nomad allocation peaks. Solid lines are allocation CPU; dashed lines are memory versus the declared limit. Values are not attributed to this host.")
+            .help(includeLatestHistorySample
+                ? "Opt in to fleet-wide Nomad allocation peaks. Solid lines are allocation CPU; dashed lines are memory versus the declared limit. Values are not attributed to this host."
+                : "Show historical workload CPU and memory as a percentage of host capacity. Solid lines are CPU; dashed lines are memory.")
 
             if serviceMetricsCollectionEnabled {
-                Text("Fleet-wide allocation peaks")
+                Text(includeLatestHistorySample ? "Fleet-wide allocation peaks" : "Workload share of host")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
@@ -1601,6 +1674,7 @@ private struct HostChartPreparationKey: Hashable {
     let viewport: Date
     let viewportDuration: TimeInterval
     let includesServiceMetrics: Bool
+    let includeLatestHistorySample: Bool
 }
 
 private struct HostChartHistoryRequestKey: Hashable {

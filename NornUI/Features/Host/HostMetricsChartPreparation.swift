@@ -33,11 +33,12 @@ nonisolated struct HostMetricsChartPreparation: Sendable, Equatable {
         window: NornHostMetricsWindow,
         requestedViewportStart: Date,
         includesServiceMetrics: Bool,
-        viewportDuration: TimeInterval? = nil
+        viewportDuration: TimeInterval? = nil,
+        includeLatestSample: Bool = true
     ) -> Self {
         let current = NornHostMetricSample(metrics: latest)
-        let hostHistory = orderedHostSamples(samples, current: current)
-        let latestDate = hostHistory.last?.observedAt ?? current.observedAt
+        let hostHistory = includeLatestSample ? orderedHostSamples(samples, current: current) : samples
+        let latestDate = max(hostHistory.last?.observedAt ?? current.observedAt, current.observedAt)
         // History arrives in viewport-sized pages. Keep the retained 30-day
         // extent scrollable even while only the recent page is resident.
         let viewport = HostChartViewport(

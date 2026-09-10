@@ -851,6 +851,60 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertTrue(model.deploymentStepLoadingIDs.isEmpty)
     }
 
+    func testRemoteHistoryResponseCannotCrossProfileBoundary() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([first, second])
+        store.saveSelection(first.id)
+        let control = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            InterleavingClient(marker: profile.id == first.id ? "A" : "B", control: profile.id == first.id ? control : DeferredResponseControl(), supportsRemoteHistory: true)
+        })
+        await model.start()
+        await control.block("remoteHistory")
+        model.setHostVisible(true, profileID: first.id)
+        let request = Task { await model.requestMetricsHistory(window: .hour1, endingAt: Date.now.addingTimeInterval(-7_200)) }
+        await control.waitUntilCalled("remoteHistory")
+        await model.selectProfile(id: second.id)
+        await control.release("remoteHistory")
+        await request.value
+        XCTAssertTrue(model.remoteHostMetricsHistory.isEmpty)
+        XCTAssertTrue(model.remoteServiceMetricsHistory.isEmpty)
+        model.setHostVisible(false, profileID: second.id)
+    }
+
+    func testRemoteHistoryPublishesNewestPageThenIgnoresResponseAfterLeavingHost() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let control = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in
+            InterleavingClient(marker: "A", control: control, supportsRemoteHistory: true)
+        })
+        await model.start()
+        let end = Date.now.addingTimeInterval(-7_200)
+        let ranges = NornHistoryRange.pages(window: .hours24, endingAt: end, includesServices: false)
+        let secondPageKey = "historyEnd:\(ranges[1].end.timeIntervalSince1970)"
+        await control.block(secondPageKey)
+        model.setHostVisible(true, profileID: profile.id)
+        let request = Task { await model.requestMetricsHistory(window: .hours24, endingAt: end) }
+        await control.waitUntilCalled(secondPageKey)
+        XCTAssertEqual(model.remoteHostMetricsHistory.count, 1, "The newest page should be visible while older pages are pending")
+        XCTAssertEqual(model.remoteHostMetricsHistory.first?.observedAt, ranges[0].end)
+        model.setHostVisible(false, profileID: profile.id)
+        await control.release(secondPageKey)
+        await request.value
+        XCTAssertEqual(model.remoteHostMetricsHistory.count, 1)
+        let thirdPageCalled = await control.wasCalled("historyEnd:\(ranges[2].end.timeIntervalSince1970)")
+        XCTAssertFalse(thirdPageCalled, "Hidden Host must not continue fetching older pages")
+    }
+
     func testDeploymentStepResponseCannotCrossProfileBoundary() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -1920,6 +1974,7 @@ private struct InterleavingClient: NornClientProtocol {
     let control: DeferredResponseControl
     var hudOperations: [NornOperation]? = nil
     var hudDeployments: [NornDeployment]? = nil
+    var supportsRemoteHistory = false
     private let base = MockNornClient()
 
     func scaleApp(app: String, process: String, count: Int) async throws {
@@ -1929,11 +1984,19 @@ private struct InterleavingClient: NornClientProtocol {
     func capabilities() async throws -> NornCapabilities {
         var capabilities = try await base.capabilities()
         capabilities.serverVersion = marker
+        if supportsRemoteHistory { capabilities.features.append("host-metrics-history") }
         capabilities.features.append("app-creation")
         capabilities.endpoints["appCreation"] = "/api/v1/apps"
         capabilities.auth.principal?.scopes = ["api:read", "api:write", "fleet:operate", "host:operate", "platform:operate"]
         capabilities.environment = .init(id: marker == "A" ? "development" : "staging", profile: "profile-\(marker)")
         return capabilities
+    }
+
+    func hostMetricsHistory(range: NornHistoryRange) async throws -> NornHostHistoryPage {
+        try await control.checkpoint("remoteHistory")
+        try await control.checkpoint("historyEnd:\(range.end.timeIntervalSince1970)")
+        let sample = NornHostMetricSample(observedAt: range.end, cpuPercent: marker == "A" ? 11 : 77, memoryUsedBytes: 20, memoryTotalBytes: 100)
+        return NornHostHistoryPage(schemaVersion: "norn.host-metrics-history/v1", source: "nomad-prometheus", start: range.start, end: range.end, stepSeconds: range.step, retentionSeconds: 2_592_000, host: [sample], services: [])
     }
 
     func hostMetrics() async throws -> NornHostMetrics {
