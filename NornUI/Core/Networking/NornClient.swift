@@ -270,6 +270,16 @@ actor NornClient: NornClientProtocol {
 		guard !value.isEmpty else { throw NornClientError.invalidResponse }
 		try await performEmpty(path: "api/apps/\(value.pathComponentEncoded)/restart", method: "POST", body: Data("{}".utf8))
 	}
+    /// Direct scheduler update; acceptance is not allocation convergence.
+    func scaleApp(app: String, process: String, count: Int) async throws {
+        guard !app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !process.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              count >= 0 else { throw NornClientError.invalidResponse }
+        struct Payload: Encodable { let group: String; let count: Int }
+        try await performEmpty(path: "api/apps/\(app.pathComponentEncoded)/scale", method: "POST",
+                               body: JSONEncoder().encode(Payload(group: process, count: count)))
+    }
+
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] {
 		try await get("api/v1/apps/\(app.pathComponentEncoded)/snapshots")
 	}

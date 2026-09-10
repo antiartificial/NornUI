@@ -76,6 +76,7 @@ enum NornFixtures {
 				spec: .init(
 					name: "mail-mcp",
 					deploy: true,
+                    processes: ["web": .init(scaling: .init(min: 1))],
 					migrations: "./bin/migrate",
 					infrastructure: .init(postgres: .init(database: "mail_mcp")),
 					snapshots: .init(keep: 3, preRestore: true, retentionEnabled: true)

@@ -18,6 +18,10 @@ struct AppsView: View {
     var canCreate = false
     var supportsRecovery = false
     var canManageRecovery = false
+    var canScaleRuntime = false
+    var isScalingRuntime = false
+    var runtimeFeedback: String? = nil
+    var onScaleRuntime: (String, [NornRuntimeScaleTarget], NornMutationContext) async -> Void = { _, _, _ in }
 	var profileID: UUID? = nil
 	var isRecoveryConnected = false
     var onCreate: () -> Void = {}
@@ -99,6 +103,10 @@ struct AppsView: View {
                     ),
                     isSupported: supportsRecovery,
                     canManage: canManageRecovery,
+                    canScaleRuntime: canScaleRuntime,
+                    isScalingRuntime: isScalingRuntime,
+                    runtimeFeedback: runtimeFeedback,
+                    onScaleRuntime: onScaleRuntime,
 					profileID: profileID,
 					isConnected: isRecoveryConnected,
                     onLoadSnapshots: onLoadSnapshots,
@@ -955,6 +963,10 @@ private struct AppRecoveryInspector: View {
 	let workloadState: AppWorkloadState
 	let isSupported: Bool
 	let canManage: Bool
+    let canScaleRuntime: Bool
+    let isScalingRuntime: Bool
+    let runtimeFeedback: String?
+    let onScaleRuntime: (String, [NornRuntimeScaleTarget], NornMutationContext) async -> Void
 	let profileID: UUID?
 	let isConnected: Bool
 	let onLoadSnapshots: (String) async -> [NornAppSnapshot]?
@@ -991,6 +1003,11 @@ private struct AppRecoveryInspector: View {
 		ScrollView {
 			VStack(alignment: .leading, spacing: 18) {
 				header
+                AppRuntimeControls(app: app, canManage: canScaleRuntime, isBusy: isScalingRuntime, feedback: runtimeFeedback, issueMutationContext: issueMutationContext) { targets, context in
+                    await onScaleRuntime(app.spec.name, targets, context)
+                }
+                .id("\(profileID?.uuidString ?? "offline")/\(app.id)")
+                Divider()
 				if !isSupported {
 					ContentUnavailableView("Recovery Contract Unavailable", systemImage: "arrow.trianglehead.2.clockwise.rotate.90", description: Text("Upgrade this Norn server to use durable snapshots, migrations, and rollback receipts."))
 				} else if !hasDatabase {

@@ -93,6 +93,8 @@ final class NornAppModel {
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
     var activeDeploymentOperations: [NornOperation] = []
+    var scalingRuntimeApps: Set<String> = []
+    var runtimeScaleFeedback: [String: String] = [:]
     var activePlatformOperations: [NornOperation] = []
     var isDeploymentActivityRefreshing = false
     var deploymentActivityError: String?
@@ -341,6 +343,48 @@ final class NornAppModel {
             lastError = error.localizedDescription
             return nil
         }
+    }
+
+    func scaleAppRuntime(app appName: String, targets: [NornRuntimeScaleTarget], context: NornMutationContext) async {
+        guard let client, isValidMutationContext(context, permits: canWriteRuntime),
+              !scalingRuntimeApps.contains(appName),
+              let app = snapshot.apps.first(where: { $0.id == appName }),
+              NornRuntimeScaling.isValid(targets, for: app) else { return }
+        guard !snapshot.operations.contains(where: { $0.app == appName && $0.status.isActive }) else {
+            runtimeScaleFeedback[appName] = "Wait for this app’s current operation to finish before changing capacity."
+            return
+        }
+        scalingRuntimeApps.insert(appName)
+        runtimeScaleFeedback[appName] = "Applying runtime capacity…"
+        defer {
+            if isCurrentConnection(generation: context.connectionGeneration, profileID: context.profileID) {
+                scalingRuntimeApps.remove(appName)
+            }
+        }
+        var applied: [String] = []
+        for target in targets {
+            // A profile switch or revoked authority must stop the remaining requests.
+            guard isValidMutationContext(context, permits: canWriteRuntime) else {
+                if isCurrentConnection(generation: context.connectionGeneration, profileID: context.profileID) {
+                    let prefix = applied.isEmpty ? "" : "Accepted: \(applied.joined(separator: ", ")). "
+                    runtimeScaleFeedback[appName] = prefix + "Remaining updates stopped because this request no longer has authority. Check current allocations before continuing."
+                }
+                return
+            }
+            do {
+                try await client.scaleApp(app: appName, process: target.process, count: target.count)
+                applied.append("\(target.process) → \(target.count)")
+            } catch {
+                guard isCurrentConnection(generation: context.connectionGeneration, profileID: context.profileID) else { return }
+                let prefix = applied.isEmpty ? "" : "Accepted: \(applied.joined(separator: ", ")). "
+                runtimeScaleFeedback[appName] = prefix + "Could not confirm \(target.process). \(error.localizedDescription) Refresh and check current allocations before trying again."
+                await refresh()
+                return
+            }
+        }
+        guard isCurrentConnection(generation: context.connectionGeneration, profileID: context.profileID) else { return }
+        runtimeScaleFeedback[appName] = "Targets accepted: \(applied.joined(separator: ", ")). Allocations may still be changing."
+        await refresh()
     }
 
     @discardableResult
@@ -1909,6 +1953,8 @@ final class NornAppModel {
     }
 
     private func clearFleetAndDeploymentState() {
+        scalingRuntimeApps.removeAll()
+        runtimeScaleFeedback.removeAll()
         stopDeploymentActivityPolling()
         deploymentListTask?.cancel()
         deploymentListTask = nil

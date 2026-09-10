@@ -947,6 +947,59 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertFalse(model.isDeploymentActivityRefreshing)
     }
 
+    func testRuntimeScalingStopsAfterProfileSwitchAndDoesNotPublishOldFeedback() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([first, second]); store.saveSelection(first.id)
+        let control = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            InterleavingClient(marker: profile.id == first.id ? "A" : "B", control: profile.id == first.id ? control : DeferredResponseControl())
+        })
+        await model.start()
+        model.snapshot.apps = [.init(spec: .init(name: "scale-test", deploy: true, processes: ["web": .init(scaling: nil), "worker": .init(scaling: nil)]), nomadStatus: "running", healthy: true)]
+        model.snapshot.operations = []
+        await control.block("scale:web:0")
+        let context = model.issueMutationContext()
+        async let mutation: Void = model.scaleAppRuntime(app: "scale-test", targets: [.init(process: "web", count: 0), .init(process: "worker", count: 0)], context: context)
+        await control.waitUntilCalled("scale:web:0")
+        await model.selectProfile(id: second.id)
+        await control.release("scale:web:0")
+        await mutation
+        let workerCalled = await control.wasCalled("scale:worker:0")
+        XCTAssertFalse(workerCalled)
+        XCTAssertNil(model.runtimeScaleFeedback["scale-test"])
+        XCTAssertFalse(model.scalingRuntimeApps.contains("scale-test"))
+    }
+
+    func testRuntimeScalingReportsPartialAcceptanceAndStopsAfterFailure() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        store.saveProfiles([profile]); store.saveSelection(profile.id)
+        let control = DeferredResponseControl()
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in InterleavingClient(marker: "A", control: control) })
+        await model.start()
+        model.snapshot.apps = [.init(spec: .init(name: "scale-test", deploy: true, processes: ["web": .init(scaling: nil), "worker": .init(scaling: nil), "third": .init(scaling: nil)]), nomadStatus: "running", healthy: true)]
+        model.snapshot.operations = []
+        await control.block("scale:worker:0", failing: true)
+        let context = model.issueMutationContext()
+        async let mutation: Void = model.scaleAppRuntime(app: "scale-test", targets: [.init(process: "web", count: 0), .init(process: "worker", count: 0), .init(process: "third", count: 0)], context: context)
+        await control.waitUntilCalled("scale:worker:0")
+        await control.release("scale:worker:0")
+        await mutation
+        let webCalled = await control.wasCalled("scale:web:0")
+        let thirdCalled = await control.wasCalled("scale:third:0")
+        XCTAssertTrue(webCalled)
+        XCTAssertFalse(thirdCalled)
+        XCTAssertTrue(model.runtimeScaleFeedback["scale-test"]?.contains("Accepted: web → 0") == true)
+        XCTAssertTrue(model.runtimeScaleFeedback["scale-test"]?.contains("Could not confirm worker") == true)
+        XCTAssertFalse(model.scalingRuntimeApps.contains("scale-test"))
+    }
+
     func testProfileSwitchDropsDeferredMutationSuccessAndFailure() async {
         for shouldFail in [false, true] {
             let suite = "\(#function).\(shouldFail)"
@@ -1868,6 +1921,10 @@ private struct InterleavingClient: NornClientProtocol {
     var hudOperations: [NornOperation]? = nil
     var hudDeployments: [NornDeployment]? = nil
     private let base = MockNornClient()
+
+    func scaleApp(app: String, process: String, count: Int) async throws {
+        try await control.checkpoint("scale:\(process):\(count)")
+    }
 
     func capabilities() async throws -> NornCapabilities {
         var capabilities = try await base.capabilities()

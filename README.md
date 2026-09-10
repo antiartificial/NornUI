@@ -150,3 +150,5 @@ Xcode build.
   administrator session when server access must also end immediately.
 
 Overview includes a bounded Happening now panel: up to three active platform operations, matching deployment step graphs, and two recent completion receipts. Live mode refreshes only the visible graphs asynchronously; manual and interval modes do not start the live activity loop. Graphs follow current progress by default and allow pausing to inspect earlier steps. Background workers without HTTP health checks use their process allocation evidence for status.
+
+Apps also provides reviewed per-process Suspend and Resume / Scale controls for ordinary local jobs. Targets use the authenticated runtime scaling API; acceptance is shown separately from observed allocation counts, partial failures are explicit, and profile changes stop remaining requests. Counts are temporary runtime overrides and may be replaced by deployments or host assurance. Regional apps, scheduled jobs, and functions require their separate lifecycle controls.

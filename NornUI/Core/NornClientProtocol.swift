@@ -36,6 +36,7 @@ protocol NornClientProtocol: Sendable {
 	/// Compatibility runtime control. Restarts active Nomad allocations directly
 	/// and does not create a durable operation receipt.
 	func restartApp(app: String) async throws
+    func scaleApp(app: String, process: String, count: Int) async throws
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot]
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation
     func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation
@@ -72,6 +73,7 @@ extension NornClientProtocol {
 	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func appLogs(app: String) async throws -> String { throw NornClientError.invalidResponse }
 	func restartApp(app: String) async throws { throw NornClientError.invalidResponse }
+    func scaleApp(app: String, process: String, count: Int) async throws { throw NornClientError.invalidResponse }
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func eventStreamInfo() async throws -> NornEventStreamInfo { throw NornClientError.invalidResponse }

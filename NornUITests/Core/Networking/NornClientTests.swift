@@ -9,6 +9,58 @@ final class NornClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testScaleAppPostsGroupAndAllowsSuspensionAtZero() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: "{\"status\":\"scaled\"}")
+        }
+        let client = try await makeClient()
+        for count in [0, 3] {
+            try await client.scaleApp(app: "offer-intake", process: "web", count: count)
+            XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/apps/offer-intake/scale")
+            XCTAssertEqual(recorder.lastRequest?.httpMethod, "POST")
+            XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+            let body = try XCTUnwrap(recorder.lastBody)
+            let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            XCTAssertEqual(payload["group"] as? String, "web")
+            XCTAssertEqual(payload["count"] as? Int, count)
+            XCTAssertEqual(Set(payload.keys), ["group", "count"])
+        }
+    }
+
+    func testScaleAppPropagatesSchedulerRejection() async throws {
+        NornURLProtocol.setHandler { request in
+            Self.response(request, status: 500, body: "{\"error\":\"group not found\"}")
+        }
+        let client = try await makeClient()
+        do {
+            try await client.scaleApp(app: "offer-intake", process: "web", count: 2)
+            XCTFail("expected scheduler rejection")
+        } catch let error as NornClientError {
+            guard case .http(let status, _, _) = error else { return XCTFail("unexpected \(error)") }
+            XCTAssertEqual(status, 500)
+        }
+    }
+
+    func testScaleAppRejectsInvalidInputBeforeSendingRequest() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 200, body: "{}")
+        }
+        let client = try await makeClient()
+        for (app, process, count) in [("offer-intake", "web", -1), (" ", "web", 1), ("offer-intake", " ", 1)] {
+            do {
+                try await client.scaleApp(app: app, process: process, count: count)
+                XCTFail("expected invalid input rejection")
+            } catch let error as NornClientError {
+                XCTAssertEqual(error, .invalidResponse)
+            }
+        }
+        XCTAssertNil(recorder.lastRequest)
+    }
+
     func testCapabilitiesUsesBearerHeaderAndV1Route() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in

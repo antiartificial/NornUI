@@ -238,6 +238,9 @@ final class NornUIUITests: XCTestCase {
         XCTAssertTrue(older.waitForExistence(timeout: 5))
         XCTAssertLessThan(latest.frame.minY, older.frame.minY, "Recently deployed apps should lead the default list")
         latest.click()
+        let suspend = app.buttons["apps.runtime.suspend"]
+        XCTAssertTrue(suspend.waitForExistence(timeout: 5))
+        XCTAssertFalse(suspend.isEnabled, "Fixture has no mutation authority")
         let open = app.links["View Deployment"].firstMatch
         XCTAssertTrue(open.waitForExistence(timeout: 5))
         open.click()
