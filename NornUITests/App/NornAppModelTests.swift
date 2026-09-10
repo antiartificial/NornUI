@@ -436,17 +436,18 @@ final class NornAppModelTests: XCTestCase {
         profileStore.saveProfiles([profile])
         profileStore.saveSelection(profile.id)
 
-        let model = NornAppModel(profileStore: profileStore, clientFactory: { _ in MockNornClient() })
+        let model = NornAppModel(profileStore: profileStore, clientFactory: { _ in CurrentMetricsClient() })
         await model.start()
         await model.refreshHostMetrics()
         await model.refreshHostMetrics()
+        await model.persistMetricsHistory()
 
         XCTAssertEqual(model.hostMetricsHistory.count, 1)
         XCTAssertEqual(model.hostMetricsHistory.first?.cpuPercent, NornFixtures.hostMetrics.cpu.utilizationPercent)
         XCTAssertEqual(profileStore.loadHostMetricsHistory(profileID: profile.id).count, 1)
     }
 
-    func testHostMetricsBeginPollingWithoutOpeningHost() async {
+    func testHostMetricsBeginPollingWhenHostBecomesVisible() async {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -458,6 +459,7 @@ final class NornAppModelTests: XCTestCase {
         let model = NornAppModel(profileStore: store, clientFactory: { _ in client })
 
         await model.start()
+        model.setHostVisible(true, profileID: profile.id)
 
         let didPoll = await client.waitForHostMetricCalls(1)
         XCTAssertTrue(didPoll)
@@ -551,10 +553,13 @@ final class NornAppModelTests: XCTestCase {
         await model.selectProfile(id: second.id)
 
         XCTAssertEqual(store.loadHostMetricsHistory(profileID: first.id), [pendingFirst])
+        XCTAssertTrue(model.hostMetricsHistory.isEmpty)
+        model.setHostVisible(true, profileID: second.id)
+        await model.requestMetricsHistory(window: .hour1)
         XCTAssertEqual(model.hostMetricsHistory, [secondSample])
     }
 
-    func testRemovingSelectedProfileCannotContaminateReplacementHistory() {
+    func testRemovingSelectedProfileCannotContaminateReplacementHistory() async {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -575,7 +580,9 @@ final class NornAppModelTests: XCTestCase {
         )]
 
         model.removeProfile(id: first.id)
-        model.persistMetricsHistory()
+        model.setHostVisible(true, profileID: second.id)
+        await model.requestMetricsHistory(window: .hour1)
+        await model.persistMetricsHistory()
 
         XCTAssertEqual(model.selectedProfileID, second.id)
         XCTAssertEqual(model.hostMetricsHistory, [replacement])
@@ -1569,12 +1576,31 @@ private struct FailingMetricsClient: NornClientProtocol {
         try await base.queue(request, idempotencyKey: idempotencyKey)
     }
     func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
-        base.events(after: cursor)
+        AsyncThrowingStream { _ in }
     }
 
     private enum MetricsError: Error {
         case unavailable
     }
+}
+
+private struct CurrentMetricsClient: NornClientProtocol {
+    private let base = MockNornClient()
+    private let sampleDate = Date.now
+
+    func capabilities() async throws -> NornCapabilities { try await base.capabilities() }
+    func hostMetrics() async throws -> NornHostMetrics {
+        var metrics = NornFixtures.hostMetrics
+        metrics.observedAt = sampleDate
+        return metrics
+    }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation { try await base.queue(request, idempotencyKey: idempotencyKey) }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { AsyncThrowingStream { _ in } }
 }
 
 private struct ScopeProbeClient: NornClientProtocol {

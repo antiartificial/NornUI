@@ -41,9 +41,11 @@ The current working milestone includes:
 - Durable app snapshots, retention pruning, exact-snapshot restore, standalone
   schema migrations, and regional application rollback. Retry-safe intents are
   retained locally until Norn accepts the operation and returns its receipt.
-- Periodically refreshed host CPU, memory, storage, process, and container
-  metrics when the connected server advertises that capability, with persisted
-  per-profile history and optional service resource timelines.
+- Host CPU, memory, storage, process, and container metrics refreshed while
+  Host is visible. Recent readings appear first; the selected history window
+  loads asynchronously, with per-profile persistence and optional service
+  resource timelines. Chart preparation stays off the main UI thread and
+  renders a bounded number of points for the visible range.
 - Configurable Overview refresh cadence, coalesced refresh requests, and
   event-cursor reconciliation when reconnecting after a retention gap.
 - Offline cached state, explicit request errors, explicit fixture-backed previews and UI tests,

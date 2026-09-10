@@ -16,7 +16,7 @@ struct NornUIApp: App {
             : nil
         credentialVault = vault
         deviceIdentityVault = identityVault
-        _appModel = State(initialValue: NornAppModel(
+        let model = NornAppModel(
             clientFactory: { profile in
                 try await NornClient(profile: profile, credentialVault: vault)
             },
@@ -26,7 +26,30 @@ struct NornUIApp: App {
                 try await NornEnrollmentClient(baseURL: baseURL)
             },
             fixture: fixture
-        ))
+        )
+        if fixture != nil, ProcessInfo.processInfo.environment["NORN_UI_HISTORY_STRESS"] == "1" {
+            // Explicit UI-test fixture: exercise opening Host with a month of data.
+            let end = NornFixtures.hostMetrics.observedAt
+            var hostHistory: [NornHostMetricSample] = []
+            for index in 0..<40_000 {
+                let date = end.addingTimeInterval(Double(index - 39_999) * 60)
+                hostHistory.append(NornHostMetricSample(
+                    observedAt: date, cpuPercent: Double(index % 100),
+                    memoryUsedBytes: 4_000_000_000, memoryTotalBytes: 8_000_000_000
+                ))
+            }
+            var serviceHistory: [NornServiceMetricSample] = []
+            for index in 0..<120_000 {
+                let date = end.addingTimeInterval(Double(index / 6 - 19_999) * 120)
+                serviceHistory.append(NornServiceMetricSample(
+                    observedAt: date, app: "fixture-\(index % 6)", process: "web",
+                    cpuPercent: Double(index % 80), memoryPercent: Double(index % 95)
+                ))
+            }
+            model.hostMetricsHistory = hostHistory
+            model.serviceMetricsHistory = serviceHistory
+        }
+        _appModel = State(initialValue: model)
     }
 
     var body: some Scene {
@@ -34,8 +57,11 @@ struct NornUIApp: App {
             ContentView(appModel: appModel)
                 .frame(minWidth: 900, minHeight: 600)
                 .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    Task { await appModel.refreshManagedCredentialIfNeeded() }
+                    if phase == .active {
+                        Task { await appModel.refreshManagedCredentialIfNeeded() }
+                    } else {
+                        Task { await appModel.persistMetricsHistory() }
+                    }
                 }
         }
         .defaultSize(width: 1_180, height: 760)
