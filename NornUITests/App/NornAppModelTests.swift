@@ -826,6 +826,7 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertFalse(eagerlyLoaded, "Inventory must publish without serial detail requests")
 
         await control.block("deploymentSteps", failing: true)
+        model.navigation = .delivery
         model.setDeploymentActivityVisible(true, profileID: profile.id)
         model.selectDeployment(id: "A-deployment")
         await control.waitUntilCalled("deploymentSteps")
@@ -864,6 +865,7 @@ final class NornAppModelTests: XCTestCase {
         })
         await model.start()
         await oldControl.block("deploymentSteps")
+        model.navigation = .delivery
         model.setDeploymentActivityVisible(true, profileID: first.id)
         model.selectDeployment(id: "A-deployment")
         await oldControl.waitUntilCalled("deploymentSteps")
@@ -873,6 +875,76 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertNil(model.deploymentSteps["A-deployment"])
         XCTAssertNil(model.selectedDeploymentID)
         model.setDeploymentActivityVisible(false, profileID: second.id)
+    }
+
+    func testOverviewFetchesOnlyThreeVisibleGraphsAndNotHiddenSelection() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let control = DeferredResponseControl()
+        let operations = (0..<4).map { index in
+            var operation = NornFixtures.snapshot.operations[0]
+            operation.id = "op-\(index)"
+            operation.sagaID = "saga-\(index)"
+            operation.status = .running
+            operation.startedAt = Date(timeIntervalSince1970: 10_000 - Double(index))
+            return operation
+        }
+        let deployments = (0..<4).map { index in
+            var deployment = NornFixtures.deployments[0]
+            deployment.id = "deployment-\(index)"
+            deployment.sagaID = "saga-\(index)"
+            return deployment
+        }
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in
+            InterleavingClient(marker: "A", control: control, hudOperations: operations, hudDeployments: deployments)
+        })
+        await model.start()
+        model.navigation = .overview
+        model.selectedDeploymentID = "hidden-selection"
+        model.setDeploymentActivityVisible(true, profileID: profile.id)
+        await control.waitUntilCalled("step:deployment-0")
+        await control.waitUntilCalled("step:deployment-1")
+        await control.waitUntilCalled("step:deployment-2")
+        let fourth = await control.wasCalled("step:deployment-3")
+        let hidden = await control.wasCalled("step:hidden-selection")
+        XCTAssertFalse(fourth)
+        XCTAssertFalse(hidden)
+        XCTAssertEqual(model.activePlatformOperations.count, 4)
+        model.setDeploymentActivityVisible(false, profileID: profile.id)
+    }
+
+    func testOverviewStepReplyIsDiscardedAfterLeavingView() async {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let control = DeferredResponseControl()
+        var operation = NornFixtures.snapshot.operations[0]
+        operation.status = .running
+        operation.sagaID = "live-saga"
+        var deployment = NornFixtures.deployments[0]
+        deployment.id = "live-deployment"
+        deployment.sagaID = "live-saga"
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in
+            InterleavingClient(marker: "A", control: control, hudOperations: [operation], hudDeployments: [deployment])
+        })
+        await model.start()
+        await control.block("deploymentSteps")
+        model.navigation = .overview
+        model.setDeploymentActivityVisible(true, profileID: profile.id)
+        await control.waitUntilCalled("deploymentSteps")
+        model.navigation = .host
+        model.setDeploymentActivityVisible(false, profileID: profile.id)
+        await control.release("deploymentSteps")
+        for _ in 0..<100 { await Task.yield() }
+        XCTAssertNil(model.deploymentSteps["live-deployment"])
+        XCTAssertFalse(model.isDeploymentActivityRefreshing)
     }
 
     func testProfileSwitchDropsDeferredMutationSuccessAndFailure() async {
@@ -1793,6 +1865,8 @@ private actor ContextLoadControl {
 private struct InterleavingClient: NornClientProtocol {
     let marker: String
     let control: DeferredResponseControl
+    var hudOperations: [NornOperation]? = nil
+    var hudDeployments: [NornDeployment]? = nil
     private let base = MockNornClient()
 
     func capabilities() async throws -> NornCapabilities {
@@ -1815,7 +1889,10 @@ private struct InterleavingClient: NornClientProtocol {
     func hostStatus() async throws -> NornHostStatus { try await base.hostStatus() }
     func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
     func apps() async throws -> [NornAppStatus] { try await base.apps() }
-    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] {
+        if let hudOperations { return hudOperations }
+        return try await base.operations(activeOnly: activeOnly, limit: limit)
+    }
     func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
     func releases() async throws -> NornReleaseList { try await base.releases() }
     func fleetInventory() async throws -> NornFleetInventory {
@@ -1837,11 +1914,13 @@ private struct InterleavingClient: NornClientProtocol {
     func fleetGitHubStatus() async throws -> NornFleetGitHubStatus { try await base.fleetGitHubStatus() }
     func deployments() async throws -> [NornDeployment] {
         try await control.checkpoint("deployments")
+        if let hudDeployments { return hudDeployments }
         var deployment = NornFixtures.deployments[0]
         deployment.id = "\(marker)-deployment"
         return [deployment]
     }
     func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] {
+        try await control.checkpoint("step:\(deploymentID)")
         try await control.checkpoint("deploymentSteps")
         return []
     }

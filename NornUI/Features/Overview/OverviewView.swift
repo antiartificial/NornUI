@@ -9,6 +9,12 @@ struct OverviewView: View {
     let connectionState: NornConnectionState
     @Binding var updateMode: NornOverviewUpdateMode
     var isRefreshing: Bool = false
+    var activeOperations: [NornOperation] = []
+    var deployments: [NornDeployment] = []
+    var deploymentSteps: [String: [NornDeploymentStep]] = [:]
+    var deploymentStepErrors: [String: String] = [:]
+    var activityError: String?
+    var onOpenDeployment: (NornDeployment) -> Void = { _ in }
     var onRefresh: () -> Void = {}
     var onShowServices: () -> Void = {}
     var onShowOperations: () -> Void = {}
@@ -24,6 +30,12 @@ struct OverviewView: View {
         connectionState: NornConnectionState,
         updateMode: Binding<NornOverviewUpdateMode> = .constant(.live),
         isRefreshing: Bool = false,
+        activeOperations: [NornOperation] = [],
+        deployments: [NornDeployment] = [],
+        deploymentSteps: [String: [NornDeploymentStep]] = [:],
+        deploymentStepErrors: [String: String] = [:],
+        activityError: String? = nil,
+        onOpenDeployment: @escaping (NornDeployment) -> Void = { _ in },
         onRefresh: @escaping () -> Void = {},
         onShowServices: @escaping () -> Void = {},
         onShowOperations: @escaping () -> Void = {},
@@ -36,6 +48,12 @@ struct OverviewView: View {
         self.connectionState = connectionState
         self._updateMode = updateMode
         self.isRefreshing = isRefreshing
+        self.activeOperations = activeOperations
+        self.deployments = deployments
+        self.deploymentSteps = deploymentSteps
+        self.deploymentStepErrors = deploymentStepErrors
+        self.activityError = activityError
+        self.onOpenDeployment = onOpenDeployment
         self.onRefresh = onRefresh
         self.onShowServices = onShowServices
         self.onShowOperations = onShowOperations
@@ -88,6 +106,17 @@ struct OverviewView: View {
                 if isOffline {
                     staleBanner(snapshot)
                 }
+                PlatformActivityHUD(
+                    operations: activeOperations,
+                    recentOperations: snapshot.operations,
+                    deployments: deployments,
+                    steps: deploymentSteps,
+                    isLive: connectionState == .online && updateMode == .live,
+                    stepErrors: deploymentStepErrors,
+                    errorMessage: activityError,
+                    onOpenOperation: onOpenOperation,
+                    onOpenDeployment: onOpenDeployment
+                )
                 pulseSection(snapshot)
                 lowerSection(snapshot)
             }
