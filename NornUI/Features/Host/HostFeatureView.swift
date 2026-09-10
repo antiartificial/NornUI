@@ -1364,12 +1364,16 @@ private struct HostMetricsHistoryChart: View {
                     Text(sample.observedAt.formatted(date: .abbreviated, time: .standard))
                     Text("CPU \(sample.cpuPercent.formatted(.number.precision(.fractionLength(1))))%")
                         .foregroundStyle(Color.accentColor)
+                        .modifier(HostLegendReveal(order: 0))
                     Text("Memory \(sample.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
                         .foregroundStyle(Color.purple)
-                    ForEach(hoveredTenantSamples.prefix(2), id: \.0.id) { series, tenant in
+                        .modifier(HostLegendReveal(order: 1))
+                    ForEach(Array(hoveredTenantSamples.prefix(2).enumerated()), id: \.element.0.id) { index, entry in
+                        let (series, tenant) = entry
                         Text("\(series.name) CPU \(tenant.cpuPercent.formatted(.number.precision(.fractionLength(1))))% · limit \(tenant.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
                             .foregroundStyle(series.color)
                             .lineLimit(1)
+                            .modifier(HostLegendReveal(order: index + 2))
                     }
                 }
                 .font(.caption2.monospacedDigit())
@@ -1477,6 +1481,22 @@ private struct HostMetricsHistoryChart: View {
         } else {
             hoveredDate = nil
         }
+    }
+}
+
+/// Reveal once when hover details enter; moving between samples keeps the
+/// existing items visible instead of restarting their animation.
+private struct HostLegendReveal: ViewModifier {
+    let order: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealed = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(reduceMotion || revealed ? 1 : 0)
+            .offset(y: reduceMotion || revealed ? 0 : -3)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14).delay(Double(order) * 0.025), value: revealed)
+            .onAppear { revealed = true }
     }
 }
 
