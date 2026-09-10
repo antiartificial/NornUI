@@ -1336,9 +1336,11 @@ private struct HostMetricsHistoryChart: View {
             Button(action: resetZoom) { Image(systemName: "arrow.counterclockwise") }
                 .disabled(!isCustomZoom)
                 .help("Restore the selected time window")
+                .accessibilityLabel("Reset zoom")
                 .accessibilityIdentifier("host.history.reset-zoom")
             Button(action: scrollToLatest) { Image(systemName: "arrow.right.to.line") }
                 .help("Return to the latest sample")
+                .accessibilityLabel("Return to latest")
         }
         .buttonStyle(.borderless)
         .controlSize(.small)
