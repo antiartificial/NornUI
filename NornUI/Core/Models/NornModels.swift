@@ -951,11 +951,16 @@ nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
 	nonisolated struct Process: Codable, Hashable, Sendable {
 		nonisolated struct Scaling: Codable, Hashable, Sendable {
 			var min: Int?
+            var max: Int? = nil
+            var perRegion: Int? = nil
 		}
 
 		var schedule: String?
 		var function: JSONValue?
 		var scaling: Scaling?
+        var singleton: Bool? = nil
+        var hostPort: Int? = nil
+        var regions: [String]? = nil
 	}
 
 	nonisolated struct Infrastructure: Codable, Hashable, Sendable {
@@ -969,6 +974,7 @@ nonisolated struct NornAppSpecSummary: Codable, Hashable, Sendable {
 		var exportBucket: String? = nil
 	}
 	var name: String
+    var regions: JSONValue? = nil
 	var deploy: Bool?
 	var processes: [String: Process]? = nil
 	var migrations: String? = nil

@@ -177,6 +177,12 @@ struct ContentView: View {
 				canCreate: appModel.canManageApps,
 				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
 				canManageRecovery: appModel.canManageAppRecovery,
+                canScaleRuntime: appModel.canWriteRuntime,
+                isScalingRuntime: appModel.selectedAppName.map { appModel.scalingRuntimeApps.contains($0) } ?? false,
+                runtimeFeedback: appModel.selectedAppName.flatMap { appModel.runtimeScaleFeedback[$0] },
+                onScaleRuntime: { app, targets, context in
+                    await appModel.scaleAppRuntime(app: app, targets: targets, context: context)
+                },
 				profileID: appModel.selectedProfileID,
 				isRecoveryConnected: appModel.canReadRuntime,
 				onCreate: { appModel.isShowingCreateApp = true },
