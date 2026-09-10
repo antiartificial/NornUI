@@ -66,6 +66,9 @@ struct ContentView: View {
 			) { request, context in await appModel.createApp(request, context: context) != nil }
 		}
         .task { await appModel.start() }
+        .onChange(of: appModel.navigation, initial: true) { _, _ in updateDeploymentActivityVisibility() }
+        .onChange(of: appModel.selectedProfileID) { _, _ in updateDeploymentActivityVisibility() }
+        .onDisappear { appModel.setDeploymentActivityVisible(false, profileID: appModel.selectedProfileID) }
     }
 
     private var sidebar: some View {
@@ -109,6 +112,13 @@ struct ContentView: View {
         .navigationTitle("Norn")
     }
 
+    private func updateDeploymentActivityVisibility() {
+        appModel.setDeploymentActivityVisible(
+            appModel.navigation == .apps || appModel.navigation == .delivery,
+            profileID: appModel.selectedProfileID
+        )
+    }
+
     private var guardedNavigation: Binding<NornNavigation> {
         Binding(
             get: { appModel.navigation },
@@ -136,9 +146,22 @@ struct ContentView: View {
 			.onAppear { appModel.setOverviewVisible(true) }
 			.onDisappear { appModel.setOverviewVisible(false) }
 		case .apps:
+            let activityProfileID = appModel.selectedProfileID
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
+                deployments: appModel.deployments,
+                operations: appModel.activeDeploymentOperations,
+                deploymentSteps: appModel.deploymentSteps,
+                loadingDeploymentIDs: appModel.deploymentStepLoadingIDs,
+                deploymentStepErrors: appModel.deploymentStepErrors,
+                deploymentActivityError: appModel.deploymentActivityError,
+                isLoadingDeploymentActivity: appModel.isDeploymentActivityRefreshing,
+                onSelectDeployment: { appModel.selectDeployment(id: $0) },
+                onOpenDeployment: { deployment in
+                    appModel.selectDeployment(id: deployment.id)
+                    appModel.navigate(to: .delivery)
+                },
 				selectedAppName: $appModel.selectedAppName,
 				selectedService: $appModel.selectedService,
 				canCreate: appModel.canManageApps,
@@ -156,17 +179,28 @@ struct ContentView: View {
 				onQueueOperation: { request, context in await appModel.queueAppOperation(request, context: context) },
 				onOpenOperation: openOperation
 			)
+            .id(activityProfileID)
 		case .delivery:
+            let activityProfileID = appModel.selectedProfileID
 			ReleasePipelineFeatureView(
 				apps: appModel.snapshot.apps,
 				deployments: appModel.deployments,
 				environmentID: appModel.environmentID,
 				environmentProfile: appModel.environmentProfile,
 				isSupported: appModel.releasePipelineSupported,
-				isConnected: appModel.canReadLegacyReleaseEvidence,
+				isConnected: appModel.canReadRuntime,
 				profileID: appModel.selectedProfileID,
+                requestedDeploymentID: appModel.selectedDeploymentID,
+                operations: appModel.activeDeploymentOperations,
+                deploymentSteps: appModel.deploymentSteps,
+                loadingDeploymentIDs: appModel.deploymentStepLoadingIDs,
+                deploymentStepErrors: appModel.deploymentStepErrors,
+                deploymentActivityError: appModel.deploymentActivityError,
+                isLoadingDeploymentActivity: appModel.isDeploymentActivityRefreshing,
+                onSelectDeployment: { appModel.selectDeployment(id: $0.id) },
 				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
 			)
+            .id(activityProfileID)
 		case .operations:
             OperationsFeatureView(
                 snapshot: appModel.snapshot,

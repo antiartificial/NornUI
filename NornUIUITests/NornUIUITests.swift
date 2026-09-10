@@ -226,6 +226,30 @@ final class NornUIUITests: XCTestCase {
     }
 
     @MainActor
+    func testAppsLeadWithRecentDeploymentAndOpenStepGraph() throws {
+        let app = fixtureApp()
+        app.launch()
+        app.activate()
+        app.typeKey("2", modifierFlags: .command)
+        let latest = app.descendants(matching: .any)["apps.root.mail-mcp"]
+        let older = app.descendants(matching: .any)["apps.root.contextdb"]
+        XCTAssertTrue(latest.waitForExistence(timeout: 5))
+        XCTAssertTrue(older.waitForExistence(timeout: 5))
+        XCTAssertLessThan(latest.frame.minY, older.frame.minY, "Recently deployed apps should lead the default list")
+        latest.click()
+        let open = app.links["View Deployment"].firstMatch
+        XCTAssertTrue(open.waitForExistence(timeout: 5))
+        open.click()
+        XCTAssertTrue(app.descendants(matching: .any)["delivery.deployment-activity"].waitForExistence(timeout: 5))
+        let build = app.buttons["deployment.step.build"]
+        XCTAssertTrue(build.waitForExistence(timeout: 5))
+        build.click()
+        XCTAssertTrue(app.descendants(matching: .any)["deployment.step-details"].waitForExistence(timeout: 5))
+        app.typeKey("6", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any)["host.header"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
     func testActivityExplainsSidebarRollups() throws {
         let app = fixtureApp()
         app.launch()

@@ -505,6 +505,7 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(deployments.first?.status, .submitting)
         XCTAssertEqual(deployments.first?.regions?.first?.region, "nyc3")
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/deployments")
+        XCTAssertEqual(URLComponents(url: try XCTUnwrap(recorder.lastRequest?.url), resolvingAgainstBaseURL: false)?.queryItems, [URLQueryItem(name: "limit", value: "100")])
 
         let steps = try await client.deploymentSteps(deploymentID: "deploy-1")
         XCTAssertEqual(steps.first?.step, "submit")

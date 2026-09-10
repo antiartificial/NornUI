@@ -4,6 +4,15 @@ import SwiftUI
 struct AppsView: View {
     var apps: [NornAppStatus] = []
     let services: [NornService]
+    var deployments: [NornDeployment] = []
+    var operations: [NornOperation] = []
+    var deploymentSteps: [String: [NornDeploymentStep]] = [:]
+    var loadingDeploymentIDs: Set<String> = []
+    var deploymentStepErrors: [String: String] = [:]
+    var deploymentActivityError: String? = nil
+    var isLoadingDeploymentActivity = false
+    var onSelectDeployment: (String?) -> Void = { _ in }
+    var onOpenDeployment: (NornDeployment) -> Void = { _ in }
 	@Binding var selectedAppName: String?
 	@Binding var selectedService: NornServiceSelection?
     var canCreate = false
@@ -23,22 +32,30 @@ struct AppsView: View {
     @State private var searchText = ""
     @State private var presentation: AppListPresentation = .grouped
     @State private var activeOnly = false
-    @State private var sort = AppListSort.app
-    @State private var sortAscending = true
+    @State private var sort = AppListSort.recent
+    @State private var sortAscending = false
     @State private var expandedApps: Set<String> = []
 
+    private var deploymentRecency: AppDeploymentRecency { AppDeploymentRecency(deployments: deployments, operations: operations) }
+
     private var filteredServices: [NornService] {
-        services
+        let recency = deploymentRecency
+        return services
             .filter { !activeOnly || isActive($0) }
             .filter { searchText.isEmpty || matchesSearch($0) }
-            .sorted(by: serviceOrder)
+            .sorted { serviceOrder($0, $1, recency: recency) }
     }
 
     private var groupedApps: [AppServiceGroup] {
+        let recency = deploymentRecency
+        let activeOperations = operations.filter { $0.status.isActive && $0.kind.localizedCaseInsensitiveContains("deploy") }
+        let operationsByApp = Dictionary(grouping: activeOperations, by: { $0.app ?? "" })
+            .compactMapValues { $0.max { $0.startedAt < $1.startedAt } }
         let appStatuses = apps.reduce(into: [String: NornAppStatus]()) { result, app in
             result[app.spec.name] = app
         }
         let activeServices = services.filter { !activeOnly || isActive($0) }
+        let servicesByApp = Dictionary(grouping: activeServices, by: \.app)
         var names = Set(activeServices.map(\.app))
         names.formUnion(apps.compactMap { app in
             guard app.spec.deploy != false else { return nil }
@@ -46,29 +63,35 @@ struct AppsView: View {
             return app.spec.name
         })
 
+        names.formUnion(operationsByApp.keys.filter { !$0.isEmpty })
+        names.formUnion(recency.latestByApp.values.filter { !activeOnly || $0.status.isActive }.map(\.app))
+
         return names.compactMap { name in
             let app = appStatuses[name]
-            let allChildren = activeServices.filter { $0.app == name }
+            let allChildren = servicesByApp[name] ?? []
             let appMatches = searchText.isEmpty
                 || name.localizedStandardContains(searchText)
                 || app?.nomadStatus?.localizedStandardContains(searchText) == true
             let children = appMatches ? allChildren : allChildren.filter(matchesSearch)
             guard searchText.isEmpty || appMatches || !children.isEmpty else { return nil }
-            return AppServiceGroup(name: name, app: app, services: children.sorted(by: serviceOrder))
+            return AppServiceGroup(name: name, app: app, services: children.sorted { serviceOrder($0, $1, recency: recency) }, deployment: recency.latestByApp[name], activeOperation: operationsByApp[name])
         }
-        .sorted(by: groupOrder)
+        .sorted { groupOrder($0, $1, recency: recency) }
     }
 
     var body: some View {
         HSplitView {
             VStack(spacing: 0) {
+                inFlightStrip
                 draftStrip
                 appList
             }
             .frame(minWidth: 410)
 
             if let selectedApp {
-                AppRecoveryInspector(
+                VStack(spacing: 0) {
+                    selectedDeploymentGraph
+                    AppRecoveryInspector(
                     app: selectedApp,
                     workloadState: AppWorkloadState.aggregate(
                         app: selectedApp,
@@ -83,7 +106,30 @@ struct AppsView: View {
                     onQueue: onQueueOperation,
                     onOpenOperation: onOpenOperation
                 )
-                .frame(minWidth: 290, idealWidth: 370, maxWidth: 480)
+                }
+                .frame(minWidth: 290, idealWidth: 440, maxWidth: 620)
+            } else if let deployment = selectedDeployment {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(deployment.app).font(.title2.weight(.semibold))
+                    selectedDeploymentGraph
+                    Text("This app has deployment activity but no app inventory is available yet.")
+                        .foregroundStyle(.secondary)
+                    Button("View Deployment", systemImage: "point.3.connected.trianglepath.dotted") { onOpenDeployment(deployment) }
+                    Spacer()
+                }
+                .padding(18)
+                .frame(minWidth: 290, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else if let operation = operations.first(where: { $0.app == selectedAppName && $0.status.isActive && $0.kind.localizedCaseInsensitiveContains("deploy") }) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(operation.app ?? "Deployment").font(.title2.weight(.semibold))
+                    Text(operation.message ?? "Deployment \(operation.status.rawValue)")
+                    Text("Deployment steps appear when the deployment record becomes available.")
+                        .foregroundStyle(.secondary)
+                    Button("View Operation") { onOpenOperation(operation) }
+                    Spacer()
+                }
+                .padding(18)
+                .frame(minWidth: 290, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
                 ContentUnavailableView(
                     "Select an App",
@@ -135,6 +181,9 @@ struct AppsView: View {
 			revealLinkedServiceIfNeeded()
 			normalizeSelection()
 		}
+        .task(id: "\(profileID?.uuidString ?? "none")/\(selectedDeployment?.id ?? "none")") {
+            onSelectDeployment(selectedDeployment?.id)
+        }
         .onChange(of: visibleAppNames) { _, _ in normalizeSelection() }
 		.onChange(of: selectedService) { _, _ in revealLinkedServiceIfNeeded() }
         .onChange(of: profileID) { _, _ in draftEnableGate.invalidate() }
@@ -157,6 +206,46 @@ struct AppsView: View {
             Button("Cancel", role: .cancel) { draftEnableGate.dismiss() }
         } message: {
             Text("The app will become eligible for deploy and host-recovery workflows. Verify its source, build, secrets, and health checks first.")
+        }
+    }
+
+    @ViewBuilder
+    private var selectedDeploymentGraph: some View {
+        if let deployment = selectedDeployment {
+            DeploymentPipelineGraph(
+                deployment: deployment,
+                steps: deploymentSteps[deployment.id] ?? [],
+                isLoading: loadingDeploymentIDs.contains(deployment.id),
+                errorMessage: deploymentStepErrors[deployment.id],
+                isLive: isRecoveryConnected && !deployment.sagaID.isEmpty && operations.contains { $0.status.isActive && $0.sagaID == deployment.sagaID }
+            )
+            .padding(12)
+            Divider()
+        }
+    }
+
+    @ViewBuilder
+    private var inFlightStrip: some View {
+        let active = operations.filter { $0.status.isActive && $0.kind.localizedCaseInsensitiveContains("deploy") }
+            .sorted { $0.startedAt > $1.startedAt }
+        if !active.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Label(isRecoveryConnected ? "Deployments in flight" : "Last reported deployment activity", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                    .font(.caption.weight(.semibold))
+                ForEach(Array(active.prefix(5))) { operation in
+                    Button { onOpenOperation(operation) } label: {
+                        HStack {
+                            Text(operation.app ?? "Deployment").fontWeight(.medium)
+                            Spacer()
+                            Text(operation.message ?? operation.status.rawValue.capitalized)
+                                .foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+            Divider()
         }
     }
 
@@ -198,6 +287,30 @@ struct AppsView: View {
 
     private var appList: some View {
         VStack(spacing: 0) {
+            if let deploymentActivityError {
+                Label(deploymentActivityError, systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(10)
+            }
+            HStack {
+                Button { applySort(.recent) } label: {
+                    Label(sort == .recent && sortAscending ? "Oldest deployment first" : "Recent deployments", systemImage: "clock.arrow.circlepath")
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(sort == .recent ? Color.accentColor : Color.secondary)
+                .accessibilityIdentifier("apps.sort.recent")
+                if isLoadingDeploymentActivity {
+                    ProgressView().controlSize(.mini).accessibilityLabel("Refreshing apps and deployments")
+                }
+                Spacer()
+                if let deployment = selectedDeployment {
+                    Button("View Deployment") { onOpenDeployment(deployment) }
+                        .buttonStyle(.link)
+                }
+            }
+            .font(.caption)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             AppListHeader(sort: sort, ascending: sortAscending, onSort: applySort)
             Divider()
             if visibleAppNames.isEmpty {
@@ -233,7 +346,27 @@ struct AppsView: View {
                                 }
                                 Divider()
                             }
+                        } else if sort == .recent {
+                            ForEach(groupedApps) { group in
+                                if group.services.isEmpty {
+                                    AppGroupRow(group: group, isExpanded: false, isSelected: selectedAppName == group.name,
+                                                onToggle: {}, onSelect: { selectApp(group.name) })
+                                    Divider()
+                                } else {
+                                    ForEach(group.services) { service in
+                                        AppServiceRow(service: service, app: group.app, isChild: false,
+                                                      isSelected: selectedService?.matches(service) == true,
+                                                      onSelect: { selectService(service) })
+                                        Divider()
+                                    }
+                                }
+                            }
                         } else {
+                            ForEach(groupedApps.filter { $0.services.isEmpty }) { group in
+                                AppGroupRow(group: group, isExpanded: false, isSelected: selectedAppName == group.name,
+                                            onToggle: {}, onSelect: { selectApp(group.name) })
+                                Divider()
+                            }
                             ForEach(filteredServices) { service in
                                 AppServiceRow(
                                     service: service,
@@ -263,8 +396,13 @@ struct AppsView: View {
     private var visibleAppNames: [String] {
         switch presentation {
         case .grouped: groupedApps.map(\.name)
-        case .flat: Array(Set(filteredServices.map(\.app))).sorted()
+        case .flat: groupedApps.map(\.name)
         }
+    }
+
+    private var selectedDeployment: NornDeployment? {
+        guard let name = selectedAppName ?? visibleAppNames.first else { return nil }
+        return deploymentRecency.latestByApp[name]
     }
 
     private var selectedApp: NornAppStatus? {
@@ -304,7 +442,7 @@ struct AppsView: View {
 
     private func applySort(_ next: AppListSort) {
         if sort == next { sortAscending.toggle() }
-        else { sort = next; sortAscending = true }
+        else { sort = next; sortAscending = next != .recent }
     }
 
     private func matchesSearch(_ service: NornService) -> Bool {
@@ -335,12 +473,14 @@ struct AppsView: View {
         return app.healthy || ["running", "up", "healthy"].contains(app.nomadStatus?.lowercased() ?? "")
     }
 
-    private func serviceOrder(_ left: NornService, _ right: NornService) -> Bool {
-        ordered(serviceSortValue(left), serviceSortValue(right), tie: left.name, right.name)
+    private func serviceOrder(_ left: NornService, _ right: NornService, recency: AppDeploymentRecency) -> Bool {
+        if sort == .recent { return recency.precedes(left.app, right.app, ascending: sortAscending, leftTie: left.name, rightTie: right.name) }
+        return ordered(serviceSortValue(left), serviceSortValue(right), tie: left.name, right.name)
     }
 
-    private func groupOrder(_ left: AppServiceGroup, _ right: AppServiceGroup) -> Bool {
-        ordered(groupSortValue(left), groupSortValue(right), tie: left.name, right.name)
+    private func groupOrder(_ left: AppServiceGroup, _ right: AppServiceGroup, recency: AppDeploymentRecency) -> Bool {
+        if sort == .recent { return recency.precedes(left.name, right.name, ascending: sortAscending) }
+        return ordered(groupSortValue(left), groupSortValue(right), tie: left.name, right.name)
     }
 
     private func ordered(_ left: String, _ right: String, tie leftTie: String, _ rightTie: String) -> Bool {
@@ -354,6 +494,7 @@ struct AppsView: View {
 
     private func serviceSortValue(_ service: NornService) -> String {
         switch sort {
+        case .recent: return service.app
         case .app: return service.app
         case .process: return service.process
         case .exposure: return service.reachability.exposure
@@ -365,6 +506,7 @@ struct AppsView: View {
 
     private func groupSortValue(_ group: AppServiceGroup) -> String {
         switch sort {
+        case .recent: group.name
         case .app: group.name
         case .process: group.processSummary
         case .exposure: group.exposure
@@ -384,6 +526,7 @@ private enum AppListPresentation: String, CaseIterable, Identifiable {
 }
 
 private enum AppListSort: String {
+    case recent
     case app
     case process
     case exposure
@@ -394,6 +537,8 @@ private struct AppServiceGroup: Identifiable {
     let name: String
     let app: NornAppStatus?
     let services: [NornService]
+    let deployment: NornDeployment?
+    let activeOperation: NornOperation?
     var id: String { name }
 
     var processSummary: String {
@@ -480,6 +625,7 @@ private struct AppGroupRow: View {
                         .frame(width: 16, height: 20)
                 }
                 .buttonStyle(.borderless)
+                .disabled(group.services.isEmpty)
                 .help(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
                 .accessibilityLabel(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
                 .accessibilityIdentifier("apps.disclosure.\(group.name)")
@@ -490,9 +636,16 @@ private struct AppGroupRow: View {
                         .fontWeight(.semibold)
                         .lineLimit(1)
                         .accessibilityIdentifier("apps.root.\(group.name)")
-                    Text(group.workloadSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if let operation = group.activeOperation {
+                        Text("\(operation.status.rawValue.capitalized) deployment")
+                            .font(.caption).foregroundStyle(Color.accentColor)
+                    } else if let deployment = group.deployment {
+                        AppDeploymentSummary(deployment: deployment)
+                    } else {
+                        Text(group.workloadSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
@@ -517,6 +670,25 @@ private struct AppGroupRow: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityHint("Click to inspect; use the disclosure control to show processes")
+    }
+}
+
+private struct AppDeploymentSummary: View {
+    let deployment: NornDeployment
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: deployment.status.isActive ? "arrow.trianglehead.2.clockwise.rotate.90" : deployment.status == .failed ? "exclamationmark.circle" : "checkmark.circle")
+            Text(deployment.status.isActive ? "Last reported \(deployment.status.rawValue)" : deployment.status.rawValue.capitalized)
+            Text("·")
+            Text(deployment.finishedAt ?? deployment.startedAt, style: .relative)
+                .monospacedDigit()
+            Text("ago")
+        }
+        .font(.caption)
+        .foregroundStyle(deployment.status.isActive ? Color.accentColor : deployment.status == .failed ? Color.orange : Color.secondary)
+        .lineLimit(1)
+        .help("Deployment \(deployment.id) · \(deployment.startedAt.formatted())")
     }
 }
 
@@ -572,8 +744,9 @@ private struct AppServiceRow: View {
         .onTapGesture(perform: onSelect)
         .onHover { isHovered = $0 }
         .contextMenu { Button("Inspect \(service.app)", action: onSelect) }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(service.app), \(service.process), \(workloadState.label)")
+        .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("apps.service.\(service.id)")
     }
 
