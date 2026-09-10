@@ -182,12 +182,14 @@ struct ContentView: View {
                 onQueue: queue
             )
         case .host:
+            let hostProfileID = appModel.selectedProfileID
             HostFeatureView(
                 snapshot: appModel.snapshot,
                 isConnected: appModel.canReadRuntime,
                 metrics: appModel.hostMetrics,
 				metricHistory: appModel.hostMetricsHistory,
 				serviceMetricHistory: appModel.serviceMetricsHistory,
+                historyRevision: appModel.hostHistoryPresentationRevision,
 				serviceMetricsCollectionEnabled: $appModel.serviceMetricsCollectionEnabled,
 				refreshInterval: $appModel.hostMetricsRefreshInterval,
                 isMetricsSupported: appModel.hostMetricsSupported,
@@ -203,9 +205,12 @@ struct ContentView: View {
 				onRestartApp: { service, context in
 					return await appModel.restartAppAllocations(for: service, context: context)
 				},
+                onRequestMetricsHistory: { window, end in await appModel.requestMetricsHistory(window: window, endingAt: end) },
                 onRefresh: refreshHost
             )
 			.id(appModel.selectedProfileID)
+            .onAppear { appModel.setHostVisible(true, profileID: hostProfileID) }
+            .onDisappear { appModel.setHostVisible(false, profileID: hostProfileID) }
         case .fleet:
             FleetFeatureView(
                 inventory: appModel.fleetInventory,

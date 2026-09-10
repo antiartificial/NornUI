@@ -57,6 +57,9 @@ final class NornAppModel {
     var hostMetrics: NornHostMetrics?
     var hostMetricsHistory: [NornHostMetricSample]
     var serviceMetricsHistory: [NornServiceMetricSample]
+    /// Changes whenever chart inputs are replaced or appended, including when
+    /// the count stays the same after a corrected aggregate arrives.
+    var hostHistoryPresentationRevision: UInt64 = 0
     var hostMetricsRefreshInterval: NornHostMetricsRefreshInterval {
         didSet {
             profileStore.saveHostMetricsRefreshInterval(hostMetricsRefreshInterval)
@@ -113,6 +116,10 @@ final class NornAppModel {
     @ObservationIgnored private var authoritativeRefreshTaskID: UUID?
     @ObservationIgnored private var isFleetVisible = false
     @ObservationIgnored private var isOverviewVisible = false
+    @ObservationIgnored private var isHostVisible = false
+    @ObservationIgnored private var historyGeneration: UInt64 = 0
+    @ObservationIgnored private var historyRequestGeneration: UInt64 = 0
+    @ObservationIgnored private var metricsHistoryRevision: UInt64 = 0
     @ObservationIgnored private var isOverviewDirty = false
     @ObservationIgnored private var shouldRefreshAgain = false
     @ObservationIgnored private var connectionGeneration: UInt64 = 0
@@ -120,6 +127,7 @@ final class NornAppModel {
     @ObservationIgnored private var eventMutationSequence: UInt64 = 0
     @ObservationIgnored private var eventMutatedOperationIDs: Set<String> = []
     @ObservationIgnored private var lastHostMetricsPersistenceAt: Date?
+    @ObservationIgnored private var metricsPersistenceTask: Task<Void, Never>?
     @ObservationIgnored private var lastServiceMetricsRefreshAt: Date?
     @ObservationIgnored private var lastServiceMetricsPersistenceAt: Date?
     @ObservationIgnored private var serviceMetricsEndpointUnavailable = false
@@ -517,21 +525,7 @@ final class NornAppModel {
         client = nil
         clearConnectionScopedState()
         hostMetrics = nil
-        let storedHistory = selectedProfile.map { profileStore.loadHostMetricsHistory(profileID: $0.id) } ?? []
-        hostMetricsHistory = Self.compactHostMetricsHistory(storedHistory, endingAt: storedHistory.last?.observedAt ?? .now)
-        let storedServiceHistory = selectedProfile.map { profileStore.loadServiceMetricsHistory(profileID: $0.id) } ?? []
-        serviceMetricsHistory = Self.compactServiceMetricsHistory(
-            storedServiceHistory,
-            endingAt: storedServiceHistory.last?.observedAt ?? .now
-        )
-        if let profileID = selectedProfile?.id {
-            if hostMetricsHistory != storedHistory {
-                profileStore.saveHostMetricsHistory(hostMetricsHistory, profileID: profileID)
-            }
-            if serviceMetricsHistory != storedServiceHistory {
-                profileStore.saveServiceMetricsHistory(serviceMetricsHistory, profileID: profileID)
-            }
-        }
+        invalidateHistoryLoading()
         lastHostMetricsPersistenceAt = nil
         lastServiceMetricsRefreshAt = nil
         lastServiceMetricsPersistenceAt = nil
@@ -628,19 +622,23 @@ final class NornAppModel {
         }
     }
 
-    func refreshHostMetrics() async {
+    func refreshHostMetrics(onlyWhileHostVisible: Bool = false) async {
         guard let client, connectionState == .online, hostMetricsSupported else { return }
         let generation = connectionGeneration
         let profileID = selectedProfileID
         do {
             let metrics = try await client.hostMetrics()
-            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            guard !Task.isCancelled,
+                  (!onlyWhileHostVisible || isHostVisible),
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
             hostMetrics = metrics
             recordHostMetrics(metrics)
         } catch is CancellationError {
             return
         } catch {
-            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            guard !Task.isCancelled,
+                  (!onlyWhileHostVisible || isHostVisible),
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
             // Preserve the most recent good sample. Host metrics are an optional
             // observational endpoint and must not take the whole UI offline.
             // A retained value is explicitly marked stale rather than displayed
@@ -649,27 +647,229 @@ final class NornAppModel {
         }
     }
 
+    /// Host refresh prioritizes the data visible on the Host screen. The full
+    /// dashboard refresh is intentionally left to Overview's own lifecycle.
     func refreshHost() async {
-        await refresh()
-        await refreshHostMetrics()
-        await refreshServiceMetricsIfNeeded(force: true)
+        async let metrics: Void = refreshHostMetrics()
+        async let context: Void = refreshHostContext()
+        async let services: Void = refreshServiceMetricsIfNeeded(force: true)
+        _ = await (metrics, context, services)
     }
 
-    /// Flushes the latest compacted timelines when the app resigns activity.
-    /// Sampling continues for as long as the process remains connected.
-    func persistMetricsHistory() {
+    private func refreshHostContext() async {
+        guard let client,
+              connectionState == .online,
+              isHostVisible,
+              !isFleetAuthorityOnly else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        async let health: Void = applyHostHealth(client, generation: generation, profileID: profileID)
+        async let hostStatus: Void = applyHostStatus(client, generation: generation, profileID: profileID)
+        async let manifest: Void = applyHostManifest(client, generation: generation, profileID: profileID)
+        _ = await (health, hostStatus, manifest)
+    }
+
+    private func applyHostHealth(_ client: any NornClientProtocol, generation: UInt64, profileID: UUID?) async {
+        guard let value = try? await client.health(),
+              isHostVisible,
+              isCurrentConnection(generation: generation, profileID: profileID) else { return }
+        snapshot.health = value
+        snapshot.observedAt = .now
+    }
+
+    private func applyHostManifest(_ client: any NornClientProtocol, generation: UInt64, profileID: UUID?) async {
+        guard let value = try? await client.serviceManifest(),
+              isHostVisible,
+              isCurrentConnection(generation: generation, profileID: profileID) else { return }
+        snapshot.services = value.services
+        snapshot.observedAt = .now
+    }
+
+    private func applyHostStatus(_ client: any NornClientProtocol, generation: UInt64, profileID: UUID?) async {
+        guard let value = try? await client.hostStatus(),
+              isHostVisible,
+              isCurrentConnection(generation: generation, profileID: profileID) else { return }
+        snapshot.health.status = value.status
+        snapshot.health.services.merge(value.services) { _, current in current }
+        if let assurance = value.latestAssurance { upsert(assurance) }
+        snapshot.observedAt = .now
+    }
+
+    /// Flushes live samples without replacing older persisted ranges that have
+    /// not been requested by the Host view yet.
+    func persistMetricsHistory() async {
         guard let profileID = selectedProfile?.id else { return }
-        persistMetricsHistory(profileID: profileID)
+        await persistMetricsHistory(profileID: profileID)
     }
 
-    private func persistMetricsHistory(profileID: UUID) {
+    private func persistMetricsHistory(profileID: UUID) async {
         guard !isFixtureMode else { return }
-        profileStore.saveHostMetricsHistory(hostMetricsHistory, profileID: profileID)
-        if serviceMetricsCollectionEnabled {
-            profileStore.saveServiceMetricsHistory(serviceMetricsHistory, profileID: profileID)
+        // Capture before awaiting an older write: by the time this task runs,
+        // the selected profile may have changed.
+        let hostAdditions = hostMetricsHistory
+        let serviceCollectionEnabled = serviceMetricsCollectionEnabled
+        let serviceAdditions = serviceCollectionEnabled ? serviceMetricsHistory : []
+        await persistMetricsHistory(
+            profileID: profileID,
+            hostAdditions: hostAdditions,
+            serviceAdditions: serviceAdditions,
+            serviceCollectionEnabled: serviceCollectionEnabled
+        )
+    }
+
+    private func persistMetricsHistory(
+        profileID: UUID,
+        hostAdditions: [NornHostMetricSample],
+        serviceAdditions: [NornServiceMetricSample],
+        serviceCollectionEnabled: Bool
+    ) async {
+        let previousTask = metricsPersistenceTask
+        let task = Task { [weak self] in
+            await previousTask?.value
+            await self?.writeMetricsHistory(
+                profileID: profileID,
+                hostAdditions: hostAdditions,
+                serviceAdditions: serviceAdditions,
+                serviceCollectionEnabled: serviceCollectionEnabled
+            )
+        }
+        metricsPersistenceTask = task
+        await task.value
+    }
+
+    /// Capture on the main actor before scheduling a fire-and-forget flush.
+    /// A profile switch can otherwise make the task persist the replacement
+    /// profile's arrays under the previous profile's key.
+    private func scheduleMetricsHistoryPersistence(profileID: UUID) {
+        guard !isFixtureMode else { return }
+        let hostAdditions = hostMetricsHistory
+        let serviceCollectionEnabled = serviceMetricsCollectionEnabled
+        let serviceAdditions = serviceCollectionEnabled ? serviceMetricsHistory : []
+        Task { [weak self] in
+            await self?.persistMetricsHistory(
+                profileID: profileID,
+                hostAdditions: hostAdditions,
+                serviceAdditions: serviceAdditions,
+                serviceCollectionEnabled: serviceCollectionEnabled
+            )
+        }
+    }
+
+    private func writeMetricsHistory(
+        profileID: UUID,
+        hostAdditions: [NornHostMetricSample],
+        serviceAdditions: [NornServiceMetricSample],
+        serviceCollectionEnabled: Bool
+    ) async {
+        let hostData = profileStore.hostMetricsHistoryData(profileID: profileID)
+        let serviceData = serviceCollectionEnabled
+            ? profileStore.serviceMetricsHistoryData(profileID: profileID)
+            : nil
+        let encoded = await Task.detached(priority: .utility) {
+            NornMetricsHistoryCodec.mergeAndEncode(
+                hostData: hostData,
+                serviceData: serviceData,
+                hostAdditions: hostAdditions,
+                serviceAdditions: serviceAdditions,
+                endingAt: .now
+            )
+        }.value
+        // A removed profile must not be recreated by a delayed persistence task.
+        guard profiles.contains(where: { $0.id == profileID }) else { return }
+        if let hostData = encoded.hostData {
+            profileStore.saveHostMetricsHistoryData(hostData, profileID: profileID)
+        }
+        if serviceCollectionEnabled, let serviceData = encoded.serviceData {
+            profileStore.saveServiceMetricsHistoryData(serviceData, profileID: profileID)
         }
         lastHostMetricsPersistenceAt = .now
         lastServiceMetricsPersistenceAt = .now
+    }
+
+    /// Starts and stops Host-only network and disk work. Event processing stays
+    /// connected globally; metrics collection and history decoding do not.
+    func setHostVisible(_ isVisible: Bool) {
+        setHostVisible(isVisible, profileID: selectedProfileID)
+    }
+
+    /// `profileID` is captured by the Host view. It prevents a disappearing
+    /// view for profile A from stopping work after profile B has replaced it.
+    func setHostVisible(_ isVisible: Bool, profileID: UUID?) {
+        guard profileID == selectedProfileID else { return }
+        isHostVisible = isVisible
+        if isVisible {
+            startHostMetricsPollingIfNeeded()
+        } else {
+            stopHostMetricsPolling()
+            historyRequestGeneration &+= 1
+        }
+    }
+
+    /// Loads only the range requested by the chart. The persisted payload is
+    /// decoded and compacted on a utility executor, then merged on the main
+    /// actor only if this profile and Host presentation are still current.
+    func requestMetricsHistory(
+        window: NornHostMetricsWindow,
+        endingAt: Date = .now
+    ) async {
+        guard !isFixtureMode,
+              isHostVisible,
+              let profileID = selectedProfile?.id else { return }
+        let generation = historyGeneration
+        historyRequestGeneration &+= 1
+        let requestGeneration = historyRequestGeneration
+        let hostData = profileStore.hostMetricsHistoryData(profileID: profileID)
+        let serviceData = serviceMetricsCollectionEnabled
+            ? profileStore.serviceMetricsHistoryData(profileID: profileID)
+            : nil
+        let loadTask = Task.detached(priority: .utility) {
+            NornMetricsHistoryCodec.load(
+                hostData: hostData,
+                serviceData: serviceData,
+                window: window,
+                endingAt: endingAt
+            )
+        }
+        let loaded = await withTaskCancellationHandler(
+            operation: { await loadTask.value },
+            onCancel: { loadTask.cancel() }
+        )
+        guard !Task.isCancelled,
+              isHostVisible,
+              historyGeneration == generation,
+              historyRequestGeneration == requestGeneration,
+              selectedProfileID == profileID else { return }
+        // Fresh live samples may have arrived while the persisted blob decoded.
+        // Merge against the current cache, not the snapshot captured at launch.
+        var currentHost = hostMetricsHistory
+        var currentService = serviceMetricsHistory
+        var currentRevision = metricsHistoryRevision
+        var result: (host: [NornHostMetricSample], service: [NornServiceMetricSample])
+        while true {
+            let mergeTask = Task.detached(priority: .utility) {
+                (
+                    host: NornMetricsHistoryCodec.mergedHost(currentHost, loaded.host),
+                    service: NornMetricsHistoryCodec.mergedService(currentService, loaded.service)
+                )
+            }
+            result = await withTaskCancellationHandler(
+                operation: { await mergeTask.value },
+                onCancel: { mergeTask.cancel() }
+            )
+            guard metricsHistoryRevision != currentRevision else { break }
+            guard !Task.isCancelled else { return }
+            currentHost = hostMetricsHistory
+            currentService = serviceMetricsHistory
+            currentRevision = metricsHistoryRevision
+        }
+        guard !Task.isCancelled,
+              isHostVisible,
+              historyGeneration == generation,
+              historyRequestGeneration == requestGeneration,
+              selectedProfileID == profileID else { return }
+        hostMetricsHistory = result.host
+        serviceMetricsHistory = result.service
+        hostHistoryPresentationRevision &+= 1
     }
 
     func setFleetVisible(_ isVisible: Bool) {
@@ -843,8 +1043,9 @@ final class NornAppModel {
 
     func addProfile(_ profile: NornServerProfile) {
         if let previousID = selectedProfileID, previousID != profile.id {
-            persistMetricsHistory(profileID: previousID)
+            scheduleMetricsHistoryPersistence(profileID: previousID)
         }
+        invalidateHistoryLoading()
         profiles.removeAll { $0.id == profile.id }
         profiles.append(profile)
         selectedProfileID = profile.id
@@ -968,10 +1169,7 @@ final class NornAppModel {
         profiles.removeAll { $0.id == id }
         if wasSelected {
             selectedProfileID = profiles.first?.id
-            let hostHistory = selectedProfile.map { profileStore.loadHostMetricsHistory(profileID: $0.id) } ?? []
-            hostMetricsHistory = Self.compactHostMetricsHistory(hostHistory, endingAt: hostHistory.last?.observedAt ?? .now)
-            let serviceHistory = selectedProfile.map { profileStore.loadServiceMetricsHistory(profileID: $0.id) } ?? []
-            serviceMetricsHistory = Self.compactServiceMetricsHistory(serviceHistory, endingAt: serviceHistory.last?.observedAt ?? .now)
+            invalidateHistoryLoading()
             lastHostMetricsPersistenceAt = nil
             lastServiceMetricsRefreshAt = nil
             lastServiceMetricsPersistenceAt = nil
@@ -997,12 +1195,14 @@ final class NornAppModel {
     }
 
     func selectProfile(id: UUID?) async {
-        if let previousID = selectedProfileID, previousID != id {
-            persistMetricsHistory(profileID: previousID)
-        }
+        let previousID = selectedProfileID
+        let hostAdditions = hostMetricsHistory
+        let serviceCollectionEnabled = serviceMetricsCollectionEnabled
+        let serviceAdditions = serviceCollectionEnabled ? serviceMetricsHistory : []
         // Invalidate every in-flight response before changing the profile ID.
         // This closes the tiny gap between selection and connect() setup.
         connectionGeneration &+= 1
+        invalidateHistoryLoading()
         eventTask?.cancel()
         stopHostMetricsPolling()
         stopFleetPolling()
@@ -1011,6 +1211,14 @@ final class NornAppModel {
         stopOverviewUpdating()
         selectedProfileID = id
         profileStore.saveSelection(id)
+        if let previousID, previousID != id {
+            await persistMetricsHistory(
+                profileID: previousID,
+                hostAdditions: hostAdditions,
+                serviceAdditions: serviceAdditions,
+                serviceCollectionEnabled: serviceCollectionEnabled
+            )
+        }
         await connect()
     }
 
@@ -1569,7 +1777,8 @@ final class NornAppModel {
     }
 
     private func startHostMetricsPollingIfNeeded() {
-        guard connectionState == .online,
+        guard isHostVisible,
+              connectionState == .online,
               client != nil,
               hostMetricsSupported,
               hostMetricsTask == nil else { return }
@@ -1577,7 +1786,7 @@ final class NornAppModel {
         hostMetricsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard self != nil else { return }
-                await self?.refreshHostMetrics()
+                await self?.refreshHostMetrics(onlyWhileHostVisible: true)
                 await self?.refreshServiceMetricsIfNeeded()
 
                 do {
@@ -1602,12 +1811,13 @@ final class NornAppModel {
         guard hostMetricsHistory.last?.observedAt != sample.observedAt else { return }
 
         hostMetricsHistory.append(sample)
-        hostMetricsHistory = Self.compactHostMetricsHistory(hostMetricsHistory, endingAt: sample.observedAt)
+        metricsHistoryRevision &+= 1
+        hostHistoryPresentationRevision &+= 1
 
         let now = Date.now
         if let profileID = selectedProfile?.id,
            lastHostMetricsPersistenceAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true {
-            profileStore.saveHostMetricsHistory(hostMetricsHistory, profileID: profileID)
+            scheduleMetricsHistoryPersistence(profileID: profileID)
             lastHostMetricsPersistenceAt = now
         }
     }
@@ -1618,6 +1828,7 @@ final class NornAppModel {
               hostMetricsSupported,
               canReadRuntime,
               serviceMetricsCollectionEnabled,
+              isHostVisible,
               !serviceMetricsEndpointUnavailable,
               !isFixtureMode else { return }
         let now = Date.now
@@ -1651,14 +1862,24 @@ final class NornAppModel {
         serviceMetricsHistory.append(contentsOf: suggestions.map {
             NornServiceMetricSample(observedAt: observedAt, suggestion: $0)
         })
-        serviceMetricsHistory = Self.compactServiceMetricsHistory(serviceMetricsHistory, endingAt: observedAt)
+        metricsHistoryRevision &+= 1
+        hostHistoryPresentationRevision &+= 1
 
         let now = Date.now
         if let profileID = selectedProfile?.id,
            lastServiceMetricsPersistenceAt.map({ now.timeIntervalSince($0) >= 60 }) ?? true {
-            profileStore.saveServiceMetricsHistory(serviceMetricsHistory, profileID: profileID)
+            scheduleMetricsHistoryPersistence(profileID: profileID)
             lastServiceMetricsPersistenceAt = now
         }
+    }
+
+    private func invalidateHistoryLoading() {
+        historyGeneration &+= 1
+        historyRequestGeneration &+= 1
+        metricsHistoryRevision &+= 1
+        hostHistoryPresentationRevision &+= 1
+        hostMetricsHistory = []
+        serviceMetricsHistory = []
     }
 
     /// Retains full fidelity for the newest hour, one-minute extrema through

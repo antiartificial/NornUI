@@ -152,7 +152,7 @@ final class NornProfileStore {
     }
 
     func loadHostMetricsHistory(profileID: UUID) -> [NornHostMetricSample] {
-        guard let data = defaults.data(forKey: hostMetricsHistoryKey(profileID)),
+        guard let data = hostMetricsHistoryData(profileID: profileID),
               let samples = try? JSONDecoder().decode([NornHostMetricSample].self, from: data)
         else { return [] }
         return samples.sorted { $0.observedAt < $1.observedAt }
@@ -160,11 +160,11 @@ final class NornProfileStore {
 
     func saveHostMetricsHistory(_ samples: [NornHostMetricSample], profileID: UUID) {
         guard let data = try? JSONEncoder().encode(samples) else { return }
-        defaults.set(data, forKey: hostMetricsHistoryKey(profileID))
+        saveHostMetricsHistoryData(data, profileID: profileID)
     }
 
     func loadServiceMetricsHistory(profileID: UUID) -> [NornServiceMetricSample] {
-        guard let data = defaults.data(forKey: serviceMetricsHistoryKey(profileID)),
+        guard let data = serviceMetricsHistoryData(profileID: profileID),
               let samples = try? JSONDecoder().decode([NornServiceMetricSample].self, from: data)
         else { return [] }
         return samples.sorted { $0.observedAt < $1.observedAt }
@@ -172,6 +172,25 @@ final class NornProfileStore {
 
     func saveServiceMetricsHistory(_ samples: [NornServiceMetricSample], profileID: UUID) {
         guard let data = try? JSONEncoder().encode(samples) else { return }
+        saveServiceMetricsHistoryData(data, profileID: profileID)
+    }
+
+    /// Reading the small UserDefaults blob remains on the caller's actor. JSON
+    /// decoding, sorting, compaction and encoding are deliberately performed by
+    /// `NornMetricsHistoryCodec` in a utility task.
+    func hostMetricsHistoryData(profileID: UUID) -> Data? {
+        defaults.data(forKey: hostMetricsHistoryKey(profileID))
+    }
+
+    func serviceMetricsHistoryData(profileID: UUID) -> Data? {
+        defaults.data(forKey: serviceMetricsHistoryKey(profileID))
+    }
+
+    func saveHostMetricsHistoryData(_ data: Data, profileID: UUID) {
+        defaults.set(data, forKey: hostMetricsHistoryKey(profileID))
+    }
+
+    func saveServiceMetricsHistoryData(_ data: Data, profileID: UUID) {
         defaults.set(data, forKey: serviceMetricsHistoryKey(profileID))
     }
 

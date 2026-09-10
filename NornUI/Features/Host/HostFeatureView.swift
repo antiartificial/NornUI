@@ -19,6 +19,9 @@ struct HostFeatureView: View {
     let metrics: NornHostMetrics?
     let metricHistory: [NornHostMetricSample]
     let serviceMetricHistory: [NornServiceMetricSample]
+    /// Advances whenever a history page is replaced or published, including
+    /// corrections that keep the same count and final timestamp.
+    let historyRevision: UInt64
     @Binding var serviceMetricsCollectionEnabled: Bool
     @Binding var refreshInterval: NornHostMetricsRefreshInterval
     let isMetricsSupported: Bool
@@ -33,7 +36,8 @@ struct HostFeatureView: View {
     var onOpenService: (NornService) -> Void = { _ in }
     var onLoadServiceLogs: (NornService) async -> String? = { _ in nil }
 	var issueMutationContext: () -> NornMutationContext? = { nil }
-	var onRestartApp: (NornService, NornMutationContext) async -> Bool = { _, _ in false }
+    var onRestartApp: (NornService, NornMutationContext) async -> Bool = { _, _ in false }
+    var onRequestMetricsHistory: (NornHostMetricsWindow, Date) async -> Void = { _, _ in }
     var onRefresh: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -55,6 +59,7 @@ struct HostFeatureView: View {
         metrics: NornHostMetrics? = nil,
         metricHistory: [NornHostMetricSample] = [],
         serviceMetricHistory: [NornServiceMetricSample] = [],
+        historyRevision: UInt64 = 0,
         serviceMetricsCollectionEnabled: Binding<Bool> = .constant(false),
         refreshInterval: Binding<NornHostMetricsRefreshInterval> = .constant(.seconds10),
         isMetricsSupported: Bool? = nil,
@@ -67,7 +72,8 @@ struct HostFeatureView: View {
         onOpenService: @escaping (NornService) -> Void = { _ in },
         onLoadServiceLogs: @escaping (NornService) async -> String? = { _ in nil },
 		issueMutationContext: @escaping () -> NornMutationContext? = { nil },
-		onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
+        onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
+        onRequestMetricsHistory: @escaping (NornHostMetricsWindow, Date) async -> Void = { _, _ in },
         onRefresh: @escaping () -> Void = {}
     ) {
         self.health = snapshot.health
@@ -78,6 +84,7 @@ struct HostFeatureView: View {
         self.metrics = metrics
         self.metricHistory = metricHistory
         self.serviceMetricHistory = serviceMetricHistory
+        self.historyRevision = historyRevision
         self._serviceMetricsCollectionEnabled = serviceMetricsCollectionEnabled
         self._refreshInterval = refreshInterval
         self.isMetricsSupported = isMetricsSupported ?? snapshot.capabilities.supportsHostMetrics
@@ -91,6 +98,7 @@ struct HostFeatureView: View {
         self.onLoadServiceLogs = onLoadServiceLogs
 		self.issueMutationContext = issueMutationContext
         self.onRestartApp = onRestartApp
+        self.onRequestMetricsHistory = onRequestMetricsHistory
         self.onRefresh = onRefresh
     }
 
@@ -103,6 +111,7 @@ struct HostFeatureView: View {
         metrics: NornHostMetrics? = nil,
         metricHistory: [NornHostMetricSample] = [],
         serviceMetricHistory: [NornServiceMetricSample] = [],
+        historyRevision: UInt64 = 0,
         serviceMetricsCollectionEnabled: Binding<Bool> = .constant(false),
         refreshInterval: Binding<NornHostMetricsRefreshInterval> = .constant(.seconds10),
         isMetricsSupported: Bool = false,
@@ -115,7 +124,8 @@ struct HostFeatureView: View {
         onOpenService: @escaping (NornService) -> Void = { _ in },
         onLoadServiceLogs: @escaping (NornService) async -> String? = { _ in nil },
 		issueMutationContext: @escaping () -> NornMutationContext? = { nil },
-		onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
+        onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
+        onRequestMetricsHistory: @escaping (NornHostMetricsWindow, Date) async -> Void = { _, _ in },
         onRefresh: @escaping () -> Void = {}
     ) {
         self.health = health
@@ -126,6 +136,7 @@ struct HostFeatureView: View {
         self.metrics = metrics
         self.metricHistory = metricHistory
         self.serviceMetricHistory = serviceMetricHistory
+        self.historyRevision = historyRevision
         self._serviceMetricsCollectionEnabled = serviceMetricsCollectionEnabled
         self._refreshInterval = refreshInterval
         self.isMetricsSupported = isMetricsSupported
@@ -139,6 +150,7 @@ struct HostFeatureView: View {
         self.onLoadServiceLogs = onLoadServiceLogs
 		self.issueMutationContext = issueMutationContext
         self.onRestartApp = onRestartApp
+        self.onRequestMetricsHistory = onRequestMetricsHistory
         self.onRefresh = onRefresh
     }
 
@@ -159,7 +171,7 @@ struct HostFeatureView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            LazyVStack(alignment: .leading, spacing: 20) {
                 hostHeader
 
                 metricsCard
@@ -325,37 +337,23 @@ struct HostFeatureView: View {
                     )
                 }
             ) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 28) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .top, spacing: 22) {
                         metricValues(metrics)
-                        HostMetricsHistoryChart(
-                            samples: metricHistory,
-                            serviceSamples: serviceMetricHistory,
-                            serviceMetricsCollectionEnabled: $serviceMetricsCollectionEnabled,
-                            latest: metrics,
-                            window: $selectedWindow,
-                            style: chartStyle
-                        )
-                        .frame(minWidth: 340, idealWidth: 430, maxWidth: .infinity)
                         Spacer(minLength: 0)
                         HostMetricsTimestamp(metrics: metrics)
                     }
-
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(alignment: .top, spacing: 22) {
-                            metricValues(metrics)
-                        }
-                        HostMetricsHistoryChart(
-                            samples: metricHistory,
-                            serviceSamples: serviceMetricHistory,
-                            serviceMetricsCollectionEnabled: $serviceMetricsCollectionEnabled,
-                            latest: metrics,
-                            window: $selectedWindow,
-                            style: chartStyle
-                        )
-                        .frame(height: 190)
-                        HostMetricsTimestamp(metrics: metrics, alignment: .leading)
-                    }
+                    HostMetricsHistoryChart(
+                        samples: metricHistory,
+                        serviceSamples: serviceMetricHistory,
+                        historyRevision: historyRevision,
+                        serviceMetricsCollectionEnabled: $serviceMetricsCollectionEnabled,
+                        latest: metrics,
+                        window: $selectedWindow,
+                        style: chartStyle,
+                        onRequestHistory: onRequestMetricsHistory
+                    )
+                    .frame(minHeight: 190)
                 }
                 HStack(spacing: 12) {
                     Picker("Window", selection: $selectedWindow) {
@@ -1002,102 +1000,49 @@ private enum HostMetricsChartStyle: String, CaseIterable, Identifiable {
 private struct HostMetricsHistoryChart: View {
     let samples: [NornHostMetricSample]
     let serviceSamples: [NornServiceMetricSample]
+    let historyRevision: UInt64
     @Binding var serviceMetricsCollectionEnabled: Bool
     let latest: NornHostMetrics
     @Binding var window: NornHostMetricsWindow
     let style: HostMetricsChartStyle
+    let onRequestHistory: (NornHostMetricsWindow, Date) async -> Void
 
     @State private var scrollPosition = Date.now
     @State private var hoveredDate: Date?
     @State private var followsLatest = true
+    @State private var prepared: HostMetricsChartPreparation?
+    @State private var historyRequestID: UUID?
+    @State private var isLoadingHistory = false
 
-    private var allSamples: [NornHostMetricSample] {
-        var values = samples
-        let current = NornHostMetricSample(metrics: latest)
-        if values.last?.observedAt != current.observedAt {
-            values.append(current)
-        }
-        return values.sorted { $0.observedAt < $1.observedAt }
+    private var chartData: HostMetricsChartPreparation {
+        prepared ?? HostMetricsChartPreparation.prepare(
+            samples: [], serviceSamples: [], latest: latest, window: window,
+            requestedViewportStart: latest.observedAt.addingTimeInterval(-Double(window.rawValue)),
+            includesServiceMetrics: false
+        )
     }
-
-    private var latestDate: Date { allSamples.last?.observedAt ?? latest.observedAt }
-    private var earliestDate: Date {
-        min(allSamples.first?.observedAt ?? latestDate, latestDate.addingTimeInterval(-Double(window.rawValue)))
-    }
-    private var viewportStart: Date {
-        let latestStart = latestDate.addingTimeInterval(-Double(window.rawValue))
-        guard scrollPosition >= earliestDate, scrollPosition <= latestDate else { return latestStart }
-        return min(scrollPosition, latestStart)
-    }
-    private var viewportEnd: Date { viewportStart.addingTimeInterval(Double(window.rawValue)) }
-    private var visibleSamples: [NornHostMetricSample] {
-        allSamples.filter { $0.observedAt >= viewportStart && $0.observedAt <= viewportEnd }
-    }
-
-    private var cpuHighWater: Double { visibleSamples.map(\.cpuPercent).max() ?? 0 }
-    private var memoryHighWater: Double { visibleSamples.map(\.memoryPercent).max() ?? 0 }
-    private var plottedSamples: [NornHostMetricSample] {
-        let values = visibleSamples
-        guard values.count > 1_200 else { return values }
-        let bucketSize = Int(ceil(Double(values.count) / 300.0))
-        var plotted: [NornHostMetricSample] = []
-        for start in stride(from: 0, to: values.count, by: bucketSize) {
-            let bucket = values[start..<min(start + bucketSize, values.count)]
-            if let first = bucket.first { plotted.append(first) }
-            if let cpuPeak = bucket.max(by: { $0.cpuPercent < $1.cpuPercent }) { plotted.append(cpuPeak) }
-            if let memoryPeak = bucket.max(by: { $0.memoryPercent < $1.memoryPercent }) { plotted.append(memoryPeak) }
-            if let last = bucket.last { plotted.append(last) }
-        }
-        return Array(Dictionary(plotted.map { ($0.observedAt, $0) }, uniquingKeysWith: { first, _ in first }).values)
-            .sorted { $0.observedAt < $1.observedAt }
-    }
-
-    private var tenantSeries: [HostTenantMetricSeries] {
-        guard serviceMetricsCollectionEnabled else { return [] }
-        let grouped = Dictionary(grouping: serviceSamples, by: \.seriesID)
-        var series: [HostTenantMetricSeries] = []
-        for (id, values) in grouped {
-            let viewportValues = values.filter { $0.observedAt >= viewportStart && $0.observedAt <= viewportEnd }
-            guard !viewportValues.isEmpty else { continue }
-            let sortedValues = viewportValues.sorted { $0.observedAt < $1.observedAt }
-            let highWater = viewportValues.reduce(0.0) { result, sample in
-                max(result, sample.cpuPercent, sample.memoryPercent)
-            }
-            series.append(HostTenantMetricSeries(
-                id: id,
-                name: values.first?.displayName ?? id,
-                samples: downsampleTenant(sortedValues),
-                highWater: highWater
-            ))
-        }
-        series.sort { lhs, rhs in
-            lhs.highWater == rhs.highWater ? lhs.name < rhs.name : lhs.highWater > rhs.highWater
-        }
-        return Array(series.prefix(6))
-    }
-
-    private var yDomainUpperBound: Double {
-        let tenantHighWater = tenantSeries.flatMap(\.samples)
-            .filter { $0.observedAt >= viewportStart && $0.observedAt <= viewportEnd }
-            .reduce(0.0) { result, sample in max(result, sample.cpuPercent, sample.memoryPercent) }
-        guard tenantHighWater > 100 else { return 100 }
-        return ceil(tenantHighWater / 50) * 50
-    }
-
     private var hoveredHostSample: NornHostMetricSample? {
-        guard let hoveredDate else { return nil }
-        return allSamples.min { abs($0.observedAt.timeIntervalSince(hoveredDate)) < abs($1.observedAt.timeIntervalSince(hoveredDate)) }
+        hoveredDate.flatMap { chartData.nearestHost(to: $0) }
     }
-
-    private var hoveredTenantSamples: [(HostTenantMetricSeries, NornServiceMetricSample)] {
+    private var hoveredTenantSamples: [(HostMetricsChartPreparation.TenantSeries, NornServiceMetricSample)] {
         guard let hoveredDate else { return [] }
-        let tolerance = max(60, Double(window.rawValue) / 80)
-        return tenantSeries.compactMap { series in
-            guard let sample = series.samples.min(by: {
-                abs($0.observedAt.timeIntervalSince(hoveredDate)) < abs($1.observedAt.timeIntervalSince(hoveredDate))
-            }), abs(sample.observedAt.timeIntervalSince(hoveredDate)) <= tolerance else { return nil }
-            return (series, sample)
-        }
+        return chartData.nearestTenantSamples(to: hoveredDate, tolerance: max(60, Double(window.rawValue) / 80))
+    }
+    private var preparationKey: HostChartPreparationKey {
+        let viewportSecond = (scrollPosition.timeIntervalSince1970 / 15).rounded(.down) * 15
+        return HostChartPreparationKey(
+            hostCount: samples.count, hostLast: samples.last?.observedAt, serviceCount: serviceSamples.count,
+            serviceLast: serviceSamples.last?.observedAt, historyRevision: historyRevision, latest: latest, window: window,
+            viewport: Date(timeIntervalSince1970: viewportSecond), includesServiceMetrics: serviceMetricsCollectionEnabled
+        )
+    }
+    private var historyRequestKey: HostChartHistoryRequestKey {
+        let viewportSecond = (scrollPosition.timeIntervalSince1970 / 15).rounded(.down) * 15
+        return HostChartHistoryRequestKey(
+            window: window,
+            viewportEnd: Date(timeIntervalSince1970: viewportSecond + Double(window.rawValue)),
+            includesServiceMetrics: serviceMetricsCollectionEnabled
+        )
     }
 
     var body: some View {
@@ -1105,15 +1050,20 @@ private struct HostMetricsHistoryChart: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("Usage history")
                     .font(.subheadline.weight(.medium))
+                if isLoadingHistory {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .accessibilityLabel("Loading metrics history")
+                }
                 Spacer(minLength: 0)
-                Text("High: CPU \(cpuHighWater.formatted(.number.precision(.fractionLength(1))))% · Memory \(memoryHighWater.formatted(.number.precision(.fractionLength(1))))%")
+                Text("High: CPU \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1))))% · Memory \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1))))%")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
 
             metricLegend
 
-            if allSamples.count < 2 {
+            if chartData.hostSamples.count < 2 {
                 ContentUnavailableView(
                     "Building history",
                     systemImage: "chart.xyaxis.line",
@@ -1121,7 +1071,7 @@ private struct HostMetricsHistoryChart: View {
                     .frame(maxWidth: .infinity, minHeight: 128)
             } else {
                 Chart {
-                    ForEach(plottedSamples) { sample in
+                    ForEach(chartData.hostSamples) { sample in
                         if style == .line {
                             LineMark(
                                 x: .value("Time", sample.observedAt),
@@ -1157,7 +1107,7 @@ private struct HostMetricsHistoryChart: View {
                         }
                     }
 
-                    ForEach(tenantSeries) { series in
+                    ForEach(chartData.tenantSeries) { series in
                         ForEach(series.samples) { sample in
                             LineMark(
                                 x: .value("Time", sample.observedAt),
@@ -1195,8 +1145,8 @@ private struct HostMetricsHistoryChart: View {
                         .foregroundStyle(Color.purple)
                     }
                 }
-                .chartYScale(domain: 0...yDomainUpperBound)
-                .chartXScale(domain: earliestDate...latestDate)
+                .chartYScale(domain: 0...chartData.yDomainUpperBound)
+                .chartXScale(domain: chartData.earliestDate...chartData.latestDate)
                 .chartScrollableAxes(.horizontal)
                 .chartXVisibleDomain(length: TimeInterval(window.rawValue))
                 .chartScrollPosition(x: $scrollPosition)
@@ -1217,13 +1167,13 @@ private struct HostMetricsHistoryChart: View {
                 }
                 .frame(minHeight: 142)
                 .onAppear { scrollToLatest() }
-                .onChange(of: latestDate) { _, _ in if followsLatest { scrollToLatest() } }
+                .onChange(of: chartData.latestDate) { _, _ in if followsLatest { scrollToLatest() } }
                 .onChange(of: scrollPosition) { _, position in
-                    let livePosition = latestDate.addingTimeInterval(-Double(window.rawValue))
+                    let livePosition = chartData.latestDate.addingTimeInterval(-Double(window.rawValue))
                     followsLatest = abs(position.timeIntervalSince(livePosition)) <= max(30, Double(window.rawValue) * 0.02)
                 }
                 .onChange(of: window) { _, _ in scrollToLatest() }
-                .accessibilityLabel("Norn mini CPU and memory use for the last \(window.title). CPU high water \(cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
+                .accessibilityLabel("Norn mini CPU and memory use for the last \(window.title). CPU high water \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
 
                 hoverReadout
 
@@ -1235,6 +1185,44 @@ private struct HostMetricsHistoryChart: View {
                 .foregroundStyle(.tertiary)
             }
         }
+        .task(id: preparationKey) {
+            // Scroll updates arrive continuously; coalesce them before copying
+            // a page into the detached preparation task.
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled else { return }
+            let hostInput = samples
+            let serviceInput = serviceSamples
+            let latestInput = latest
+            let windowInput = window
+            let viewportInput = scrollPosition
+            let includesServiceMetrics = serviceMetricsCollectionEnabled
+            let preparationTask = Task.detached(priority: .userInitiated) {
+                HostMetricsChartPreparation.prepare(
+                    samples: hostInput,
+                    serviceSamples: serviceInput,
+                    latest: latestInput,
+                    window: windowInput,
+                    requestedViewportStart: viewportInput,
+                    includesServiceMetrics: includesServiceMetrics
+                )
+            }
+            let result = await withTaskCancellationHandler(
+                operation: { await preparationTask.value },
+                onCancel: { preparationTask.cancel() }
+            )
+            guard !Task.isCancelled else { return }
+            prepared = result
+        }
+        .task(id: historyRequestKey) {
+            let requestID = UUID()
+            historyRequestID = requestID
+            isLoadingHistory = true
+            await onRequestHistory(window, historyRequestKey.viewportEnd)
+            guard !Task.isCancelled, historyRequestID == requestID else { return }
+            isLoadingHistory = false
+            historyRequestID = nil
+        }
+        .onDisappear { hoveredDate = nil }
     }
 
     private var metricLegend: some View {
@@ -1261,11 +1249,11 @@ private struct HostMetricsHistoryChart: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
-                ForEach(tenantSeries.prefix(3)) { series in
+                ForEach(chartData.tenantSeries.prefix(3)) { series in
                     legendItem(name: series.name, color: series.color)
                 }
-                if tenantSeries.count > 3 {
-                    Text("+\(tenantSeries.count - 3)")
+                if chartData.tenantSeries.count > 3 {
+                    Text("+\(chartData.tenantSeries.count - 3)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -1315,21 +1303,6 @@ private struct HostMetricsHistoryChart: View {
         }
     }
 
-    private func downsampleTenant(_ values: [NornServiceMetricSample]) -> [NornServiceMetricSample] {
-        guard values.count > 500 else { return values }
-        let bucketSize = Int(ceil(Double(values.count) / 125.0))
-        var result: [NornServiceMetricSample] = []
-        for start in stride(from: 0, to: values.count, by: bucketSize) {
-            let bucket = values[start..<min(start + bucketSize, values.count)]
-            if let first = bucket.first { result.append(first) }
-            if let cpuPeak = bucket.max(by: { $0.cpuPercent < $1.cpuPercent }) { result.append(cpuPeak) }
-            if let memoryPeak = bucket.max(by: { $0.memoryPercent < $1.memoryPercent }) { result.append(memoryPeak) }
-            if let last = bucket.last { result.append(last) }
-        }
-        return Array(Dictionary(result.map { ($0.observedAt, $0) }, uniquingKeysWith: { first, _ in first }).values)
-            .sorted { $0.observedAt < $1.observedAt }
-    }
-
     private func updateHover(at location: CGPoint, proxy: ChartProxy, geometry: GeometryProxy) {
         guard let plotFrame = proxy.plotFrame else { return }
         let frame = geometry[plotFrame]
@@ -1342,7 +1315,7 @@ private struct HostMetricsHistoryChart: View {
 
     private func scrollToLatest() {
         followsLatest = true
-        scrollPosition = latestDate.addingTimeInterval(-Double(window.rawValue))
+        scrollPosition = chartData.latestDate.addingTimeInterval(-Double(window.rawValue))
     }
 
     private func zoomOut() {
@@ -1357,17 +1330,30 @@ private struct HostMetricsHistoryChart: View {
     }
 }
 
-private struct HostTenantMetricSeries: Identifiable {
-    let id: String
-    let name: String
-    let samples: [NornServiceMetricSample]
-    let highWater: Double
-
+private extension HostMetricsChartPreparation.TenantSeries {
     var color: Color {
         let palette: [Color] = [.teal, .orange, .pink, .green, .indigo, .mint, .cyan, .brown]
         let stableIndex = id.utf8.reduce(0) { (value, byte) in (value &* 31 &+ Int(byte)) & 0x7fff_ffff }
         return palette[stableIndex % palette.count]
     }
+}
+
+private struct HostChartPreparationKey: Hashable {
+    let hostCount: Int
+    let hostLast: Date?
+    let serviceCount: Int
+    let serviceLast: Date?
+    let historyRevision: UInt64
+    let latest: NornHostMetrics
+    let window: NornHostMetricsWindow
+    let viewport: Date
+    let includesServiceMetrics: Bool
+}
+
+private struct HostChartHistoryRequestKey: Hashable {
+    let window: NornHostMetricsWindow
+    let viewportEnd: Date
+    let includesServiceMetrics: Bool
 }
 
 private struct HostMetricsTimestamp: View {

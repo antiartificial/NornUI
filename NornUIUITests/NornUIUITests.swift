@@ -41,6 +41,24 @@ final class NornUIUITests: XCTestCase {
     }
 
     @MainActor
+    func testHostOpensAndNavigatesAwayWithMonthOfHistory() throws {
+        let app = fixtureApp()
+        app.launchEnvironment["NORN_UI_HISTORY_STRESS"] = "1"
+        app.launch()
+        app.activate()
+
+        let start = Date()
+        app.typeKey("6", modifierFlags: .command)
+        XCTAssertTrue(app.descendants(matching: .any)["host.header"].waitForExistence(timeout: 5))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "Recent Host content must not wait for all history to render")
+
+        let navigationStart = Date()
+        app.typeKey("3", modifierFlags: .command)
+        XCTAssertTrue(app.staticTexts["operations.header"].waitForExistence(timeout: 5))
+        XCTAssertLessThan(Date().timeIntervalSince(navigationStart), 5, "History preparation must not block navigation")
+    }
+
+    @MainActor
     func testOperationsUsesAvailableDetailHeight() throws {
         let app = fixtureApp()
         app.launch()
