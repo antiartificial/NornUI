@@ -45,6 +45,8 @@ final class ProvisioningStateTests: XCTestCase {
         ])
         XCTAssertEqual(progress.checkpoints.count, 6)
         XCTAssertEqual(progress.checkpoints.first?.state, .active)
+        XCTAssertFalse(progress.checkpoints.contains { $0.phase == "old_nodes_drained" })
+        XCTAssertEqual(progress.checkpoints.first { $0.phase == "infrastructure_applied" }?.state, .active)
     }
 
     func testSuccessfulDispatchReceiptDoesNotMakeMissingPhaseActive() {

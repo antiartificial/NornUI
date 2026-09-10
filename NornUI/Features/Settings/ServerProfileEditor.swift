@@ -18,8 +18,8 @@ struct ServerProfileEditor: View {
 
     let existingProfile: NornServerProfile?
     let onManualSave: (NornServerProfile, String) async throws -> Void
-    let onStartEnrollment: EnrollmentStart
     let onDiscoverCapabilities: CapabilityDiscovery
+    let onStartEnrollment: EnrollmentStart
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -96,10 +96,8 @@ struct ServerProfileEditor: View {
     }
 
     private var primaryActionTitle: String {
-        guard authenticationMethod == .pair else {
-            return existingProfile == nil ? "Connect" : "Save"
-        }
-        return discoveredCapabilities == nil ? "Discover Access" : "Start Pairing"
+        guard authenticationMethod == .pair else { return existingProfile == nil ? "Connect" : "Save" }
+        return discoveredCapabilities == nil ? "Verify Authority" : "Start Pairing"
     }
 
     private var canPerformPrimaryAction: Bool {
@@ -119,6 +117,11 @@ struct ServerProfileEditor: View {
                     TextField("Name", text: $name, prompt: Text("Studio Mini"))
                     TextField("Server URL", text: $address, prompt: Text("https://norn.example.com"))
                         .textContentType(.URL)
+                    if normalizedURL?.host?.isTailscaleHostname == true {
+                        Label("Tailscale endpoints require their normal HTTPS certificate. Verification uses this exact .ts.net URL; NornUI does not discover peers or allow an insecure TLS bypass.", systemImage: "lock.shield")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .disabled(enrollment != nil)
 
@@ -238,17 +241,14 @@ struct ServerProfileEditor: View {
                     )
                         .foregroundStyle(.secondary)
                     if discoveredCapabilities?.isFleetAuthorityOnly == true {
-                        Label("This authority intentionally omits runtime events and app/host/release access.", systemImage: "lock.shield")
+                        Label("This authority intentionally omits runtime events and app, host, and release access.", systemImage: "lock.shield")
                             .foregroundStyle(.secondary)
-                        Toggle("Request operator access (api:write)", isOn: $allowAppChanges)
-                        Text("The protected Fleet runner retains its separate exact-identity authority. An administrator approves this Mac out of band.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        Toggle("Request capacity-plan access (api:write)", isOn: $allowAppChanges)
                     } else {
                         Toggle("Manage apps and recovery", isOn: $allowAppChanges)
                         Toggle("Run platform maintenance", isOn: $allowPlatformOperations)
                         Toggle("Run host assurance", isOn: $allowHostOperations)
-                        Toggle("Manage fleet capacity", isOn: $allowFleetOperations)
+                        Toggle("Manage Fleet capacity (api:write)", isOn: $allowFleetOperations)
                         Toggle("Open audited terminal sessions", isOn: $allowTerminalSessions)
                     }
                 }
@@ -293,9 +293,6 @@ struct ServerProfileEditor: View {
                 guard let capabilities = discoveredCapabilities else {
                     let discovered = try await onDiscoverCapabilities(profile)
                     discoveredCapabilities = discovered
-                    // Scope controls change meaning for an authority-only endpoint.
-                    // Stop here so the operator can review that contract before asking
-                    // an administrator to create a device enrollment.
                     if discovered.isFleetAuthorityOnly {
                         allowAppChanges = false
                         allowPlatformOperations = false
@@ -358,5 +355,9 @@ struct ServerProfileEditor: View {
 private extension String {
     var isLoopbackHost: Bool {
         self == "localhost" || self == "127.0.0.1" || self == "::1"
+    }
+
+    var isTailscaleHostname: Bool {
+        lowercased().hasSuffix(".ts.net")
     }
 }

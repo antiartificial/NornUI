@@ -149,14 +149,27 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     var auth: Authentication
     var endpoints: [String: String]
     var environment: Environment? = nil
-    /// An authority-only Fleet endpoint intentionally does not expose the app,
-    /// host, release, or event runtime. This is negotiated before any of those
-    /// routes are requested.
+    /// `fleet-only` exposes the infrastructure authority, not a runtime
+    /// control-plane. Clients must not infer app or host state from it.
     var authority: String? = nil
 
     var isFleetAuthorityOnly: Bool {
         authority == "fleet-only" || features.contains("fleet-authority-only-v1")
     }
+    /// Compatibility capability documents may list supported scopes, but do
+    /// not identify the caller. Only an explicit authenticated principal is
+    /// evidence for enabling privileged UI actions.
+    var authenticatedPrincipal: Authentication.Principal? {
+        guard let principal = auth.principal, principal.authenticated else { return nil }
+        return principal
+    }
+
+    var grantedScopes: Set<String> { Set(authenticatedPrincipal?.scopes ?? []) }
+
+    /// Environment identity for authority banners. Unlike the legacy release
+    /// model's compatibility default, this never invents an environment.
+    var assertedEnvironmentID: String? { environment?.id }
+    var assertedEnvironmentProfile: String? { environment?.profile }
 
     /// Host metrics are optional so older control planes continue to work without
     /// presenting a connection failure in the Host view.
@@ -164,13 +177,10 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         !isFleetAuthorityOnly && features.contains("host-metrics") && endpoints["hostMetrics"] != nil
     }
 
-	var supportsAppCreation: Bool {
-        !isFleetAuthorityOnly && features.contains("app-creation") && endpoints["appCreation"] != nil
-    }
+	var supportsAppCreation: Bool { !isFleetAuthorityOnly && features.contains("app-creation") && endpoints["appCreation"] != nil }
 
     var supportsDurableAppRecovery: Bool {
-        !isFleetAuthorityOnly &&
-        features.contains("durable-app-recovery-v1") &&
+        !isFleetAuthorityOnly && features.contains("durable-app-recovery-v1") &&
         endpoints["appSnapshots"] != nil &&
         endpoints["appSnapshotRestore"] != nil &&
         endpoints["appRollbacks"] != nil
@@ -191,10 +201,8 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("fleet-runner-attempts-v1") && endpoints["fleetRunnerAttempts"] != nil
     }
 
-    var grantedScopes: Set<String> { Set(auth.principal?.scopes ?? []) }
-
     var canOperateFleet: Bool {
-        !grantedScopes.isDisjoint(with: ["fleet:operate", "api:write", "admin"])
+        !grantedScopes.isDisjoint(with: ["api:write", "admin"])
     }
 
     var supportsFleetGitHub: Bool {
@@ -221,8 +229,8 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     var environmentProfile: String { environment?.profile ?? "development" }
 }
 
-/// The exact evidence staging provides for a production promotion. The server,
-/// not the client, verifies source and artifact equivalence when it is used.
+/// Immutable staging evidence passed unchanged to a production control plane.
+/// The server, rather than the desktop client, verifies this receipt.
 nonisolated struct NornReleaseQualification: Codable, Hashable, Sendable, Identifiable {
     var schemaVersion: String
     var id: String
@@ -243,8 +251,7 @@ nonisolated struct NornReleaseQualification: Codable, Hashable, Sendable, Identi
     var expiryDate: Date? {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let value = fractional.date(from: expiresAt) { return value }
-        return ISO8601DateFormatter().date(from: expiresAt)
+        return fractional.date(from: expiresAt) ?? ISO8601DateFormatter().date(from: expiresAt)
     }
     var isExpired: Bool { expiryDate.map { $0 < .now } ?? true }
     var isV2Signed: Bool {
@@ -270,6 +277,9 @@ nonisolated struct NornReleaseCandidate: Codable, Hashable, Sendable {
     var repository: String
     var repositoryID: String
     var ownerID: String
+    /// Server-derived GitHub visibility. It is part of the signed candidate
+    /// identity and must survive decode/re-encode of DSSE-backed evidence.
+    var repositoryVisibility: String?
     var runID: String
     var runAttempt: String?
     var workflowRef: String
@@ -278,15 +288,80 @@ nonisolated struct NornReleaseCandidate: Codable, Hashable, Sendable {
     var signerWorkflowSHA: String
     var ref: String
     var attestation: NornReleaseAttestation
-    enum CodingKeys: String, CodingKey { case provider, repository, ref, attestation; case repositoryID = "repositoryId"; case ownerID = "ownerId"; case runID = "runId"; case runAttempt = "runAttempt"; case workflowRef, workflowSHA = "workflowSha"; case signerWorkflowRef; case signerWorkflowSHA = "signerWorkflowSha" }
+    enum CodingKeys: String, CodingKey {
+        case provider, repository, repositoryVisibility, ref, attestation
+        case repositoryID = "repositoryId"
+        case ownerID = "ownerId"
+        case runID = "runId"
+        case runAttempt
+        case workflowRef
+        case workflowSHA = "workflowSha"
+        case signerWorkflowRef
+        case signerWorkflowSHA = "signerWorkflowSha"
+    }
 }
 
-nonisolated struct NornReleaseAttestation: Codable, Hashable, Sendable { var issuer: String; var subjectDigest: String; var materialSHA: String; var provenanceURI: String?; var sbomURI: String?; enum CodingKeys: String, CodingKey { case issuer, subjectDigest; case materialSHA = "materialSha"; case provenanceURI = "provenanceUri"; case sbomURI = "sbomUri" } }
-nonisolated struct NornDSSEEnvelope: Codable, Hashable, Sendable { var payloadType: String; var payload: String; var signatures: [NornDSSESignature] }
-nonisolated struct NornDSSESignature: Codable, Hashable, Sendable { var keyID: String; var sig: String; enum CodingKeys: String, CodingKey { case sig; case keyID = "keyid" } }
+nonisolated struct NornReleaseAttestation: Codable, Hashable, Sendable {
+    /// The server selects this from its independently verified GitHub OIDC identity.
+    var mode: String? = nil
+    /// Display-only server verifier identity. Never a credential, token, or installation ID.
+    var verifier: String? = nil
+    var verifierIdentity: String? = nil
+    var issuer: String
+    var subjectDigest: String
+    var materialSHA: String
+    var provenanceURI: String?
+    var sbomURI: String?
+    /// Portable, server-signed provenance and SPDX statements used by the
+    /// ordinary-private repository trust path. GitHub-backed adapters omit it.
+    var bundle: NornReleaseAttestationBundle?
+
+    var displayVerifier: String { verifier ?? verifierIdentity ?? "Not reported" }
+    var displayMode: String {
+        switch mode {
+        case "norn-signed-private": "Norn-signed private"
+        case "github-private": "GitHub Enterprise private"
+        case "github-public": "GitHub public"
+        case let value?: value
+        case nil: "Not reported"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case mode, verifier, verifierIdentity, issuer, subjectDigest, bundle
+        case materialSHA = "materialSha"
+        case provenanceURI = "provenanceUri"
+        case sbomURI = "sbomUri"
+    }
+}
+
+nonisolated struct NornReleaseAttestationBundle: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var keyID: String
+    var provenance: NornDSSEEnvelope
+    var sbom: NornDSSEEnvelope
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, provenance, sbom
+        case keyID = "keyId"
+    }
+}
+
+nonisolated struct NornDSSEEnvelope: Codable, Hashable, Sendable {
+    var payloadType: String
+    var payload: String
+    var signatures: [NornDSSESignature]
+}
+
+nonisolated struct NornDSSESignature: Codable, Hashable, Sendable {
+    var keyID: String
+    var sig: String
+
+    enum CodingKeys: String, CodingKey { case sig; case keyID = "keyid" }
+}
 
 nonisolated struct NornReleaseQualificationList: Codable, Hashable, Sendable {
-	var schemaVersion: String
+    var schemaVersion: String
     var qualifications: [NornReleaseQualification]
     var count: Int
 }
@@ -295,10 +370,7 @@ nonisolated struct NornReleaseActionRequest: Codable, Hashable, Sendable {
     var sourceSHA: String
     var artifact: String?
 
-    enum CodingKeys: String, CodingKey {
-        case artifact
-        case sourceSHA = "sourceSha"
-    }
+    enum CodingKeys: String, CodingKey { case artifact; case sourceSHA = "sourceSha" }
 }
 
 nonisolated struct NornReleasePromotionRequest: Codable, Hashable, Sendable {
@@ -306,10 +378,7 @@ nonisolated struct NornReleasePromotionRequest: Codable, Hashable, Sendable {
     var sourceSHA: String
     var artifact: String
 
-    enum CodingKeys: String, CodingKey {
-        case qualification, artifact
-        case sourceSHA = "sourceSha"
-    }
+    enum CodingKeys: String, CodingKey { case qualification, artifact; case sourceSHA = "sourceSha" }
 }
 
 nonisolated struct NornEventStreamInfo: Decodable, Hashable, Sendable {
@@ -410,6 +479,7 @@ nonisolated struct NornFleetGitHubStatus: Codable, Hashable, Sendable {
     var connected: Bool
     var repository: String?
     var installationID: Int64?
+    var environment: String?
     var defaultBranch: String?
     var configPath: String?
     var planWorkflow: String?
@@ -417,7 +487,7 @@ nonisolated struct NornFleetGitHubStatus: Codable, Hashable, Sendable {
     var message: String?
 
     enum CodingKeys: String, CodingKey {
-        case schemaVersion, configured, connected, repository, defaultBranch, configPath, planWorkflow, applyWorkflow, message
+        case schemaVersion, configured, connected, repository, environment, defaultBranch, configPath, planWorkflow, applyWorkflow, message
         case installationID = "installationId"
     }
 

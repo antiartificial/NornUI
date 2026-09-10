@@ -6,6 +6,7 @@
 //
 
 import AppKit
+import Foundation
 import SwiftUI
 
 struct PlatformFeatureView: View {
@@ -73,6 +74,7 @@ struct PlatformFeatureView: View {
     let releases: [NornRelease]
     let activeOperations: [NornOperation]
     let isConnected: Bool
+	let profileID: UUID?
     var onQueue: (NornMaintenanceRequest) -> Void = { _ in }
     var onCopyRelease: (NornRelease) -> Void = { _ in }
 
@@ -81,12 +83,13 @@ struct PlatformFeatureView: View {
     @State private var upgradeMode = "restart"
     @State private var drainMode = "wait"
     @State private var selectedReleaseID: String?
-    @State private var pendingAction: PendingAction?
+    @State private var mutationGate = NornProfileBoundMutationGate<PendingAction>()
     @State private var acknowledgement = false
 
     init(
         snapshot: NornDashboardSnapshot,
         isConnected: Bool = true,
+		profileID: UUID? = nil,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onCopyRelease: @escaping (NornRelease) -> Void = { _ in }
     ) {
@@ -94,6 +97,7 @@ struct PlatformFeatureView: View {
         self.releases = releases
         self.activeOperations = snapshot.activeOperations
         self.isConnected = isConnected
+		self.profileID = profileID
         self.onQueue = onQueue
         self.onCopyRelease = onCopyRelease
         _selectedReleaseID = State(initialValue: releases.first(where: \.current)?.id)
@@ -103,6 +107,7 @@ struct PlatformFeatureView: View {
         releases: [NornRelease],
         activeOperations: [NornOperation] = [],
         isConnected: Bool = true,
+		profileID: UUID? = nil,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onCopyRelease: @escaping (NornRelease) -> Void = { _ in }
     ) {
@@ -110,6 +115,7 @@ struct PlatformFeatureView: View {
         self.releases = releases
         self.activeOperations = activeOperations
         self.isConnected = isConnected
+		self.profileID = profileID
         self.onQueue = onQueue
         self.onCopyRelease = onCopyRelease
         _selectedReleaseID = State(initialValue: releases.first(where: \.current)?.id)
@@ -139,7 +145,7 @@ struct PlatformFeatureView: View {
                         .frame(minWidth: 300, idealWidth: 390, maxWidth: 450)
                 }
 
-                if let pendingAction {
+                if let pendingAction = mutationGate.pending?.intent {
                     ActionReviewCard(
                         action: pendingAction,
                         acknowledgement: $acknowledgement,
@@ -155,7 +161,11 @@ struct PlatformFeatureView: View {
             .frame(maxWidth: 1_250, alignment: .leading)
         }
         .navigationTitle("Releases")
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: pendingAction)
+        .onChange(of: profileID) { _, _ in invalidatePendingAction() }
+        .onChange(of: isConnected) { _, _ in invalidatePendingAction() }
+        .onChange(of: releases) { _, _ in invalidatePendingAction() }
+        .onChange(of: activeOperations) { _, _ in invalidatePendingAction() }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: mutationGate.pending?.id)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: isPlatformBusy)
     }
 
@@ -318,16 +328,33 @@ struct PlatformFeatureView: View {
 
     private func stage(_ action: PendingAction) {
         acknowledgement = false
-        pendingAction = action
+		mutationGate.present(action, profileID: profileID, isAuthorized: isConnected && !isPlatformBusy)
     }
 
     private func clearPendingAction() {
         acknowledgement = false
-        pendingAction = nil
+		mutationGate.dismiss()
+    }
+
+    private func invalidatePendingAction() {
+        acknowledgement = false
+        mutationGate.invalidate()
     }
 
     private func queuePendingAction() {
-        guard let pendingAction else { return }
+        guard let pendingAction = mutationGate.confirmedIntent(
+            profileID: profileID,
+            isAuthorized: isConnected && !isPlatformBusy,
+            isStillCurrent: { action in
+                switch action {
+                case let .rollback(release): releases.contains { $0.sha == release.sha && !$0.current }
+                case .preflight, .upgrade, .smoke: true
+                }
+            }
+        ) else {
+            acknowledgement = false
+            return
+        }
         onQueue(pendingAction.request)
         clearPendingAction()
     }

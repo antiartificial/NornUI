@@ -59,15 +59,24 @@ struct ContentView: View {
             )
         }
 		.sheet(isPresented: $appModel.isShowingCreateApp) {
-			CreateAppSheet { request in await appModel.createApp(request) != nil }
+			CreateAppSheet(
+				profileID: appModel.selectedProfileID,
+				canCreate: appModel.canManageApps,
+				issueMutationContext: { appModel.issueMutationContext() }
+			) { request, context in await appModel.createApp(request, context: context) != nil }
 		}
         .task { await appModel.start() }
     }
 
     private var sidebar: some View {
-        List(selection: $appModel.navigation) {
+        List(selection: guardedNavigation) {
+            if appModel.isServerAuthenticated {
+                Section {
+                    AuthorityContextBanner(appModel: appModel)
+                }
+            }
             Section("Control Room") {
-                ForEach(availableDestinations) { destination in
+                ForEach(appModel.availableNavigationDestinations) { destination in
                     Label(destination.title, systemImage: destination.symbol)
                         .tag(destination)
                         .accessibilityHint("Shows \(destination.title.lowercased())")
@@ -100,9 +109,11 @@ struct ContentView: View {
         .navigationTitle("Norn")
     }
 
-    private var availableDestinations: [NornNavigation] {
-        if appModel.isFleetAuthorityOnly { return [.overview, .fleet] }
-        return NornNavigation.allCases.filter { $0 != .activity }
+    private var guardedNavigation: Binding<NornNavigation> {
+        Binding(
+            get: { appModel.navigation },
+            set: { appModel.navigate(to: $0) }
+        )
     }
 
     @ViewBuilder
@@ -115,77 +126,86 @@ struct ContentView: View {
                 updateMode: $appModel.overviewUpdateMode,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
-                onShowServices: { appModel.navigation = .apps },
-                onShowOperations: { appModel.navigation = .operations },
-                onShowReleases: { appModel.navigation = .platform },
-                onShowHost: { appModel.navigation = .host },
+                onShowServices: { appModel.navigate(to: .apps) },
+                onShowOperations: { appModel.navigate(to: .operations) },
+                onShowReleases: { appModel.navigate(to: .platform) },
+                onShowHost: { appModel.navigate(to: .host) },
                 onOpenService: appModel.openService,
                 onOpenOperation: openOperation
             )
-            .onAppear { appModel.setOverviewVisible(true) }
-            .onDisappear { appModel.setOverviewVisible(false) }
-        case .apps:
+			.onAppear { appModel.setOverviewVisible(true) }
+			.onDisappear { appModel.setOverviewVisible(false) }
+		case .apps:
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
 				selectedAppName: $appModel.selectedAppName,
 				selectedService: $appModel.selectedService,
-				canCreate: appModel.canPerformOperations && appModel.appCreationSupported,
-				supportsRecovery: appModel.canPerformOperations && appModel.durableAppRecoverySupported,
+				canCreate: appModel.canManageApps,
+				supportsRecovery: appModel.canReadRuntime && appModel.durableAppRecoverySupported,
+				canManageRecovery: appModel.canManageAppRecovery,
+				profileID: appModel.selectedProfileID,
+				isRecoveryConnected: appModel.canReadRuntime,
 				onCreate: { appModel.isShowingCreateApp = true },
-				onEnable: { app in Task { await appModel.setAppDeployment(app: app, enabled: true) } },
+				onEnable: { app in
+					let context = appModel.issueMutationContext()
+					Task { await appModel.setAppDeployment(app: app, enabled: true, context: context) }
+				},
 				onLoadSnapshots: { await appModel.appSnapshots(app: $0) },
-				onQueueOperation: { await appModel.queueAppOperation($0) },
+				issueMutationContext: { appModel.issueMutationContext() },
+				onQueueOperation: { request, context in await appModel.queueAppOperation(request, context: context) },
 				onOpenOperation: openOperation
 			)
-        case .delivery:
-            ReleasePipelineFeatureView(
-                apps: appModel.snapshot.apps,
-                deployments: appModel.deployments,
-                environmentID: appModel.environmentID,
-                environmentProfile: appModel.environmentProfile,
-                isSupported: appModel.releasePipelineSupported,
-                isConnected: appModel.canWriteRuntime,
-                onLoadQualifications: { await appModel.releaseQualifications(app: $0) },
-                onPreflight: { await appModel.preflightRelease(app: $0, sourceSHA: $1, artifact: $2) },
-                onDeploy: { await appModel.deployRelease(app: $0, sourceSHA: $1, artifact: $2) },
-                onQualify: { await appModel.qualifyRelease(app: $0, deploymentID: $1) },
-                onPromote: { await appModel.promoteRelease(app: $0, qualification: $1) },
-                onOpenOperation: openOperation
-            )
-        case .operations:
+		case .delivery:
+			ReleasePipelineFeatureView(
+				apps: appModel.snapshot.apps,
+				deployments: appModel.deployments,
+				environmentID: appModel.environmentID,
+				environmentProfile: appModel.environmentProfile,
+				isSupported: appModel.releasePipelineSupported,
+				isConnected: appModel.canReadLegacyReleaseEvidence,
+				profileID: appModel.selectedProfileID,
+				onLoadQualifications: { await appModel.releaseQualifications(app: $0) }
+			)
+		case .operations:
             OperationsFeatureView(
                 snapshot: appModel.snapshot,
-                selectedOperationID: $appModel.selectedOperationID,
+				selectedOperationID: $appModel.selectedOperationID,
                 onRefresh: refresh,
                 onOpenOperation: openOperation
             )
         case .platform:
             PlatformFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canRunPlatformMaintenance,
+				profileID: appModel.selectedProfileID,
                 onQueue: queue
             )
         case .host:
             HostFeatureView(
                 snapshot: appModel.snapshot,
-                isConnected: appModel.canPerformOperations,
+                isConnected: appModel.canReadRuntime,
                 metrics: appModel.hostMetrics,
-                metricHistory: appModel.hostMetricsHistory,
-                serviceMetricHistory: appModel.serviceMetricsHistory,
-                serviceMetricsCollectionEnabled: $appModel.serviceMetricsCollectionEnabled,
-                refreshInterval: $appModel.hostMetricsRefreshInterval,
+				metricHistory: appModel.hostMetricsHistory,
+				serviceMetricHistory: appModel.serviceMetricsHistory,
+				serviceMetricsCollectionEnabled: $appModel.serviceMetricsCollectionEnabled,
+				refreshInterval: $appModel.hostMetricsRefreshInterval,
                 isMetricsSupported: appModel.hostMetricsSupported,
                 canReadRuntime: appModel.canReadRuntime,
                 canWriteRuntime: appModel.canWriteRuntime,
                 canRunAssurance: appModel.canRunHostAssurance,
+				profileID: appModel.selectedProfileID,
                 onQueue: queue,
                 onOpenOperation: openOperation,
-                onOpenService: appModel.openService,
-                onLoadServiceLogs: { await appModel.appLogs(for: $0) },
-                onRestartApp: { await appModel.restartAppAllocations(for: $0) },
+				onOpenService: appModel.openService,
+				onLoadServiceLogs: { await appModel.appLogs(for: $0) },
+				issueMutationContext: { appModel.issueMutationContext() },
+				onRestartApp: { service, context in
+					return await appModel.restartAppAllocations(for: service, context: context)
+				},
                 onRefresh: refreshHost
             )
+			.id(appModel.selectedProfileID)
         case .fleet:
             FleetFeatureView(
                 inventory: appModel.fleetInventory,
@@ -197,22 +217,25 @@ struct ContentView: View {
                 deployments: appModel.deployments,
                 deploymentSteps: appModel.deploymentSteps,
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
+                environmentID: appModel.environmentID,
                 isSupported: appModel.fleetSupported,
-                isAuthorityOnly: appModel.isFleetAuthorityOnly,
                 canPlan: appModel.canOperateFleet,
-                isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
+				profileID: appModel.selectedProfileID,
+                isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
-                onPlan: { pool, desired, size, reason in
+                issueMutationContext: { appModel.issueMutationContext() },
+                onPlan: { pool, desired, size, reason, context in
                     await appModel.planFleetCapacity(
                         pool: pool,
                         desired: desired,
                         size: size,
-                        reason: reason
+                        reason: reason,
+                        context: context
                     ) != nil
                 },
-                onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
-                onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
+				onOpenReview: { planID, context in await appModel.createFleetPullRequest(planID: planID, context: context) },
+				onDispatchApply: { planID, allowDestructive, context in await appModel.dispatchFleetApply(planID: planID, allowDestructive: allowDestructive, context: context) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }
@@ -221,7 +244,7 @@ struct ContentView: View {
             ActivityFeatureView(
                 snapshot: appModel.snapshot,
                 onOpenOperation: openOperation,
-                onShowApps: { appModel.navigation = .apps }
+                onShowApps: { appModel.navigate(to: .apps) }
             )
         }
     }
@@ -245,11 +268,33 @@ struct ContentView: View {
     }
 
     private func queue(_ request: NornMaintenanceRequest) {
-        Task { await appModel.queue(request) }
+        let context = appModel.issueMutationContext()
+        Task { await appModel.queue(request, context: context) }
     }
 
     private func openOperation(_ operation: NornOperation) {
         appModel.openOperation(operation)
+    }
+}
+
+private struct AuthorityContextBanner: View {
+    let appModel: NornAppModel
+
+    private var environment: String {
+        appModel.assertedEnvironmentID?.capitalized ?? "Environment not asserted"
+    }
+
+    private var authority: String {
+        guard let asserted = appModel.assertedAuthority else { return "Authority mode not asserted" }
+        return asserted == "fleet-only" ? "Fleet-only authority" : asserted
+    }
+
+    var body: some View {
+        Label("Authenticated: \(environment) · \(appModel.assertedEnvironmentProfile ?? "Profile not asserted") · \(authority)", systemImage: "checkmark.shield.fill")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(appModel.isFleetAuthorityOnly ? .purple : .green)
+            .accessibilityIdentifier("authority.context.banner")
+            .help("Environment and authority are asserted by the authenticated server response.")
     }
 }
 
@@ -299,9 +344,7 @@ private struct ConnectionCard: View {
         case .connecting:
             return ("Connecting", "Negotiating capabilities", "antenna.radiowaves.left.and.right", .accentColor, true)
         case .online:
-            return appModel.isFleetAuthorityOnly
-                ? ("Fleet authority connected", "Runtime health is not exposed here", "checkmark.circle.fill", .green, false)
-                : ("Online", "Events are live", "checkmark.circle.fill", .green, false)
+            return ("Online", "Events are live", "checkmark.circle.fill", .green, false)
         case .reconnecting:
             return ("Reconnecting", "Cached state remains visible", "arrow.triangle.2.circlepath", .orange, true)
         case .offline:

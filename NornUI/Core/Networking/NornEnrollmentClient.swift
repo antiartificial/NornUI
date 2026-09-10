@@ -57,16 +57,8 @@ actor NornEnrollmentClient: NornEnrollmentClientProtocol {
         self.session = session
     }
 
-    func start(_ request: NornEnrollmentStartRequest) async throws -> NornEnrollmentSession {
-        try await perform(
-            path: "api/v1/enrollments",
-            body: try Self.encode(request),
-            expectedStatus: 201
-        )
-    }
-
-    /// Capabilities are deliberately public so pairing can request only the
-    /// scopes a selected authority accepts, before a credential exists.
+    /// This preflight uses the exact URL entered by the operator. It never
+    /// discovers tailnet peers, weakens TLS, or falls back to HTTP.
     func capabilities() async throws -> NornCapabilities {
         var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/capabilities"))
         request.httpMethod = "GET"
@@ -89,6 +81,14 @@ actor NornEnrollmentClient: NornEnrollmentClientProtocol {
         } catch {
             throw NornEnrollmentClientError.decoding(message: String(describing: error))
         }
+    }
+
+    func start(_ request: NornEnrollmentStartRequest) async throws -> NornEnrollmentSession {
+        try await perform(
+            path: "api/v1/enrollments",
+            body: try Self.encode(request),
+            expectedStatus: 201
+        )
     }
 
     func exchange(_ enrollment: NornEnrollmentSession) async throws -> NornIssuedToken {

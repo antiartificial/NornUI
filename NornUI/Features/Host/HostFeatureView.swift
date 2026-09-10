@@ -27,11 +27,13 @@ struct HostFeatureView: View {
     let canReadRuntime: Bool
     let canWriteRuntime: Bool
     let canRunAssurance: Bool
+	let profileID: UUID?
     var onQueue: (NornMaintenanceRequest) -> Void = { _ in }
     var onOpenOperation: (NornOperation) -> Void = { _ in }
     var onOpenService: (NornService) -> Void = { _ in }
     var onLoadServiceLogs: (NornService) async -> String? = { _ in nil }
-    var onRestartApp: (NornService) async -> Bool = { _ in false }
+	var issueMutationContext: () -> NornMutationContext? = { nil }
+	var onRestartApp: (NornService, NornMutationContext) async -> Bool = { _, _ in false }
     var onRefresh: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -41,7 +43,8 @@ struct HostFeatureView: View {
     @State private var serviceLogs = ""
     @State private var isLoadingServiceLogs = false
     @State private var serviceLogRequestID: UUID?
-    @State private var pendingRestartService: NornService?
+	@State private var restartGate = NornProfileBoundMutationGate<NornService>()
+	@State private var restartContext: NornMutationContext?
     @State private var isRestartingApp = false
     @AppStorage("norn.hostMetricsWindow.v1") private var selectedWindow: NornHostMetricsWindow = .hour1
     @AppStorage("norn.hostMetricsChartStyle.v1") private var chartStyle: HostMetricsChartStyle = .line
@@ -58,11 +61,13 @@ struct HostFeatureView: View {
         canReadRuntime: Bool = true,
         canWriteRuntime: Bool = false,
         canRunAssurance: Bool = true,
+		profileID: UUID? = nil,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onOpenOperation: @escaping (NornOperation) -> Void = { _ in },
         onOpenService: @escaping (NornService) -> Void = { _ in },
         onLoadServiceLogs: @escaping (NornService) async -> String? = { _ in nil },
-        onRestartApp: @escaping (NornService) async -> Bool = { _ in false },
+		issueMutationContext: @escaping () -> NornMutationContext? = { nil },
+		onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
         onRefresh: @escaping () -> Void = {}
     ) {
         self.health = snapshot.health
@@ -79,10 +84,12 @@ struct HostFeatureView: View {
         self.canReadRuntime = canReadRuntime
         self.canWriteRuntime = canWriteRuntime
         self.canRunAssurance = canRunAssurance
+		self.profileID = profileID
         self.onQueue = onQueue
         self.onOpenOperation = onOpenOperation
         self.onOpenService = onOpenService
         self.onLoadServiceLogs = onLoadServiceLogs
+		self.issueMutationContext = issueMutationContext
         self.onRestartApp = onRestartApp
         self.onRefresh = onRefresh
     }
@@ -102,11 +109,13 @@ struct HostFeatureView: View {
         canReadRuntime: Bool = true,
         canWriteRuntime: Bool = false,
         canRunAssurance: Bool = true,
+		profileID: UUID? = nil,
         onQueue: @escaping (NornMaintenanceRequest) -> Void = { _ in },
         onOpenOperation: @escaping (NornOperation) -> Void = { _ in },
         onOpenService: @escaping (NornService) -> Void = { _ in },
         onLoadServiceLogs: @escaping (NornService) async -> String? = { _ in nil },
-        onRestartApp: @escaping (NornService) async -> Bool = { _ in false },
+		issueMutationContext: @escaping () -> NornMutationContext? = { nil },
+		onRestartApp: @escaping (NornService, NornMutationContext) async -> Bool = { _, _ in false },
         onRefresh: @escaping () -> Void = {}
     ) {
         self.health = health
@@ -123,10 +132,12 @@ struct HostFeatureView: View {
         self.canReadRuntime = canReadRuntime
         self.canWriteRuntime = canWriteRuntime
         self.canRunAssurance = canRunAssurance
+		self.profileID = profileID
         self.onQueue = onQueue
         self.onOpenOperation = onOpenOperation
         self.onOpenService = onOpenService
         self.onLoadServiceLogs = onLoadServiceLogs
+		self.issueMutationContext = issueMutationContext
         self.onRestartApp = onRestartApp
         self.onRefresh = onRefresh
     }
@@ -201,22 +212,24 @@ struct HostFeatureView: View {
             )
         }
         .confirmationDialog(
-            "Restart all active allocations for \(pendingRestartService?.app ?? "this app")?",
+            "Restart all active allocations for \(restartGate.pending?.intent.app ?? "this app")?",
             isPresented: Binding(
-                get: { pendingRestartService != nil },
-                set: { if !$0 { pendingRestartService = nil } }
+                get: { restartGate.pending != nil },
+                set: { if !$0 { restartGate.dismiss(); restartContext = nil } }
             ),
             titleVisibility: .visible
         ) {
-            if let service = pendingRestartService {
-                Button("Restart App Allocations", role: .destructive) {
-                    restartAppAllocations(service)
-                }
-            }
-            Button("Cancel", role: .cancel) { pendingRestartService = nil }
+            Button("Restart App Allocations", role: .destructive) { confirmRestartAppAllocations() }
+			Button("Cancel", role: .cancel) { restartGate.dismiss(); restartContext = nil }
         } message: {
             Text("This directly replaces every active Nomad allocation for the app. It is app-wide, is not a durable Norn operation, and does not create a receipt.")
         }
+		.onChange(of: profileID) { _, _ in
+			restartGate.invalidate()
+			restartContext = nil
+			selectedLogService = nil
+			serviceLogRequestID = nil
+		}
     }
 
     private var hostHeader: some View {
@@ -464,9 +477,7 @@ struct HostFeatureView: View {
                                 }
                                 if canWriteRuntime && supportsDirectRuntimeControl(for: service) {
                                     Divider()
-                                    Button("Restart App Allocations…", role: .destructive) {
-                                        pendingRestartService = service
-                                    }
+									Button("Restart App Allocations…", role: .destructive) { presentRestart(for: service) }
                                 }
                             } label: {
                                 Label("Service Actions", systemImage: "ellipsis.circle")
@@ -485,9 +496,7 @@ struct HostFeatureView: View {
                         }
                         if canWriteRuntime && supportsDirectRuntimeControl(for: service) {
                             Divider()
-                            Button("Restart App Allocations…", role: .destructive) {
-                                pendingRestartService = service
-                            }
+							Button("Restart App Allocations…", role: .destructive) { presentRestart(for: service) }
                         }
                     }
                     if service.id != displayedServices.last?.id { Divider().padding(.leading, 34) }
@@ -606,11 +615,22 @@ struct HostFeatureView: View {
         }
     }
 
-    private func restartAppAllocations(_ service: NornService) {
-        pendingRestartService = nil
+    private func presentRestart(for service: NornService) {
+		guard let context = issueMutationContext() else { return }
+		restartContext = context
+		restartGate.present(service, profileID: profileID, isAuthorized: canWriteRuntime)
+	}
+
+	private func confirmRestartAppAllocations() {
+		guard let service = restartGate.confirmedIntent(
+			profileID: profileID,
+			isAuthorized: canWriteRuntime,
+			isStillCurrent: { candidate in services.contains(where: { $0.id == candidate.id }) }
+		), let context = restartContext else { return }
+		restartContext = nil
         isRestartingApp = true
         Task {
-            _ = await onRestartApp(service)
+            _ = await onRestartApp(service, context)
             isRestartingApp = false
         }
     }

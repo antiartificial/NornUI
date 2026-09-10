@@ -26,6 +26,10 @@ The current working milestone includes:
   exact artifact SHA for provenance and rollback.
 - Fleet inventory, node-pool capacity planning, reconciliation checkpoints,
   GitHub review creation, and protected apply dispatch.
+- A read-only delivery desk that treats local development as a direct lane and
+  requires Fleet plus signed release evidence only for managed staging and
+  production. Ordinary private repositories use `norn-signed-private`; GitHub
+  Enterprise private attestations remain an optional backend.
 - A responsive provisioning view with explicit fleet checkpoint states,
   current platform/deployment execution, and an observed ingress-to-allocation
   topology assembled from Norn's fleet, deployment, health, and service
@@ -38,7 +42,10 @@ The current working milestone includes:
   schema migrations, and regional application rollback. Retry-safe intents are
   retained locally until Norn accepts the operation and returns its receipt.
 - Periodically refreshed host CPU, memory, storage, process, and container
-  metrics when the connected server advertises that capability.
+  metrics when the connected server advertises that capability, with persisted
+  per-profile history and optional service resource timelines.
+- Configurable Overview refresh cadence, coalesced refresh requests, and
+  event-cursor reconciliation when reconnecting after a retention gap.
 - Offline cached state, explicit request errors, explicit fixture-backed previews and UI tests,
   keyboard navigation, context menus, VoiceOver labels, semantic status, and
   Reduce Motion/Reduce Transparency support.
@@ -69,10 +76,12 @@ work.
 For observation, provision `api:read,events:read`. Add `api:write` for Macs that
 may create apps, manage app recovery, or prepare and hand off fleet changes.
 Add `platform:operate` or `host:operate` only for Macs that should be allowed to
-queue those workflows. Add `fleet:operate` for fleet review/apply handoff and
-`apps:exec` only when the Mac should be able to request audited terminal
-sessions. An administrator may grant fewer scopes than the Mac requests and
-device enrollment can never grant `admin`.
+queue those workflows. Human fleet planning, review, and apply handoff uses
+`api:write`; `fleet:operate` is reserved for exact GitHub Actions runner
+identities and must not be granted to an engineer's Mac. Add `apps:exec` only
+when the Mac should be able to request audited terminal sessions. An
+administrator may grant fewer scopes than the Mac requests and device
+enrollment can never grant `admin`.
 
 Manual token entry remains available under **Access Token** for older servers
 or recovery. It is not the recommended onboarding path because a pasted token
@@ -83,7 +92,7 @@ does not receive native renewal or device-level revocation metadata.
 - Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.
   The Mac offers the next safe GitHub handoff the server supports, displays
   durable runner attempts and heartbeats, and exposes evidence-gated retry or
-  advance actions when the connected principal has `fleet:operate`.
+  advance actions when the connected human principal has `api:write`.
 - A successful GitHub dispatch is handoff proof only. It does not mark the
   first missing reconciliation phase active. Phase state comes from Norn's
   durable runner-attempt and reconciliation evidence, never from optimistic

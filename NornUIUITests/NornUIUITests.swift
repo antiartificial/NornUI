@@ -124,7 +124,7 @@ final class NornUIUITests: XCTestCase {
         likeDisclosure.click()
         let scheduledJob = app.descendants(matching: .any)["apps.service.like-trove-daily-capture"]
         XCTAssertTrue(scheduledJob.waitForExistence(timeout: 5))
-        XCTAssertTrue((scheduledJob.value as? String)?.contains("Scheduled") == true)
+        XCTAssertTrue(scheduledJob.label.contains("Scheduled"))
 
         XCTAssertTrue(app.buttons["Sort by Status"].waitForExistence(timeout: 5))
         app.buttons["Sort by Status"].click()

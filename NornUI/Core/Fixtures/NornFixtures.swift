@@ -12,7 +12,7 @@ enum NornFixtures {
                 scopes: ["api:read", "events:read", "platform:operate", "host:operate"],
                 websocketBearerHeader: true,
                 websocketQueryToken: false,
-                principal: .init(authenticated: true, subject: "fixture-operator", scopes: ["api:read", "fleet:operate"])
+                principal: .init(authenticated: true, subject: "fixture-operator", scopes: ["api:read", "api:write"])
             ),
             endpoints: [
                 "events": "/api/v1/events",

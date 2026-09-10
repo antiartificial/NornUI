@@ -1,5 +1,8 @@
 import Foundation
 
+/// Requested scopes are derived from the selected authority's public
+/// capability document. The returned credential remains the source of truth
+/// for every action gate after enrollment.
 enum NornEnrollmentScopes {
     static func requested(
         capabilities: NornCapabilities?,
@@ -14,10 +17,9 @@ enum NornEnrollmentScopes {
         }
 
         var scopes = ["api:read", "events:read"]
-        if requestsAPIWrite { scopes.append("api:write") }
+        if requestsAPIWrite || requestsFleetOperations { scopes.append("api:write") }
         if requestsPlatformOperations { scopes.append("platform:operate") }
         if requestsHostOperations { scopes.append("host:operate") }
-        if requestsFleetOperations { scopes.append("fleet:operate") }
         if requestsTerminalSessions { scopes.append("apps:exec") }
         return scopes
     }

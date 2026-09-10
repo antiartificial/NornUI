@@ -267,7 +267,6 @@ actor NornClient: NornClientProtocol {
 		guard !value.isEmpty else { throw NornClientError.invalidResponse }
 		try await performEmpty(path: "api/apps/\(value.pathComponentEncoded)/restart", method: "POST", body: Data("{}".utf8))
 	}
-
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] {
 		try await get("api/v1/apps/\(app.pathComponentEncoded)/snapshots")
 	}

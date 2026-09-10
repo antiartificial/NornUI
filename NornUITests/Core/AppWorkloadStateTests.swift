@@ -62,6 +62,25 @@ final class AppWorkloadStateTests: XCTestCase {
         XCTAssertEqual(AppWorkloadState.resolve(service: service, app: nil), .critical)
     }
 
+    func testActiveAllocationKeepsCriticalScheduledServiceCriticalWithoutRegistration() {
+        let service = makeService(type: "cron", status: "critical", expectedState: "scheduled")
+        let app = makeApp(
+            deploy: true,
+            nomadStatus: "running",
+            healthy: false,
+            allocationSummary: .init(
+                running: 1,
+                active: 1,
+                retained: 0,
+                total: 1,
+                byProcess: ["web": .init(running: 1, active: 1, retained: 0, total: 1)]
+            )
+        )
+
+        XCTAssertTrue(service.isExpectedIdle)
+        XCTAssertEqual(AppWorkloadState.resolve(service: service, app: app), .critical)
+    }
+
     func testActiveCriticalOnDemandRegistrationNeedsAttention() {
         var service = makeService(type: "function", status: "critical", expectedState: "on_demand")
         service.instances = [.init(id: "instance-1", status: "critical")]
@@ -70,7 +89,6 @@ final class AppWorkloadStateTests: XCTestCase {
         XCTAssertTrue(service.needsAttention)
         XCTAssertEqual(AppWorkloadState.resolve(service: service, app: nil), .critical)
     }
-
     func testDisabledResidentServiceIsNeutral() {
         let service = makeService(type: "service", status: "unknown")
         let app = makeApp(deploy: false, nomadStatus: "", healthy: false)

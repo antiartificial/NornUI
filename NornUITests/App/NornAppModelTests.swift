@@ -3,6 +3,52 @@ import XCTest
 
 @MainActor
 final class NornAppModelTests: XCTestCase {
+    private func releaseQualification(id: String, app: String) -> NornReleaseQualification {
+        NornReleaseQualification(
+            schemaVersion: "norn.release-qualification/v2",
+            id: id,
+            deploymentID: "deployment-\(id)",
+            app: app,
+            sourceSHA: String(repeating: "a", count: 40),
+            artifact: "registry.example/\(app)@sha256:\(String(repeating: "b", count: 64))",
+            environment: "staging",
+            issuedAt: "2026-09-01T00:00:00Z",
+            expiresAt: "2026-12-01T00:00:00Z",
+            keyID: "test-key",
+            signature: "test-signature",
+            candidate: NornReleaseCandidate(
+                provider: "github-actions",
+                repository: "example/\(app)",
+                repositoryID: "1",
+                ownerID: "2",
+                repositoryVisibility: "private",
+                runID: "3",
+                runAttempt: "1",
+                workflowRef: "example/\(app)/.github/workflows/release.yml@\(String(repeating: "c", count: 40))",
+                workflowSHA: String(repeating: "c", count: 40),
+                signerWorkflowRef: "example/\(app)/.github/workflows/sign.yml@\(String(repeating: "d", count: 40))",
+                signerWorkflowSHA: String(repeating: "d", count: 40),
+                ref: "refs/heads/main",
+                attestation: NornReleaseAttestation(
+                    mode: "github-private",
+                    verifier: "test verifier",
+                    verifierIdentity: nil,
+                    issuer: "https://token.actions.githubusercontent.com",
+                    subjectDigest: "sha256:\(String(repeating: "b", count: 64))",
+                    materialSHA: String(repeating: "a", count: 40),
+                    provenanceURI: nil,
+                    sbomURI: nil,
+                    bundle: nil
+                )
+            ),
+            dsse: NornDSSEEnvelope(
+                payloadType: "application/vnd.norn.release-qualification.v2+json",
+                payload: "payload-\(id)",
+                signatures: [.init(keyID: "test-key", sig: "test-signature")]
+            )
+        )
+    }
+
     func testFixtureModeStartsOnlineWithoutAConfiguredServer() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -305,7 +351,7 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.connectionState, .online)
         XCTAssertEqual(model.snapshot.services.count, NornFixtures.snapshot.services.count)
 
-        let queued = await model.queue(.platformSmoke)
+        let queued = await model.queue(.platformSmoke, context: model.issueMutationContext())
         XCTAssertEqual(queued?.kind, "platform.smoke")
         XCTAssertEqual(model.navigation, .operations)
         XCTAssertEqual(model.selectedOperationID, queued?.id)
@@ -328,12 +374,12 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertTrue(model.canRunHostAssurance)
         let service = NornFixtures.snapshot.services[0]
         let logs = await model.appLogs(for: service)
-        let restarted = await model.restartAppAllocations(for: service)
+        let restarted = await model.restartAppAllocations(for: service, context: model.issueMutationContext())
         XCTAssertEqual(logs, "logs for \(service.app)")
         XCTAssertTrue(restarted)
     }
 
-    func testManagedRuntimeObservabilityUsesPersistedGrantedScopesWithoutPrincipalDiscovery() async {
+    func testManagedRuntimeObservabilityRequiresPrincipalDiscoveryDespitePersistedGrants() async {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
         defaults.removePersistentDomain(forName: suite)
@@ -343,15 +389,15 @@ final class NornAppModelTests: XCTestCase {
             baseURL: URL(string: "https://norn.example.test")!,
             deviceID: "device-1",
             tokenID: "token-1",
-            grantedScopes: ["api:read"]
+            grantedScopes: ["api:read", "api:write", "host:operate"]
         )
         profileStore.saveProfiles([profile])
         profileStore.saveSelection(profile.id)
-        let model = NornAppModel(profileStore: profileStore, clientFactory: { _ in MockNornClient() })
+        let model = NornAppModel(profileStore: profileStore, clientFactory: { _ in ScopeProbeClient(principal: nil) })
 
         await model.start()
 
-        XCTAssertTrue(model.canReadRuntime)
+        XCTAssertFalse(model.canReadRuntime)
         XCTAssertFalse(model.canWriteRuntime)
         XCTAssertFalse(model.canRunHostAssurance)
     }
@@ -573,12 +619,12 @@ final class NornAppModelTests: XCTestCase {
 
         XCTAssertEqual(model.fleetInventory.document?.cluster.name, "production-nyc3")
         XCTAssertTrue(model.fleetSupported)
-        let plan = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom")
+        let plan = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom", context: model.issueMutationContext())
         XCTAssertEqual(plan?.payload?["proposed"], .object(["desired": .number(3)]))
         XCTAssertEqual(model.fleetPlans.first?.id, plan?.id)
         XCTAssertEqual(model.fleetReconciliations[plan?.id ?? ""], [])
 
-        let retry = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom")
+        let retry = await model.planFleetCapacity(pool: "app", desired: 3, size: "s-4vcpu-8gb", reason: "add headroom", context: model.issueMutationContext())
         XCTAssertEqual(retry?.id, plan?.id, "the same intent must retain its idempotency key across an ambiguous retry")
     }
 
@@ -619,6 +665,453 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot.releases.first?.version, "v2.21.0")
         XCTAssertTrue(model.lastError?.contains("fleet inventory") == true)
         XCTAssertFalse(model.snapshot.operations.contains { $0.updatedAt == NornFixtures.snapshot.operations[0].updatedAt })
+        XCTAssertEqual(model.fleetInventory, .unconfigured)
+        XCTAssertTrue(model.fleetPlans.isEmpty)
+        XCTAssertTrue(model.deployments.isEmpty)
+    }
+
+    func testCompatibilityScopesAndFleetAuthorityFilterActionsAndNavigation() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Compatibility", baseURL: URL(string: "https://norn.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient(principal: nil, authority: "fleet-only") })
+        await model.start()
+
+        XCTAssertFalse(model.isServerAuthenticated)
+        XCTAssertFalse(model.canOperateFleet)
+        XCTAssertEqual(model.availableNavigationDestinations, [.overview, .fleet])
+        let queued = await model.queue(.platformSmoke, context: model.issueMutationContext())
+        XCTAssertNil(queued)
+    }
+
+    func testFleetCapacityUsesHumanAPIWriteNotRunnerOperateScope() async {
+        let cases: [([String], Bool)] = [
+            (["api:read", "fleet:operate"], false),
+            (["api:read", "api:write"], true),
+        ]
+        for (index, item) in cases.enumerated() {
+            let suite = "\(#function)-\(index)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let store = NornProfileStore(defaults: defaults)
+            let profile = NornServerProfile(name: "Fleet", baseURL: URL(string: "https://fleet.example.test")!)
+            store.saveProfiles([profile])
+            store.saveSelection(profile.id)
+            let principal = NornCapabilities.Authentication.Principal(
+                authenticated: true,
+                subject: "engineer",
+                scopes: item.0
+            )
+            let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient(principal: principal) })
+            await model.start()
+            XCTAssertEqual(model.canOperateFleet, item.1)
+        }
+    }
+
+    func testProfileSwitchFailureClearsPriorDashboardAndFleetEvidence() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "First", baseURL: URL(string: "https://first.example.test")!)
+        let second = NornServerProfile(name: "Second", baseURL: URL(string: "https://second.example.test")!)
+        store.saveProfiles([first, second])
+        store.saveSelection(first.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            profile.id == second.id ? ScopeProbeClient(failsCapabilities: true) : ScopeProbeClient()
+        })
+        await model.start()
+        XCTAssertFalse(model.snapshot.services.isEmpty)
+        await model.selectProfile(id: second.id)
+        XCTAssertTrue(model.snapshot.services.isEmpty)
+        XCTAssertTrue(model.snapshot.operations.isEmpty)
+        XCTAssertTrue(model.fleetPlans.isEmpty)
+        XCTAssertTrue(model.deployments.isEmpty)
+        if case .offline = model.connectionState {} else { XCTFail("expected offline") }
+    }
+
+    func testProfileBoundMutationContextRejectsQueuedAIntentAfterAuthorizedSwitchToB() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profileA = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let profileB = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([profileA, profileB])
+        store.saveSelection(profileA.id)
+        let bCalls = MutationCallCounter()
+        let model = NornAppModel(profileStore: store, clientFactory: { profile in
+            CountingMutationClient(counter: profile.id == profileB.id ? bCalls : MutationCallCounter())
+        })
+        await model.start()
+        XCTAssertTrue(model.canManageAppRecovery, "A must have the exact recovery authority before its token is captured")
+        let contextFromA = model.issueMutationContext()
+
+        await model.selectProfile(id: profileB.id)
+        XCTAssertTrue(model.canRunHostAssurance)
+        XCTAssertTrue(model.canManageAppRecovery)
+
+        let host = await model.queue(.hostAssurance, context: contextFromA)
+        let app = await model.queueAppOperation(.snapshot(app: "mail-mcp"), context: contextFromA)
+
+        XCTAssertNil(host)
+        XCTAssertNil(app)
+        let calls = await bCalls.mutations()
+        XCTAssertEqual(calls, [], "An A context must not dispatch through authorized B, even for the same app name")
+    }
+
+    func testProfileSwitchDropsEveryDeferredFleetAndMetricsResponse() async {
+        for endpoint in ["fleetInventory", "fleetReconciliations", "fleetRunnerAttempts", "deployments", "hostMetrics"] {
+            let suite = "\(#function).\(endpoint)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let store = NornProfileStore(defaults: defaults)
+            let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+            let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+            store.saveProfiles([first, second])
+            store.saveSelection(first.id)
+            let oldControl = DeferredResponseControl()
+            let model = NornAppModel(profileStore: store, clientFactory: { profile in
+                profile.id == first.id
+                    ? InterleavingClient(marker: "A", control: oldControl)
+                    : InterleavingClient(marker: "B", control: DeferredResponseControl())
+            })
+            await model.start()
+            await oldControl.block(endpoint)
+
+            let refresh: Task<Void, Never>
+            if endpoint == "hostMetrics" {
+                refresh = Task { await model.refreshHostMetrics() }
+            } else {
+                refresh = Task { await model.refreshFleet() }
+            }
+            await oldControl.waitUntilCalled(endpoint)
+            await model.selectProfile(id: second.id)
+            await oldControl.release(endpoint)
+            await refresh.value
+
+            XCTAssertEqual(model.snapshot.capabilities.serverVersion, "B", "old \(endpoint) response replaced the selected profile")
+            XCTAssertFalse(model.fleetPlans.contains { $0.id.hasPrefix("A-") })
+            XCTAssertFalse(model.fleetReconciliations.keys.contains { $0.hasPrefix("A-") })
+            XCTAssertFalse(model.fleetRunnerAttempts.keys.contains { $0.hasPrefix("A-") })
+            XCTAssertFalse(model.deployments.contains { $0.id.hasPrefix("A-") })
+            XCTAssertNotEqual(model.hostMetrics?.cpu.utilizationPercent, 11)
+            XCTAssertNil(model.lastError)
+        }
+    }
+
+    func testProfileSwitchDropsDeferredMutationSuccessAndFailure() async {
+        for shouldFail in [false, true] {
+            let suite = "\(#function).\(shouldFail)"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let store = NornProfileStore(defaults: defaults)
+            let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+            let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+            store.saveProfiles([first, second])
+            store.saveSelection(first.id)
+            let oldControl = DeferredResponseControl()
+            let model = NornAppModel(profileStore: store, clientFactory: { profile in
+                profile.id == first.id
+                    ? InterleavingClient(marker: "A", control: oldControl)
+                    : InterleavingClient(marker: "B", control: DeferredResponseControl())
+            })
+            await model.start()
+            await oldControl.block("queueMutation", failing: shouldFail)
+            XCTAssertTrue(model.canRunHostAssurance)
+
+            let context = model.issueMutationContext()
+            async let mutation: NornOperation? = model.queue(.hostAssurance, context: context)
+            await oldControl.waitUntilCalled("queueMutation")
+            await model.selectProfile(id: second.id)
+            await oldControl.release("queueMutation")
+            let result = await mutation
+            XCTAssertNil(result)
+            XCTAssertFalse(model.snapshot.operations.contains { $0.id.hasPrefix("A-mutation") })
+            XCTAssertNil(model.lastError, "an old mutation failure must not surface on profile B")
+        }
+    }
+
+    func testExactScopesAndAuthorityGuardNavigationAndOperations() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Fleet", baseURL: URL(string: "https://fleet.example.test")!)
+        store.saveProfiles([profile]); store.saveSelection(profile.id)
+        let principal = NornCapabilities.Authentication.Principal(authenticated: true, subject: "operator", scopes: ["api:read"])
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient(principal: principal, authority: "fleet-only") })
+        await model.start()
+
+        XCTAssertFalse(model.canManageApps)
+        XCTAssertFalse(model.canManageAppRecovery)
+        XCTAssertFalse(model.canRunHostAssurance)
+        XCTAssertFalse(model.canMutateLegacyReleaseEvidence)
+        model.navigate(to: .apps)
+        XCTAssertEqual(model.navigation, .fleet)
+        XCTAssertNotNil(model.lastError)
+        let operation = NornFixtures.snapshot.operations[0]
+        model.openOperation(operation)
+        XCTAssertEqual(model.navigation, .fleet)
+        let hostOperation = await model.queue(.hostAssurance, context: model.issueMutationContext())
+        let appOperation = await model.queueAppOperation(.snapshot(app: "mail-mcp"), context: model.issueMutationContext())
+        XCTAssertNil(hostOperation)
+        XCTAssertNil(appOperation)
+    }
+
+    func testAppRecoveryHostAndLegacyReleaseControlsRequireTheirExactReturnedScopes() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Scoped", baseURL: URL(string: "https://scoped.example.test")!)
+        store.saveProfiles([profile]); store.saveSelection(profile.id)
+        let readOnly = NornCapabilities.Authentication.Principal(authenticated: true, subject: "reader", scopes: ["api:read"])
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in
+            ScopeProbeClient(principal: readOnly, supportsAppCreation: true, supportsReleasePipeline: true)
+        })
+        await model.start()
+        XCTAssertFalse(model.canManageApps, "Enable deployment must require api:write plus app capability")
+        XCTAssertFalse(model.canManageAppRecovery, "Snapshot/migrate/prune/restore/rollback must require api:write plus recovery capability")
+        XCTAssertFalse(model.canRunHostAssurance, "Host assurance must not inherit api:read")
+        XCTAssertFalse(model.canMutateLegacyReleaseEvidence, "Legacy release mutation must require authenticated api:write")
+        for request in [
+            NornAppOperationRequest.snapshot(app: "mail-mcp"),
+            .migrate(app: "mail-mcp", ref: "HEAD"),
+            .pruneSnapshots(app: "mail-mcp", keep: 2),
+            .restoreSnapshot(app: "mail-mcp", snapshot: "safe.dump"),
+            .rollback(app: "mail-mcp", regions: [])
+        ] {
+            let operation = await model.queueAppOperation(request, context: model.issueMutationContext())
+            XCTAssertNil(operation)
+        }
+        let assurance = await model.queue(.hostAssurance, context: model.issueMutationContext())
+        XCTAssertNil(assurance)
+
+        let writableDefaults = UserDefaults(suiteName: "\(suite).writer")!
+        writableDefaults.removePersistentDomain(forName: "\(suite).writer")
+        let writableStore = NornProfileStore(defaults: writableDefaults)
+        let writableProfile = NornServerProfile(name: "Writer", baseURL: URL(string: "https://writer.example.test")!)
+        writableStore.saveProfiles([writableProfile]); writableStore.saveSelection(writableProfile.id)
+        let writer = NornCapabilities.Authentication.Principal(authenticated: true, subject: "writer", scopes: ["api:read", "api:write", "host:operate"])
+        let writableModel = NornAppModel(profileStore: writableStore, clientFactory: { _ in
+            ScopeProbeClient(principal: writer, supportsAppCreation: true, supportsReleasePipeline: true)
+        })
+        await writableModel.start()
+        XCTAssertTrue(writableModel.canManageApps)
+        XCTAssertTrue(writableModel.canManageAppRecovery)
+        XCTAssertTrue(writableModel.canRunHostAssurance)
+        XCTAssertTrue(writableModel.canMutateLegacyReleaseEvidence)
+    }
+
+    func testAuthorityBannerAssertionsDoNotInventEnvironmentOrMini() async {
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.auth.principal = .init(authenticated: true, subject: "operator", scopes: ["api:read"])
+        capabilities.authority = nil
+        capabilities.environment = nil
+        XCTAssertNil(capabilities.assertedEnvironmentID)
+        XCTAssertNil(capabilities.assertedEnvironmentProfile)
+        XCTAssertNil(capabilities.authority)
+        XCTAssertFalse(capabilities.isFleetAuthorityOnly)
+
+        capabilities.authority = "fleet-only"
+        capabilities.environment = .init(id: "staging", profile: "managed")
+        XCTAssertTrue(capabilities.isFleetAuthorityOnly)
+        XCTAssertEqual(capabilities.assertedEnvironmentID, "staging")
+        XCTAssertEqual(capabilities.assertedEnvironmentProfile, "managed")
+    }
+
+    func testProfileBoundaryClearsPriorErrorBeforeTheNextProfileConnects() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let first = NornServerProfile(name: "A", baseURL: URL(string: "https://a.example.test")!)
+        let second = NornServerProfile(name: "B", baseURL: URL(string: "https://b.example.test")!)
+        store.saveProfiles([first, second]); store.saveSelection(first.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in ScopeProbeClient() })
+        await model.start()
+        model.lastError = "A-only failure"
+        await model.selectProfile(id: second.id)
+        XCTAssertEqual(model.selectedProfileID, second.id)
+        XCTAssertNil(model.lastError)
+    }
+
+    func testEventReconnectFailureKeepsOnlyProfileKeyedCacheMarkedStale() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Event", baseURL: URL(string: "https://events.example.test")!)
+        store.saveProfiles([profile]); store.saveSelection(profile.id)
+        let counter = EventReconnectCounter()
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in EventReconnectFailureClient(counter: counter) })
+        await model.start()
+        model.hostMetrics = NornFixtures.hostMetrics
+        await counter.waitUntilRefreshStarts()
+        // A failed event stream already puts this profile in reconnecting, and
+        // the next stream may immediately begin another reconnect cycle after
+        // the authoritative refresh fails. Assert the durable observable
+        // contract instead of sampling the transient offline state.
+        XCTAssertTrue(model.hasStaleCachedConnectionState)
+        XCTAssertFalse(model.snapshot.services.isEmpty)
+        XCTAssertTrue(model.hostMetrics?.stale == true, "Retained host metrics must be marked stale through reconnect and offline transitions")
+        XCTAssertNotNil(model.lastError)
+    }
+
+    func testReleaseQualificationLoaderDropsDelayedEvidenceAfterProfileSwitch() async {
+        let loader = ReleaseQualificationEvidenceLoader()
+        let control = ContextLoadControl()
+        let app = "orders"
+        let first = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
+        let second = NornProfileAppContext(profileID: UUID(), appID: app, isActive: true)
+        let firstEvidence = releaseQualification(id: "A-evidence", app: app)
+        let secondEvidence = releaseQualification(id: "B-evidence", app: app)
+
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [firstEvidence] } }
+        await control.waitUntilStarted("A")
+
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [secondEvidence] } }
+        await control.waitUntilStarted("B")
+        XCTAssertTrue(loader.qualifications.isEmpty, "The coordinated B transition clears A evidence before B returns")
+        await control.release("B")
+        await secondLoad.value
+        XCTAssertEqual(loader.loadedContext, second)
+        XCTAssertEqual(loader.qualifications.map(\.id), ["B-evidence"])
+
+        await control.release("A")
+        await firstLoad.value
+        XCTAssertEqual(loader.loadedContext, second, "Delayed evidence from profile A must not appear under profile B")
+        XCTAssertEqual(loader.qualifications.map(\.id), ["B-evidence"], "Only B's signed evidence may be rendered after A returns")
+    }
+
+    func testReleaseQualificationLoaderDropsDelayedEvidenceAfterAppSwitch() async {
+        let loader = ReleaseQualificationEvidenceLoader()
+        let control = ContextLoadControl()
+        let profileID = UUID()
+        let first = NornProfileAppContext(profileID: profileID, appID: "orders", isActive: true)
+        let second = NornProfileAppContext(profileID: profileID, appID: "billing", isActive: true)
+        let firstEvidence = releaseQualification(id: "orders-evidence", app: "orders")
+        let secondEvidence = releaseQualification(id: "billing-evidence", app: "billing")
+
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [firstEvidence] } }
+        await control.waitUntilStarted("A")
+
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [secondEvidence] } }
+        await control.waitUntilStarted("B")
+        await control.release("B")
+        await secondLoad.value
+        await control.release("A")
+        await firstLoad.value
+
+        XCTAssertEqual(loader.loadedContext, second, "Evidence fetched for orders must not appear while billing is selected")
+        XCTAssertEqual(loader.qualifications.map(\.id), ["billing-evidence"])
+    }
+
+    func testAppRecoverySnapshotLoaderCannotRestoreDelayedFilenamesIntoNewApp() async {
+        let loader = AppRecoverySnapshotLoader()
+        let control = ContextLoadControl()
+        let profileID = UUID()
+        let first = NornProfileAppContext(profileID: profileID, appID: "orders", isActive: true)
+        let second = NornProfileAppContext(profileID: profileID, appID: "billing", isActive: true)
+        var oldSnapshot = NornFixtures.appSnapshots[0]
+        oldSnapshot.filename = "orders-only.dump"
+        var currentSnapshot = NornFixtures.appSnapshots[0]
+        currentSnapshot.filename = "billing-current.dump"
+
+        let firstLoad = Task { await loader.reload(for: first) { _ in await control.wait(for: "A"); return [oldSnapshot] } }
+        await control.waitUntilStarted("A")
+
+        let secondLoad = Task { await loader.reload(for: second) { _ in await control.wait(for: "B"); return [currentSnapshot] } }
+        await control.waitUntilStarted("B")
+        XCTAssertTrue(loader.snapshots.isEmpty, "The coordinated B transition clears restore candidates before B returns")
+        await control.release("B")
+        await secondLoad.value
+        await control.release("A")
+        await firstLoad.value
+
+        XCTAssertEqual(loader.loadedContext, second)
+        XCTAssertEqual(loader.snapshots.map(\.filename), ["billing-current.dump"], "A delayed response must not make an old filename restorable in the current app")
+    }
+
+    func testReleaseAppSelectionNormalizesStaleASelectionForBDifferentAppSet() {
+        var appA = NornFixtures.snapshot.apps[0]
+        appA.spec.name = "orders"
+        var appB = NornFixtures.snapshot.apps[0]
+        appB.spec.name = "billing"
+
+        let selectedOnA = NornReleaseAppSelection.normalized("orders", in: [appA])
+        let selectedOnB = NornReleaseAppSelection.normalized(selectedOnA, in: [appB])
+
+        XCTAssertEqual(selectedOnB, "billing", "A nonempty stale selection must normalize to B's available application")
+    }
+
+    func testDraftEnableConfirmationCannotDispatchToAuthorizedProfileBWithTheSameAppName() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let appName = "orders"
+        var gate = NornProfileBoundMutationGate<String>()
+        var profileBMutationCalls = 0
+
+        gate.present(appName, profileID: profileA, isAuthorized: true)
+        if let appID = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == appName }) {
+            XCTAssertEqual(appID, appName)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0, "An A draft confirmation must not enable the same-named app through B's authorized client")
+    }
+
+    func testCreateDraftPresentationCannotDispatchToAuthorizedProfileB() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let request = NornCreateAppRequest(name: "orders", kind: .endpoint, port: 8080)
+        var gate = NornProfileBoundMutationGate<NornCreateAppRequest>()
+        var profileBMutationCalls = 0
+
+        gate.present(request, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == request }) {
+            XCTAssertEqual(dispatched, request)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
+    }
+
+    func testFleetCapacityPresentationCannotDispatchToAuthorizedProfileBWithTheSamePool() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let pool = "app"
+        var gate = NornProfileBoundMutationGate<String>()
+        var profileBMutationCalls = 0
+
+        gate.present(pool, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == pool }) {
+            XCTAssertEqual(dispatched, pool)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
+    }
+
+    func testPlatformActionPresentationCannotDispatchToAuthorizedProfileB() {
+        let profileA = UUID()
+        let profileB = UUID()
+        let request = NornMaintenanceRequest.platformSmoke
+        var gate = NornProfileBoundMutationGate<NornMaintenanceRequest>()
+        var profileBMutationCalls = 0
+
+        gate.present(request, profileID: profileA, isAuthorized: true)
+        if let dispatched = gate.confirmedIntent(profileID: profileB, isAuthorized: true, isStillCurrent: { $0 == request }) {
+            XCTAssertEqual(dispatched, request)
+            profileBMutationCalls += 1
+        }
+
+        XCTAssertEqual(profileBMutationCalls, 0)
     }
 
     func testDeviceEnrollmentPersistsOnlyManagedMetadataAndKeychainCredential() async throws {
@@ -760,7 +1253,7 @@ private struct FleetAuthorityOnlyClient: NornClientProtocol {
 private struct MockNornClient: NornClientProtocol {
     func capabilities() async throws -> NornCapabilities {
         var capabilities = NornFixtures.snapshot.capabilities
-        capabilities.auth.principal = nil
+        capabilities.auth.principal?.scopes.append(contentsOf: ["platform:operate", "host:operate"])
         return capabilities
     }
     func hostMetrics() async throws -> NornHostMetrics { NornFixtures.hostMetrics }
@@ -1028,6 +1521,38 @@ private actor RefreshTrackingClient: NornClientProtocol {
     }
 }
 
+private actor MutationCallCounter {
+    private var values: [String] = []
+    func record(_ value: String) { values.append(value) }
+    func mutations() -> [String] { values }
+}
+
+private struct CountingMutationClient: NornClientProtocol {
+    let counter: MutationCallCounter
+    private let base = MockNornClient()
+
+    func capabilities() async throws -> NornCapabilities {
+        var capabilities = try await base.capabilities()
+        capabilities.auth.principal?.scopes.append("api:write")
+        return capabilities
+    }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation {
+        await counter.record("app:\(request.app)")
+        return try await base.queue(.hostAssurance, idempotencyKey: idempotencyKey)
+    }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation {
+        await counter.record("maintenance")
+        return try await base.queue(request, idempotencyKey: idempotencyKey)
+    }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { base.events(after: cursor) }
+}
+
 private struct FailingMetricsClient: NornClientProtocol {
     private let base = MockNornClient()
 
@@ -1049,6 +1574,247 @@ private struct FailingMetricsClient: NornClientProtocol {
 
     private enum MetricsError: Error {
         case unavailable
+    }
+}
+
+private struct ScopeProbeClient: NornClientProtocol {
+    let principal: NornCapabilities.Authentication.Principal?
+    let authority: String?
+    let failsCapabilities: Bool
+    let supportsAppCreation: Bool
+    let supportsReleasePipeline: Bool
+    private let base = MockNornClient()
+
+    init(
+        principal: NornCapabilities.Authentication.Principal? = NornFixtures.snapshot.capabilities.auth.principal,
+        authority: String? = nil,
+        failsCapabilities: Bool = false,
+        supportsAppCreation: Bool = false,
+        supportsReleasePipeline: Bool = false
+    ) {
+        self.principal = principal
+        self.authority = authority
+        self.failsCapabilities = failsCapabilities
+        self.supportsAppCreation = supportsAppCreation
+        self.supportsReleasePipeline = supportsReleasePipeline
+    }
+
+    func capabilities() async throws -> NornCapabilities {
+        if failsCapabilities { throw URLError(.cannotConnectToHost) }
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.auth.principal = principal
+        capabilities.authority = authority
+        if authority == "fleet-only" { capabilities.features.append("fleet-authority-only-v1") }
+        if supportsAppCreation {
+            capabilities.features.append("app-creation")
+            capabilities.endpoints["appCreation"] = "/api/v1/apps"
+        }
+        if supportsReleasePipeline {
+            capabilities.features.append(contentsOf: ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"])
+        }
+        return capabilities
+    }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func fleetInventory() async throws -> NornFleetInventory { try await base.fleetInventory() }
+    func fleetPlans() async throws -> [NornOperation] { try await base.fleetPlans() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation { try await base.queue(request, idempotencyKey: idempotencyKey) }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { base.events(after: cursor) }
+}
+
+private enum DeferredResponseError: Error { case unavailable }
+
+/// A deterministic test double: an endpoint cannot finish until the test
+/// explicitly releases it. This makes A→B profile-switch races reproducible
+/// without sleeps or timing assumptions.
+private actor DeferredResponseControl {
+    private var blocked: Set<String> = []
+    private var failures: Set<String> = []
+    private var calls: Set<String> = []
+    private var responseWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var callWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func block(_ endpoint: String, failing: Bool = false) {
+        blocked.insert(endpoint)
+        if failing { failures.insert(endpoint) }
+    }
+
+    func checkpoint(_ endpoint: String) async throws {
+        calls.insert(endpoint)
+        let notified = callWaiters.removeValue(forKey: endpoint) ?? []
+        notified.forEach { $0.resume() }
+        if blocked.contains(endpoint) {
+            await withCheckedContinuation { continuation in
+                responseWaiters[endpoint, default: []].append(continuation)
+            }
+        }
+        if failures.contains(endpoint) { throw DeferredResponseError.unavailable }
+    }
+
+    func waitUntilCalled(_ endpoint: String) async {
+        guard !calls.contains(endpoint) else { return }
+        await withCheckedContinuation { continuation in
+            callWaiters[endpoint, default: []].append(continuation)
+        }
+    }
+
+    func release(_ endpoint: String) {
+        blocked.remove(endpoint)
+        let waiters = responseWaiters.removeValue(forKey: endpoint) ?? []
+        waiters.forEach { $0.resume() }
+    }
+}
+
+/// Continuation-controlled loader responses keep context races deterministic;
+/// no test depends on task scheduling delays or wall-clock sleeps.
+private actor ContextLoadControl {
+    private var started: Set<String> = []
+    private var startWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var responseWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func wait(for key: String) async {
+        started.insert(key)
+        let observers = startWaiters.removeValue(forKey: key) ?? []
+        observers.forEach { $0.resume() }
+        await withCheckedContinuation { continuation in
+            responseWaiters[key, default: []].append(continuation)
+        }
+    }
+
+    func waitUntilStarted(_ key: String) async {
+        guard !started.contains(key) else { return }
+        await withCheckedContinuation { continuation in
+            startWaiters[key, default: []].append(continuation)
+        }
+    }
+
+    func release(_ key: String) {
+        let waiters = responseWaiters.removeValue(forKey: key) ?? []
+        waiters.forEach { $0.resume() }
+    }
+}
+
+private struct InterleavingClient: NornClientProtocol {
+    let marker: String
+    let control: DeferredResponseControl
+    private let base = MockNornClient()
+
+    func capabilities() async throws -> NornCapabilities {
+        var capabilities = try await base.capabilities()
+        capabilities.serverVersion = marker
+        capabilities.features.append("app-creation")
+        capabilities.endpoints["appCreation"] = "/api/v1/apps"
+        capabilities.auth.principal?.scopes = ["api:read", "api:write", "fleet:operate", "host:operate", "platform:operate"]
+        capabilities.environment = .init(id: marker == "A" ? "development" : "staging", profile: "profile-\(marker)")
+        return capabilities
+    }
+
+    func hostMetrics() async throws -> NornHostMetrics {
+        try await control.checkpoint("hostMetrics")
+        var metrics = NornFixtures.hostMetrics
+        metrics.cpu.utilizationPercent = marker == "A" ? 11 : 77
+        return metrics
+    }
+    func health() async throws -> NornHealth { try await base.health() }
+    func hostStatus() async throws -> NornHostStatus { try await base.hostStatus() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func apps() async throws -> [NornAppStatus] { try await base.apps() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func fleetInventory() async throws -> NornFleetInventory {
+        try await control.checkpoint("fleetInventory")
+        return try await base.fleetInventory()
+    }
+    func fleetPlans() async throws -> [NornOperation] {
+        try await control.checkpoint("fleetPlans")
+        return [plan]
+    }
+    func fleetReconciliations(planID: String) async throws -> NornFleetReconciliationList {
+        try await control.checkpoint("fleetReconciliations")
+        return .init(schemaVersion: "norn.fleet-reconciliation/v1", planID: planID, reconciliations: [], count: 0)
+    }
+    func fleetRunnerAttempts(planID: String) async throws -> NornFleetRunnerAttemptList {
+        try await control.checkpoint("fleetRunnerAttempts")
+        return .init(schemaVersion: "norn.fleet-runner-attempt/v1", planID: planID, attempts: [], count: 0, serverTime: .now)
+    }
+    func fleetGitHubStatus() async throws -> NornFleetGitHubStatus { try await base.fleetGitHubStatus() }
+    func deployments() async throws -> [NornDeployment] {
+        try await control.checkpoint("deployments")
+        var deployment = NornFixtures.deployments[0]
+        deployment.id = "\(marker)-deployment"
+        return [deployment]
+    }
+    func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] {
+        try await control.checkpoint("deploymentSteps")
+        return []
+    }
+    func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation {
+        try await control.checkpoint("queueAppOperation")
+        var operation = plan
+        operation.id = "\(marker)-mutation-\(idempotencyKey)"
+        return operation
+    }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation {
+        try await control.checkpoint("queueMutation")
+        var operation = plan
+        operation.id = "\(marker)-mutation-\(idempotencyKey)"
+        return operation
+    }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
+        AsyncThrowingStream { _ in }
+    }
+
+    private var plan: NornOperation {
+        var operation = NornFixtures.snapshot.operations[0]
+        operation.id = "\(marker)-plan"
+        operation.kind = "fleet.capacity-plan"
+        return operation
+    }
+}
+
+private actor EventReconnectCounter {
+    private var capabilityCalls = 0
+    private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
+    func nextCapabilitiesShouldFail() -> Bool {
+        capabilityCalls += 1
+        let isRefresh = capabilityCalls > 1
+        if isRefresh {
+            let waiters = refreshWaiters
+            refreshWaiters = []
+            waiters.forEach { $0.resume() }
+        }
+        return isRefresh
+    }
+    func waitUntilRefreshStarts() async {
+        guard capabilityCalls < 2 else { return }
+        await withCheckedContinuation { refreshWaiters.append($0) }
+    }
+}
+
+private struct EventReconnectFailureClient: NornClientProtocol {
+    private let counter: EventReconnectCounter
+    private let base = MockNornClient()
+
+    init(counter: EventReconnectCounter) { self.counter = counter }
+
+    func capabilities() async throws -> NornCapabilities {
+        if await counter.nextCapabilitiesShouldFail() { throw DeferredResponseError.unavailable }
+        return try await base.capabilities()
+    }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation { try await base.queue(request, idempotencyKey: idempotencyKey) }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
+        AsyncThrowingStream { $0.finish(throwing: DeferredResponseError.unavailable) }
     }
 }
 
