@@ -9,6 +9,29 @@ final class NornClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testHostHistoryUsesBoundedAuthenticatedRangeAndDecodesRetainedSamples() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            return Self.response(request, status: 200, body: """
+            {"schemaVersion":"norn.host-metrics-history/v1","source":"nomad-prometheus","start":"2026-09-10T12:00:00Z","end":"2026-09-10T13:00:00Z","stepSeconds":15,"retentionSeconds":2592000,"host":[{"observedAt":"2026-09-10T12:00:00Z","cpuPercent":14.5,"memoryUsedBytes":100,"memoryTotalBytes":200}],"services":[]}
+            """)
+        }
+        let client = try await makeClient()
+        let start = try Date("2026-09-10T12:00:00Z", strategy: .iso8601)
+        let page = try await client.hostMetricsHistory(range: .init(start: start, end: start.addingTimeInterval(3600), step: 15, includesServices: false))
+        XCTAssertEqual(page.host.count, 1)
+        XCTAssertEqual(page.host.first?.cpuPercent, 14.5)
+        XCTAssertEqual(page.host.first?.memoryPercent, 50)
+        let request = try XCTUnwrap(recorder.lastRequest)
+        XCTAssertEqual(request.url?.path, "/api/v1/host/metrics/history")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+        let items = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(items.first { $0.name == "step" }?.value, "15")
+        XCTAssertEqual(items.first { $0.name == "includeServices" }?.value, "false")
+        XCTAssertEqual(items.first { $0.name == "start" }?.value, "2026-09-10T12:00:00Z")
+    }
+
     func testScaleAppPostsGroupAndAllowsSuspensionAtZero() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in

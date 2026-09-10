@@ -92,6 +92,15 @@ final class NornAppModel {
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
+    var remoteHostMetricsHistory: [NornHostMetricSample] = []
+    var remoteServiceMetricsHistory: [NornServiceMetricSample] = []
+    var historyStatus: String?
+    var usesRemoteMetricsHistory: Bool { !isFixtureMode && snapshot.capabilities.features.contains("host-metrics-history") }
+    @ObservationIgnored private var remoteHistoryCache = NornRemoteHistoryCache()
+    @ObservationIgnored private var remoteHistoryRequestID: UUID?
+    @ObservationIgnored private var remoteHistoryEvictionTask: Task<Void, Never>?
+    @ObservationIgnored private var remoteHistoryView: (window: NornHostMetricsWindow, end: Date, followsLive: Bool)?
+    @ObservationIgnored private var lastRemoteHistoryRefresh: Date?
     var activeDeploymentOperations: [NornOperation] = []
     var scalingRuntimeApps: Set<String> = []
     var runtimeScaleFeedback: [String: String] = [:]
@@ -863,10 +872,21 @@ final class NornAppModel {
         guard profileID == selectedProfileID else { return }
         isHostVisible = isVisible
         if isVisible {
+            remoteHistoryEvictionTask?.cancel()
             startHostMetricsPollingIfNeeded()
         } else {
             stopHostMetricsPolling()
             historyRequestGeneration &+= 1
+            remoteHistoryRequestID = nil
+            remoteHistoryEvictionTask?.cancel()
+            remoteHistoryEvictionTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(60)) } catch { return }
+                guard let self, !self.isHostVisible else { return }
+                self.remoteHistoryCache = NornRemoteHistoryCache()
+                self.remoteHostMetricsHistory = []
+                self.remoteServiceMetricsHistory = []
+                self.historyStatus = nil
+            }
         }
     }
 
@@ -880,6 +900,12 @@ final class NornAppModel {
         guard !isFixtureMode,
               isHostVisible,
               let profileID = selectedProfile?.id else { return }
+        if usesRemoteMetricsHistory {
+            remoteHistoryView = (window, endingAt, abs(endingAt.timeIntervalSinceNow) < 60)
+            await requestRemoteMetricsHistory(window: window, endingAt: endingAt)
+            return
+        }
+        historyStatus = "Locally collected history · Server history unavailable on this version"
         let generation = historyGeneration
         historyRequestGeneration &+= 1
         let requestGeneration = historyRequestGeneration
@@ -935,6 +961,58 @@ final class NornAppModel {
         hostMetricsHistory = result.host
         serviceMetricsHistory = result.service
         hostHistoryPresentationRevision &+= 1
+    }
+
+    private func requestRemoteMetricsHistory(window: NornHostMetricsWindow, endingAt: Date) async {
+        guard let client, isHostVisible, canReadRuntime else { return }
+        let requestID = UUID()
+        remoteHistoryRequestID = requestID
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        let ranges = NornHistoryRange.pages(window: window, endingAt: endingAt, includesServices: serviceMetricsCollectionEnabled)
+        var pages: [NornHostHistoryPage] = []
+        defer {
+            if remoteHistoryRequestID == requestID { remoteHistoryRequestID = nil }
+        }
+        for (index, range) in ranges.enumerated() {
+            guard !Task.isCancelled, isHostVisible, remoteHistoryRequestID == requestID,
+                  isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            historyStatus = "Loading retained history · \(index + 1) of \(ranges.count)"
+            do {
+                let page: NornHostHistoryPage
+                var fetched = false
+                if let cached = remoteHistoryCache.value(for: range) { page = cached }
+                else {
+                    page = try await client.hostMetricsHistory(range: range)
+                    guard !Task.isCancelled, isHostVisible, remoteHistoryRequestID == requestID,
+                          isCurrentConnection(generation: generation, profileID: profileID) else { return }
+                    fetched = true
+                }
+                guard !Task.isCancelled, isHostVisible, remoteHistoryRequestID == requestID,
+                      isCurrentConnection(generation: generation, profileID: profileID) else { return }
+                guard page.schemaVersion == "norn.host-metrics-history/v1", page.source == "nomad-prometheus" else {
+                    throw NornClientError.invalidResponse
+                }
+                if fetched { remoteHistoryCache.insert(page, for: range) }
+                pages.append(page)
+                let snapshotPages = pages
+                let prepared = await Task.detached(priority: .utility) {
+                    NornRemoteHistoryCache.samples(snapshotPages)
+                }.value
+                guard !Task.isCancelled, isHostVisible, remoteHistoryRequestID == requestID,
+                      isCurrentConnection(generation: generation, profileID: profileID) else { return }
+                remoteHostMetricsHistory = prepared.host
+                remoteServiceMetricsHistory = prepared.services
+                hostHistoryPresentationRevision &+= 1
+                historyStatus = prepared.host.isEmpty ? "No retained host samples in this range" : "Server history · Nomad telemetry · \(page.stepSeconds)s samples · Up to 30 days retained"
+            } catch {
+                guard !Task.isCancelled, isHostVisible, remoteHistoryRequestID == requestID,
+                      isCurrentConnection(generation: generation, profileID: profileID) else { return }
+                historyStatus = "History could not finish loading. \(error.localizedDescription)"
+                break
+            }
+        }
+        lastRemoteHistoryRefresh = .now
     }
 
     func setFleetVisible(_ isVisible: Bool) {
@@ -2049,7 +2127,15 @@ final class NornAppModel {
             while !Task.isCancelled {
                 guard self != nil else { return }
                 await self?.refreshHostMetrics(onlyWhileHostVisible: true)
-                await self?.refreshServiceMetricsIfNeeded()
+                if self?.usesRemoteMetricsHistory == true {
+                    if let self, let view = self.remoteHistoryView, view.followsLive,
+                       self.remoteHistoryRequestID == nil,
+                       self.lastRemoteHistoryRefresh.map({ Date.now.timeIntervalSince($0) >= 30 }) ?? true {
+                        await self.requestRemoteMetricsHistory(window: view.window, endingAt: .now)
+                    }
+                } else {
+                    await self?.refreshServiceMetricsIfNeeded()
+                }
 
                 do {
                     try await Task.sleep(for: .seconds(self?.hostMetricsRefreshInterval.rawValue ?? 10))
@@ -2136,6 +2222,14 @@ final class NornAppModel {
     }
 
     private func invalidateHistoryLoading() {
+        remoteHistoryRequestID = nil
+        remoteHistoryEvictionTask?.cancel()
+        remoteHistoryCache = NornRemoteHistoryCache()
+        remoteHostMetricsHistory = []
+        remoteServiceMetricsHistory = []
+        remoteHistoryView = nil
+        lastRemoteHistoryRefresh = nil
+        historyStatus = nil
         historyGeneration &+= 1
         historyRequestGeneration &+= 1
         metricsHistoryRevision &+= 1

@@ -62,6 +62,18 @@ actor NornClient: NornClientProtocol {
         try await get("api/v1/host/metrics")
     }
 
+    func hostMetricsHistory(range: NornHistoryRange) async throws -> NornHostHistoryPage {
+        var components = URLComponents(url: try url(path: "api/v1/host/metrics/history"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "start", value: range.start.ISO8601Format()),
+            URLQueryItem(name: "end", value: range.end.ISO8601Format()),
+            URLQueryItem(name: "step", value: String(range.step)),
+            URLQueryItem(name: "includeServices", value: range.includesServices ? "true" : "false")
+        ]
+        guard let endpoint = components?.url else { throw NornClientError.invalidBaseURL }
+        return try await perform(url: endpoint, method: "GET")
+    }
+
     func resourceSuggestions() async throws -> [NornResourceSuggestion] {
         let response: NornResourceSuggestionList = try await get("api/resources/suggestions")
         return response.suggestions
