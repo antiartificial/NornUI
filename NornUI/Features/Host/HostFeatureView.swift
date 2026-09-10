@@ -1007,17 +1007,21 @@ private struct HostMetricsHistoryChart: View {
     let style: HostMetricsChartStyle
     let onRequestHistory: (NornHostMetricsWindow, Date) async -> Void
 
-    @State private var scrollPosition = Date.now
+    @State private var requestedViewportStart: Date?
     @State private var hoveredDate: Date?
     @State private var followsLatest = true
     @State private var prepared: HostMetricsChartPreparation?
     @State private var historyRequestID: UUID?
     @State private var isLoadingHistory = false
 
+    private var viewport: HostChartViewport {
+        HostChartViewport(latest: latest.observedAt, window: window, requestedStart: requestedViewportStart)
+    }
+
     private var chartData: HostMetricsChartPreparation {
         prepared ?? HostMetricsChartPreparation.prepare(
             samples: [], serviceSamples: [], latest: latest, window: window,
-            requestedViewportStart: latest.observedAt.addingTimeInterval(-Double(window.rawValue)),
+            requestedViewportStart: viewport.start,
             includesServiceMetrics: false
         )
     }
@@ -1029,18 +1033,16 @@ private struct HostMetricsHistoryChart: View {
         return chartData.nearestTenantSamples(to: hoveredDate, tolerance: max(60, Double(window.rawValue) / 80))
     }
     private var preparationKey: HostChartPreparationKey {
-        let viewportSecond = (scrollPosition.timeIntervalSince1970 / 15).rounded(.down) * 15
         return HostChartPreparationKey(
             hostCount: samples.count, hostLast: samples.last?.observedAt, serviceCount: serviceSamples.count,
             serviceLast: serviceSamples.last?.observedAt, historyRevision: historyRevision, latest: latest, window: window,
-            viewport: Date(timeIntervalSince1970: viewportSecond), includesServiceMetrics: serviceMetricsCollectionEnabled
+            viewport: viewport.start, includesServiceMetrics: serviceMetricsCollectionEnabled
         )
     }
     private var historyRequestKey: HostChartHistoryRequestKey {
-        let viewportSecond = (scrollPosition.timeIntervalSince1970 / 15).rounded(.down) * 15
         return HostChartHistoryRequestKey(
             window: window,
-            viewportEnd: Date(timeIntervalSince1970: viewportSecond + Double(window.rawValue)),
+            viewportEnd: viewport.end,
             includesServiceMetrics: serviceMetricsCollectionEnabled
         )
     }
@@ -1065,9 +1067,11 @@ private struct HostMetricsHistoryChart: View {
 
             if chartData.hostSamples.count < 2 {
                 ContentUnavailableView(
-                    "Building history",
+                    isLoadingHistory ? "Loading history" : "No history in this range",
                     systemImage: "chart.xyaxis.line",
-                    description: Text("The chart fills as Norn mini samples arrive."))
+                    description: Text(isLoadingHistory
+                        ? "Current readings remain available while this range loads."
+                        : "Choose another time range or wait for more samples."))
                     .frame(maxWidth: .infinity, minHeight: 128)
             } else {
                 Chart {
@@ -1146,11 +1150,15 @@ private struct HostMetricsHistoryChart: View {
                     }
                 }
                 .chartYScale(domain: 0...chartData.yDomainUpperBound)
-                .chartXScale(domain: chartData.earliestDate...chartData.latestDate)
-                .chartScrollableAxes(.horizontal)
-                .chartXVisibleDomain(length: TimeInterval(window.rawValue))
-                .chartScrollPosition(x: $scrollPosition)
-                .chartXAxis { AxisMarks(values: .automatic(desiredCount: 3)) }
+                // Keep Charts' geometry strictly viewport-sized. A synthetic
+                // month-wide scroll area with a minutes-wide window can hang
+                // Charts layout on the main thread even with very few marks.
+                .chartXScale(domain: chartData.viewportStart...chartData.viewportEnd)
+                .chartXAxis {
+                    AxisMarks(values: [chartData.viewportStart,
+                        chartData.viewportStart.addingTimeInterval(chartData.viewportEnd.timeIntervalSince(chartData.viewportStart) / 2),
+                        chartData.viewportEnd])
+                }
                 .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) }
                 .chartLegend(.hidden)
                 .chartOverlay { proxy in
@@ -1166,35 +1174,28 @@ private struct HostMetricsHistoryChart: View {
                     }
                 }
                 .frame(minHeight: 142)
-                .onAppear { scrollToLatest() }
-                .onChange(of: chartData.latestDate) { _, _ in if followsLatest { scrollToLatest() } }
-                .onChange(of: scrollPosition) { _, position in
-                    let livePosition = chartData.latestDate.addingTimeInterval(-Double(window.rawValue))
-                    followsLatest = abs(position.timeIntervalSince(livePosition)) <= max(30, Double(window.rawValue) * 0.02)
-                }
-                .onChange(of: window) { _, _ in scrollToLatest() }
+                .accessibilityIdentifier("host.history.chart")
                 .accessibilityLabel("Norn mini CPU and memory use for the last \(window.title). CPU high water \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
 
                 hoverReadout
 
                 HStack(spacing: 6) {
-                    Image(systemName: "hand.draw")
-                    Text("Drag the plot to move through history; choose a window or use the zoom controls to change its range.")
+                    Image(systemName: "clock.arrow.circlepath")
+                    Text("Use Earlier and Later to browse history; choose a window to change its range.")
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
             }
         }
         .task(id: preparationKey) {
-            // Scroll updates arrive continuously; coalesce them before copying
-            // a page into the detached preparation task.
+            // Coalesce rapid range changes before preparing the selected page.
             try? await Task.sleep(for: .milliseconds(50))
             guard !Task.isCancelled else { return }
             let hostInput = samples
             let serviceInput = serviceSamples
             let latestInput = latest
             let windowInput = window
-            let viewportInput = scrollPosition
+            let viewportInput = viewport.start
             let includesServiceMetrics = serviceMetricsCollectionEnabled
             let preparationTask = Task.detached(priority: .userInitiated) {
                 HostMetricsChartPreparation.prepare(
@@ -1221,6 +1222,10 @@ private struct HostMetricsHistoryChart: View {
             guard !Task.isCancelled, historyRequestID == requestID else { return }
             isLoadingHistory = false
             historyRequestID = nil
+        }
+        .onChange(of: window) { _, _ in
+            if followsLatest { requestedViewportStart = nil }
+            hoveredDate = nil
         }
         .onDisappear { hoveredDate = nil }
     }
@@ -1260,6 +1265,14 @@ private struct HostMetricsHistoryChart: View {
             }
 
             Spacer(minLength: 0)
+            Button { pageHistory(by: -1) } label: { Label("Earlier", systemImage: "chevron.left") }
+                .disabled(!viewport.canGoOlder)
+                .help("Load the previous time window")
+                .accessibilityIdentifier("host.history.earlier")
+            Button { pageHistory(by: 1) } label: { Label("Later", systemImage: "chevron.right") }
+                .disabled(!viewport.canGoNewer)
+                .help("Load the next time window")
+                .accessibilityIdentifier("host.history.later")
             Button(action: zoomOut) { Image(systemName: "minus.magnifyingglass") }
                 .disabled(window == NornHostMetricsWindow.allCases.last)
                 .help("Show a longer time window")
@@ -1315,7 +1328,15 @@ private struct HostMetricsHistoryChart: View {
 
     private func scrollToLatest() {
         followsLatest = true
-        scrollPosition = chartData.latestDate.addingTimeInterval(-Double(window.rawValue))
+        requestedViewportStart = nil
+        hoveredDate = nil
+    }
+
+    private func pageHistory(by pages: Int) {
+        let next = viewport.shifted(by: pages)
+        followsLatest = next >= viewport.latestStart
+        requestedViewportStart = followsLatest ? nil : next
+        hoveredDate = nil
     }
 
     private func zoomOut() {

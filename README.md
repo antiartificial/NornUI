@@ -45,7 +45,8 @@ The current working milestone includes:
   Host is visible. Recent readings appear first; the selected history window
   loads asynchronously, with per-profile persistence and optional service
   resource timelines. Chart preparation stays off the main UI thread and
-  renders a bounded number of points for the visible range.
+  renders a bounded number of points for the visible range. Earlier/Later
+  controls load adjacent ranges without a month-wide chart scroll surface.
 - Configurable Overview refresh cadence, coalesced refresh requests, and
   event-cursor reconciliation when reconnecting after a retention gap.
 - Offline cached state, explicit request errors, explicit fixture-backed previews and UI tests,

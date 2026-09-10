@@ -44,6 +44,7 @@ final class NornUIUITests: XCTestCase {
     func testHostOpensAndNavigatesAwayWithMonthOfHistory() throws {
         let app = fixtureApp()
         app.launchEnvironment["NORN_UI_HISTORY_STRESS"] = "1"
+        app.launchArguments += ["-norn.hostMetricsWindow.v1", "300"]
         app.launch()
         app.activate()
 
@@ -51,6 +52,16 @@ final class NornUIUITests: XCTestCase {
         app.typeKey("6", modifierFlags: .command)
         XCTAssertTrue(app.descendants(matching: .any)["host.header"].waitForExistence(timeout: 5))
         XCTAssertLessThan(Date().timeIntervalSince(start), 5, "Recent Host content must not wait for all history to render")
+
+        let chart = app.descendants(matching: .any)["host.history.chart"]
+        XCTAssertTrue(chart.waitForExistence(timeout: 5), "Wait for actual chart layout, not only the cached Host header")
+        let earlier = app.buttons["host.history.earlier"]
+        XCTAssertTrue(earlier.waitForExistence(timeout: 5))
+        earlier.click()
+        XCTAssertTrue(chart.waitForExistence(timeout: 5))
+        let later = app.buttons["host.history.later"]
+        XCTAssertTrue(later.waitForExistence(timeout: 5))
+        XCTAssertTrue(later.isEnabled)
 
         let navigationStart = Date()
         app.typeKey("3", modifierFlags: .command)
