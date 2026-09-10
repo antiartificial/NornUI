@@ -1,0 +1,30 @@
+name: NornUI CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nornui-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS build and unit tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+      - name: Build NornUI
+        run: >-
+          xcodebuild -project NornUI.xcodeproj -scheme NornUI
+          -configuration Debug -destination 'platform=macOS'
+          build CODE_SIGNING_ALLOWED=NO
+      - name: Test NornUI unit target
+        run: >-
+          xcodebuild -project NornUI.xcodeproj -scheme NornUI
+          -configuration Debug -destination 'platform=macOS'
+          test -only-testing:NornUITests CODE_SIGNING_ALLOWED=NO

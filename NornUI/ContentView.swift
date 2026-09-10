@@ -47,6 +47,9 @@ struct ContentView: View {
                 onManualSave: { profile, token in
                     try await appModel.saveProfile(profile, token: token)
                 },
+                onDiscoverCapabilities: { profile in
+                    try await appModel.discoverEnrollmentCapabilities(profile: profile)
+                },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
@@ -64,13 +67,14 @@ struct ContentView: View {
     private var sidebar: some View {
         List(selection: $appModel.navigation) {
             Section("Control Room") {
-                ForEach(NornNavigation.allCases.filter { $0 != .activity }) { destination in
+                ForEach(availableDestinations) { destination in
                     Label(destination.title, systemImage: destination.symbol)
                         .tag(destination)
                         .accessibilityHint("Shows \(destination.title.lowercased())")
                 }
             }
 
+            if !appModel.isFleetAuthorityOnly {
             Section("Activity") {
                 VStack(alignment: .leading, spacing: 7) {
                     Label("Inspect Activity", systemImage: NornNavigation.activity.symbol)
@@ -87,12 +91,18 @@ struct ContentView: View {
                 .accessibilityIdentifier("sidebar.activity")
                 .accessibilityHint("Shows the operations and services behind these totals")
             }
+            }
         }
         .safeAreaInset(edge: .bottom) {
             ConnectionCard(appModel: appModel)
                 .padding(10)
         }
         .navigationTitle("Norn")
+    }
+
+    private var availableDestinations: [NornNavigation] {
+        if appModel.isFleetAuthorityOnly { return [.overview, .fleet] }
+        return NornNavigation.allCases.filter { $0 != .activity }
     }
 
     @ViewBuilder
@@ -102,17 +112,24 @@ struct ContentView: View {
             OverviewView(
                 snapshot: appModel.selectedProfile == nil && !appModel.isFixtureMode ? nil : appModel.snapshot,
                 connectionState: appModel.isFixtureMode ? .idle : appModel.connectionState,
+                updateMode: $appModel.overviewUpdateMode,
                 isRefreshing: appModel.isRefreshing,
                 onRefresh: refresh,
                 onShowServices: { appModel.navigation = .apps },
                 onShowOperations: { appModel.navigation = .operations },
                 onShowReleases: { appModel.navigation = .platform },
-                onShowHost: { appModel.navigation = .host }
+                onShowHost: { appModel.navigation = .host },
+                onOpenService: appModel.openService,
+                onOpenOperation: openOperation
             )
+            .onAppear { appModel.setOverviewVisible(true) }
+            .onDisappear { appModel.setOverviewVisible(false) }
         case .apps:
 			AppsView(
 				apps: appModel.snapshot.apps,
 				services: appModel.snapshot.services,
+				selectedAppName: $appModel.selectedAppName,
+				selectedService: $appModel.selectedService,
 				canCreate: appModel.canPerformOperations && appModel.appCreationSupported,
 				supportsRecovery: appModel.canPerformOperations && appModel.durableAppRecoverySupported,
 				onCreate: { appModel.isShowingCreateApp = true },
@@ -121,9 +138,25 @@ struct ContentView: View {
 				onQueueOperation: { await appModel.queueAppOperation($0) },
 				onOpenOperation: openOperation
 			)
+        case .delivery:
+            ReleasePipelineFeatureView(
+                apps: appModel.snapshot.apps,
+                deployments: appModel.deployments,
+                environmentID: appModel.environmentID,
+                environmentProfile: appModel.environmentProfile,
+                isSupported: appModel.releasePipelineSupported,
+                isConnected: appModel.canWriteRuntime,
+                onLoadQualifications: { await appModel.releaseQualifications(app: $0) },
+                onPreflight: { await appModel.preflightRelease(app: $0, sourceSHA: $1, artifact: $2) },
+                onDeploy: { await appModel.deployRelease(app: $0, sourceSHA: $1, artifact: $2) },
+                onQualify: { await appModel.qualifyRelease(app: $0, deploymentID: $1) },
+                onPromote: { await appModel.promoteRelease(app: $0, qualification: $1) },
+                onOpenOperation: openOperation
+            )
         case .operations:
             OperationsFeatureView(
                 snapshot: appModel.snapshot,
+                selectedOperationID: $appModel.selectedOperationID,
                 onRefresh: refresh,
                 onOpenOperation: openOperation
             )
@@ -138,13 +171,21 @@ struct ContentView: View {
                 snapshot: appModel.snapshot,
                 isConnected: appModel.canPerformOperations,
                 metrics: appModel.hostMetrics,
+                metricHistory: appModel.hostMetricsHistory,
+                serviceMetricHistory: appModel.serviceMetricsHistory,
+                serviceMetricsCollectionEnabled: $appModel.serviceMetricsCollectionEnabled,
+                refreshInterval: $appModel.hostMetricsRefreshInterval,
                 isMetricsSupported: appModel.hostMetricsSupported,
+                canReadRuntime: appModel.canReadRuntime,
+                canWriteRuntime: appModel.canWriteRuntime,
+                canRunAssurance: appModel.canRunHostAssurance,
                 onQueue: queue,
                 onOpenOperation: openOperation,
+                onOpenService: appModel.openService,
+                onLoadServiceLogs: { await appModel.appLogs(for: $0) },
+                onRestartApp: { await appModel.restartAppAllocations(for: $0) },
                 onRefresh: refreshHost
             )
-            .onAppear { appModel.setHostMetricsVisible(true) }
-            .onDisappear { appModel.setHostMetricsVisible(false) }
         case .fleet:
             FleetFeatureView(
                 inventory: appModel.fleetInventory,
@@ -157,8 +198,8 @@ struct ContentView: View {
                 deploymentSteps: appModel.deploymentSteps,
                 deploymentVisibilitySupported: appModel.deploymentVisibilitySupported,
                 isSupported: appModel.fleetSupported,
-                canPlan: appModel.canPerformOperations,
-                canOperateFleet: appModel.canOperateFleet,
+                isAuthorityOnly: appModel.isFleetAuthorityOnly,
+                canPlan: appModel.canOperateFleet,
                 isStale: !appModel.isFixtureMode && appModel.connectionState != .online,
                 isRefreshing: appModel.isFleetRefreshing,
                 onRefresh: refreshFleet,
@@ -172,7 +213,6 @@ struct ContentView: View {
                 },
                 onOpenReview: { await appModel.createFleetPullRequest(planID: $0) },
                 onDispatchApply: { await appModel.dispatchFleetApply(planID: $0, allowDestructive: $1) },
-				onAdvanceRunner: { await appModel.advanceFleetRunnerAttempt(planID: $0, attempt: $1) },
 				onOpenOperation: openOperation
             )
             .onAppear { appModel.setFleetVisible(true) }
@@ -209,8 +249,7 @@ struct ContentView: View {
     }
 
     private func openOperation(_ operation: NornOperation) {
-        appModel.selectedOperationID = operation.id
-        appModel.navigation = .operations
+        appModel.openOperation(operation)
     }
 }
 
@@ -260,7 +299,9 @@ private struct ConnectionCard: View {
         case .connecting:
             return ("Connecting", "Negotiating capabilities", "antenna.radiowaves.left.and.right", .accentColor, true)
         case .online:
-            return ("Online", "Events are live", "checkmark.circle.fill", .green, false)
+            return appModel.isFleetAuthorityOnly
+                ? ("Fleet authority connected", "Runtime health is not exposed here", "checkmark.circle.fill", .green, false)
+                : ("Online", "Events are live", "checkmark.circle.fill", .green, false)
         case .reconnecting:
             return ("Reconnecting", "Cached state remains visible", "arrow.triangle.2.circlepath", .orange, true)
         case .offline:

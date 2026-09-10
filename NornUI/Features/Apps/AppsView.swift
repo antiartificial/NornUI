@@ -3,6 +3,8 @@ import SwiftUI
 struct AppsView: View {
     var apps: [NornAppStatus] = []
     let services: [NornService]
+    @Binding var selectedAppName: String?
+    @Binding var selectedService: NornServiceSelection?
     var canCreate = false
     var supportsRecovery = false
     var onCreate: () -> Void = {}
@@ -13,7 +15,6 @@ struct AppsView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var pendingEnable: NornAppStatus?
-    @State private var selectedAppName: String?
     @State private var searchText = ""
     @State private var presentation: AppListPresentation = .grouped
     @State private var activeOnly = false
@@ -121,8 +122,12 @@ struct AppsView: View {
                 .help(canCreate ? "Create a disabled app draft" : "This server does not support app creation")
             }
         }
-        .task { normalizeSelection() }
+        .task {
+            revealLinkedServiceIfNeeded()
+            normalizeSelection()
+        }
         .onChange(of: visibleAppNames) { _, _ in normalizeSelection() }
+        .onChange(of: selectedService) { _, _ in revealLinkedServiceIfNeeded() }
         .confirmationDialog(
             "Enable deployment for \(pendingEnable?.spec.name ?? "this app")?",
             isPresented: Binding(
@@ -190,9 +195,9 @@ struct AppsView: View {
                                 AppGroupRow(
                                     group: group,
                                     isExpanded: expandedApps.contains(group.id),
-                                    isSelected: selectedAppName == group.name,
+                                    isSelected: selectedAppName == group.name && selectedService == nil,
                                     onToggle: { toggleExpansion(group.name) },
-                                    onSelect: { selectedAppName = group.name }
+                                    onSelect: { selectApp(group.name) }
                                 )
                                 if expandedApps.contains(group.id) {
                                     ForEach(group.services) { service in
@@ -200,8 +205,8 @@ struct AppsView: View {
                                             service: service,
                                             app: group.app,
                                             isChild: true,
-                                            isSelected: selectedAppName == service.app,
-                                            onSelect: { selectedAppName = service.app }
+                                            isSelected: selectedService?.matches(service) == true,
+                                            onSelect: { selectService(service) }
                                         )
                                     }
                                     .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
@@ -214,8 +219,8 @@ struct AppsView: View {
                                     service: service,
                                     app: appStatus(for: service.app),
                                     isChild: false,
-                                    isSelected: selectedAppName == service.app,
-                                    onSelect: { selectedAppName = service.app }
+                                    isSelected: selectedService?.matches(service) == true,
+                                    onSelect: { selectService(service) }
                                 )
                                 Divider()
                             }
@@ -250,6 +255,27 @@ struct AppsView: View {
     private func normalizeSelection() {
         if let selectedAppName, visibleAppNames.contains(selectedAppName) { return }
         selectedAppName = visibleAppNames.first
+        selectedService = nil
+    }
+
+    private func selectApp(_ app: String) {
+        selectedAppName = app
+        selectedService = nil
+    }
+
+    private func selectService(_ service: NornService) {
+        selectedAppName = service.app
+        selectedService = NornServiceSelection(service: service)
+    }
+
+    private func revealLinkedServiceIfNeeded() {
+        guard let selectedService,
+              let service = services.first(where: selectedService.matches) else { return }
+        searchText = ""
+        activeOnly = false
+        presentation = .grouped
+        selectedAppName = service.app
+        expandedApps.insert(service.app)
     }
 
     private func toggleExpansion(_ app: String) {
@@ -616,11 +642,22 @@ enum AppWorkloadState: String, Equatable {
         if app?.spec.deploy == false { return .disabled }
         if isScaledToZero(service: service, app: app) { return .scaledToZero }
 
+        let hasObservedWork = service.instances?.isEmpty == false
+            || (app?.allocationSummary?.byProcess?[service.process]?.active ?? 0) > 0
+        switch service.expectedState?.lowercased() {
+        case "disabled": return .disabled
+        case "paused": return .scheduled
+        case "scheduled" where !hasObservedWork: return .scheduled
+        case "on_demand" where !hasObservedWork: return .onDemand
+        default: break
+        }
+
         let rawStatus = service.status.lowercased()
         if ["critical", "failing", "down", "failed"].contains(rawStatus) { return .critical }
         if ["warning", "pending", "degraded"].contains(rawStatus) { return .attention }
         if ["passing", "ok", "up", "healthy"].contains(rawStatus) { return .healthy }
         if rawStatus == "running" { return .active }
+        if hasObservedWork { return .active }
 
         switch service.type.lowercased() {
         case "cron": return .scheduled
@@ -850,6 +887,10 @@ private struct AppRecoveryInspector: View {
 }
 
 #Preview {
-    AppsView(services: NornFixtures.snapshot.services)
+    AppsView(
+        services: NornFixtures.snapshot.services,
+        selectedAppName: .constant(nil),
+        selectedService: .constant(nil)
+    )
         .frame(width: 900, height: 560)
 }

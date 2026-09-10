@@ -34,8 +34,11 @@ struct NornUIApp: App {
             ContentView(appModel: appModel)
                 .frame(minWidth: 900, minHeight: 600)
                 .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    Task { await appModel.refreshManagedCredentialIfNeeded() }
+                    if phase == .active {
+                        Task { await appModel.refreshManagedCredentialIfNeeded() }
+                    } else {
+                        appModel.persistMetricsHistory()
+                    }
                 }
         }
         .defaultSize(width: 1_180, height: 760)
@@ -50,6 +53,7 @@ struct NornUIApp: App {
                 selectedProfileID: appModel.selectedProfileID,
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onDiscoverCapabilities: { try await appModel.discoverEnrollmentCapabilities(profile: $0) },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
                 },
@@ -100,12 +104,28 @@ private struct NornCommands: Commands {
 
         CommandGroup(after: .sidebar) {
             Divider()
-            ForEach(Array(NornNavigation.allCases.enumerated()), id: \.element.id) { index, destination in
+            ForEach(NornNavigation.allCases) { destination in
                 Button("Show \(destination.title)") {
                     appModel.navigation = destination
                 }
-                .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: .command)
+                .keyboardShortcut(navigationShortcut(for: destination), modifiers: .command)
             }
+        }
+    }
+
+    /// Keep established navigation shortcuts stable as destinations are added.
+    /// In particular, Operations remains Command-3 for operators who use the
+    /// keyboard to switch views.
+    private func navigationShortcut(for destination: NornNavigation) -> KeyEquivalent {
+        switch destination {
+        case .overview: "1"
+        case .apps: "2"
+        case .operations: "3"
+        case .fleet: "4"
+        case .platform: "5"
+        case .host: "6"
+        case .activity: "7"
+        case .delivery: "8"
         }
     }
 }

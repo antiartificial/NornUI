@@ -16,6 +16,7 @@ enum NornFixtures {
             ),
             endpoints: [
                 "events": "/api/v1/events",
+                "eventInfo": "/api/v1/events/info",
                 "hostMetrics": "/api/v1/host/metrics",
 				"appSnapshots": "/api/v1/apps/{id}/snapshots",
 				"appSnapshotRestore": "/api/v1/apps/{id}/snapshots/{snapshot}/restore",
@@ -43,7 +44,7 @@ enum NornFixtures {
             service("mail-mcp", process: "mcp", exposure: "private", status: "passing"),
             service("mail-mcp", process: "worker", exposure: "private", status: "passing"),
             service("like-trove", process: "web", exposure: "private", status: "passing"),
-            service("like-trove", process: "daily-capture", exposure: "internal", status: "unknown", type: "cron"),
+            service("like-trove", process: "daily-capture", exposure: "internal", status: "unknown", type: "cron", expectedState: "scheduled", isIdle: true),
             service("vigil-gateway", process: "web", exposure: "private", status: "passing"),
             service("contextdb", process: "web", exposure: "local", status: "unknown")
         ],
@@ -104,6 +105,36 @@ enum NornFixtures {
             availableBytes: 9_126_805_504
         )
     )
+
+    static let hostMetricsHistory: [NornHostMetricSample] = (0..<18).map { index in
+        var metrics = hostMetrics
+        metrics.observedAt = now.addingTimeInterval(Double(index - 17) * 20)
+        metrics.cpu.utilizationPercent = 12 + Double((index * 13) % 34)
+        let fraction = 0.42 + Double((index * 7) % 18) / 100
+        metrics.memory.usedBytes = UInt64(Double(metrics.memory.totalBytes) * fraction)
+        metrics.memory.availableBytes = metrics.memory.totalBytes - metrics.memory.usedBytes
+        return NornHostMetricSample(metrics: metrics)
+    }
+
+    static let serviceMetricsHistory: [NornServiceMetricSample] = (0..<18).flatMap { index in
+        let observedAt = now.addingTimeInterval(Double(index - 17) * 20)
+        return [
+            NornServiceMetricSample(
+                observedAt: observedAt,
+                app: "mail-mcp",
+                process: "web",
+                cpuPercent: 4 + Double((index * 5) % 22),
+                memoryPercent: 28 + Double((index * 3) % 25)
+            ),
+            NornServiceMetricSample(
+                observedAt: observedAt,
+                app: "contextdb",
+                process: "api",
+                cpuPercent: 3 + Double((index * 7) % 15),
+                memoryPercent: 20 + Double((index * 4) % 18)
+            )
+        ]
+    }
 
     static let fleetInventory = NornFleetInventory(
         schemaVersion: "norn.fleet-inventory/v1",
@@ -179,7 +210,9 @@ enum NornFixtures {
         process: String,
         exposure: String,
         status: String,
-        type: String? = nil
+        type: String? = nil,
+        expectedState: String? = nil,
+        isIdle: Bool = false
     ) -> NornService {
         NornService(
             name: "\(app)-\(process)",
@@ -187,6 +220,7 @@ enum NornFixtures {
             process: process,
             type: type ?? (process == "web" ? "service" : process),
             status: status,
+            expectedState: expectedState,
             healthPath: "/health",
             reachability: .init(
                 endpointScope: exposure,
@@ -195,7 +229,7 @@ enum NornFixtures {
                 routable: status == "passing"
             ),
             endpoints: exposure == "public" ? [.init(url: "https://\(app).example.test", region: "nyc3")] : [],
-            instances: [
+            instances: isIdle ? [] : [
                 .init(id: "\(app)-\(process)-service", allocationID: "\(app)-\(process)-alloc", node: "node-app-1", address: "10.0.1.12", port: 8080, status: status, region: "nyc3", nodePool: "app", placementSource: "consul-tags", placementVerified: true)
             ]
         )

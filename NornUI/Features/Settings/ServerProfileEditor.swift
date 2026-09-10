@@ -14,10 +14,12 @@ struct ServerProfileEditor: View {
         NornServerProfile,
         [String]
     ) async throws -> (session: NornEnrollmentSession, protection: NornDeviceIdentityProtection)
+    typealias CapabilityDiscovery = (NornServerProfile) async throws -> NornCapabilities
 
     let existingProfile: NornServerProfile?
     let onManualSave: (NornServerProfile, String) async throws -> Void
     let onStartEnrollment: EnrollmentStart
+    let onDiscoverCapabilities: CapabilityDiscovery
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -31,6 +33,7 @@ struct ServerProfileEditor: View {
     @State private var allowHostOperations = false
     @State private var allowFleetOperations = false
     @State private var allowTerminalSessions = false
+    @State private var discoveredCapabilities: NornCapabilities?
     @State private var enrollment: NornEnrollmentSession?
     @State private var identityProtection: NornDeviceIdentityProtection?
     @State private var isWorking = false
@@ -40,11 +43,13 @@ struct ServerProfileEditor: View {
         profile: NornServerProfile? = nil,
         startsWithPairing: Bool = true,
         onManualSave: @escaping (NornServerProfile, String) async throws -> Void,
+        onDiscoverCapabilities: @escaping CapabilityDiscovery,
         onStartEnrollment: @escaping EnrollmentStart,
         onCompleteEnrollment: @escaping (NornServerProfile, NornEnrollmentSession) async throws -> Void
     ) {
         existingProfile = profile
         self.onManualSave = onManualSave
+        self.onDiscoverCapabilities = onDiscoverCapabilities
         self.onStartEnrollment = onStartEnrollment
         self.onCompleteEnrollment = onCompleteEnrollment
         _name = State(initialValue: profile?.name ?? "")
@@ -80,13 +85,21 @@ struct ServerProfileEditor: View {
     }
 
     private var requestedScopes: [String] {
-        var scopes = ["api:read", "events:read"]
-        if allowAppChanges { scopes.append("api:write") }
-        if allowPlatformOperations { scopes.append("platform:operate") }
-        if allowHostOperations { scopes.append("host:operate") }
-        if allowFleetOperations { scopes.append("fleet:operate") }
-        if allowTerminalSessions { scopes.append("apps:exec") }
-        return scopes
+        NornEnrollmentScopes.requested(
+            capabilities: discoveredCapabilities,
+            requestsAPIWrite: allowAppChanges,
+            requestsPlatformOperations: allowPlatformOperations,
+            requestsHostOperations: allowHostOperations,
+            requestsFleetOperations: allowFleetOperations,
+            requestsTerminalSessions: allowTerminalSessions
+        )
+    }
+
+    private var primaryActionTitle: String {
+        guard authenticationMethod == .pair else {
+            return existingProfile == nil ? "Connect" : "Save"
+        }
+        return discoveredCapabilities == nil ? "Discover Access" : "Start Pairing"
     }
 
     private var canPerformPrimaryAction: Bool {
@@ -148,6 +161,10 @@ struct ServerProfileEditor: View {
         .task(id: enrollment?.id) {
             guard let enrollment else { return }
             await waitForApproval(enrollment)
+        }
+        .onChange(of: address) { _, _ in
+            guard enrollment == nil else { return }
+            discoveredCapabilities = nil
         }
     }
 
@@ -213,13 +230,27 @@ struct ServerProfileEditor: View {
         } else {
             DisclosureGroup("Requested access") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Label("View platform state and live events", systemImage: "checkmark.circle.fill")
+                    Label(
+                        discoveredCapabilities?.isFleetAuthorityOnly == true
+                            ? "View this Fleet authority and its durable plans"
+                            : "View platform state and live events",
+                        systemImage: "checkmark.circle.fill"
+                    )
                         .foregroundStyle(.secondary)
-                    Toggle("Manage apps and recovery", isOn: $allowAppChanges)
-                    Toggle("Run platform maintenance", isOn: $allowPlatformOperations)
-                    Toggle("Run host assurance", isOn: $allowHostOperations)
-                    Toggle("Manage fleet capacity", isOn: $allowFleetOperations)
-                    Toggle("Open audited terminal sessions", isOn: $allowTerminalSessions)
+                    if discoveredCapabilities?.isFleetAuthorityOnly == true {
+                        Label("This authority intentionally omits runtime events and app/host/release access.", systemImage: "lock.shield")
+                            .foregroundStyle(.secondary)
+                        Toggle("Request operator access (api:write)", isOn: $allowAppChanges)
+                        Text("The protected Fleet runner retains its separate exact-identity authority. An administrator approves this Mac out of band.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Toggle("Manage apps and recovery", isOn: $allowAppChanges)
+                        Toggle("Run platform maintenance", isOn: $allowPlatformOperations)
+                        Toggle("Run host assurance", isOn: $allowHostOperations)
+                        Toggle("Manage fleet capacity", isOn: $allowFleetOperations)
+                        Toggle("Open audited terminal sessions", isOn: $allowTerminalSessions)
+                    }
                 }
                 .padding(.top, 6)
             }
@@ -241,7 +272,7 @@ struct ServerProfileEditor: View {
             Button("Cancel", role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
             if enrollment == nil {
-                Button(authenticationMethod == .pair ? "Start Pairing" : (existingProfile == nil ? "Connect" : "Save")) {
+                Button(primaryActionTitle) {
                     Task { await performPrimaryAction() }
                 }
                 .buttonStyle(.borderedProminent)
@@ -259,6 +290,27 @@ struct ServerProfileEditor: View {
         do {
             switch authenticationMethod {
             case .pair:
+                guard let capabilities = discoveredCapabilities else {
+                    let discovered = try await onDiscoverCapabilities(profile)
+                    discoveredCapabilities = discovered
+                    // Scope controls change meaning for an authority-only endpoint.
+                    // Stop here so the operator can review that contract before asking
+                    // an administrator to create a device enrollment.
+                    if discovered.isFleetAuthorityOnly {
+                        allowAppChanges = false
+                        allowPlatformOperations = false
+                        allowHostOperations = false
+                        allowFleetOperations = false
+                        allowTerminalSessions = false
+                    }
+                    return
+                }
+                if capabilities.isFleetAuthorityOnly {
+                    allowPlatformOperations = false
+                    allowHostOperations = false
+                    allowFleetOperations = false
+                    allowTerminalSessions = false
+                }
                 let result = try await onStartEnrollment(profile, requestedScopes)
                 enrollment = result.session
                 identityProtection = result.protection

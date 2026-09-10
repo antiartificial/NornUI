@@ -11,15 +11,14 @@ struct FleetFeatureView: View {
     let deploymentSteps: [String: [NornDeploymentStep]]
     let deploymentVisibilitySupported: Bool
     let isSupported: Bool
+    let isAuthorityOnly: Bool
     let canPlan: Bool
-    let canOperateFleet: Bool
     let isStale: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
     let onPlan: (String, Int, String, String) async -> Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
-	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var planningPool: PoolSelection?
@@ -39,6 +38,8 @@ struct FleetFeatureView: View {
                     systemImage: "server.rack",
                     description: Text("Upgrade this Norn server to a release that advertises the complete fleet contract.")
                 )
+            } else if isAuthorityOnly {
+                authorityOnlyAcceptance
             } else if !inventory.configured {
                 ContentUnavailableView {
                     Label("Connect norn-fleet", systemImage: "point.3.connected.trianglepath.dotted")
@@ -87,6 +88,71 @@ struct FleetFeatureView: View {
                 if succeeded { planningPool = nil }
                 return succeeded
             }
+        }
+    }
+
+    private var authorityOnlyAcceptance: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Fleet authority connected", systemImage: "checkmark.shield.fill")
+                        .font(.title2.weight(.semibold))
+                        .foregroundStyle(.green)
+                    Text("This profile is intentionally authority-only. The connection is authenticated, but it is not evidence that Fleet resources, applications, or host health are ready.")
+                        .foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                fleetHeader
+                findings
+
+                GroupBox("Acceptance evidence") {
+                    Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 12) {
+                        GridRow {
+                            Text("Fleet document").foregroundStyle(.secondary)
+                            Text(inventory.configured ? (inventory.validation?.valid == false ? "Observed — needs attention" : "Observed — schema valid") : "Not observed")
+                        }
+                        GridRow {
+                            Text("Protected runner").foregroundStyle(.secondary)
+                            Text(githubStatus.connected ? "Observed — connected" : "Not observed or needs operator action")
+                        }
+                        GridRow {
+                            Text("Durable plan receipts").foregroundStyle(.secondary)
+                            Text(plans.isEmpty ? "None observed" : "\(plans.count) observed")
+                        }
+                        GridRow {
+                            Text("Runtime health").foregroundStyle(.secondary)
+                            Text("Intentionally not queried by this authority profile")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+                }
+
+                GroupBox("Operator handoff") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(canPlan
+                             ? "You may prepare a durable capacity plan. Review and protected-runner execution remain separate evidence steps."
+                             : "Request an api:write device grant to prepare a capacity plan. The protected runner keeps its separate Fleet identity; this Mac does not request fleet:operate.")
+                        .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+                }
+
+                // Capacity choices and durable runner receipts remain useful
+                // Fleet authority evidence. Runtime topology is intentionally
+                // absent rather than represented as unhealthy.
+                if inventory.configured {
+                    poolGrid
+                    planHistory
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 980, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -208,10 +274,8 @@ struct FleetFeatureView: View {
                             operations: snapshot.operations,
                             fallbackWorkflowURL: inventory.document?.metadata?.workflowURL,
                             canUseGitHub: canPlan && githubStatus.connected,
-                            canOperateFleet: canOperateFleet,
                             onOpenReview: onOpenReview,
                             onDispatchApply: onDispatchApply,
-							onAdvanceRunner: onAdvanceRunner,
 							onOpenOperation: onOpenOperation
                         )
                     }
@@ -376,10 +440,8 @@ private struct FleetPlanJourney: View {
     let operations: [NornOperation]
     let fallbackWorkflowURL: String?
     let canUseGitHub: Bool
-    let canOperateFleet: Bool
     let onOpenReview: (String) async -> URL?
     let onDispatchApply: (String, Bool) async -> URL?
-	let onAdvanceRunner: (String, NornFleetRunnerAttempt) async -> Bool
 	let onOpenOperation: (NornOperation) -> Void
 
     @State private var expanded = false
@@ -410,12 +472,6 @@ private struct FleetPlanJourney: View {
     private var mayDispatchApply: Bool {
         canUseGitHub && reviewOperation != nil && applyOperation == nil && checkpoints.isEmpty && !isComplete
     }
-    private var currentCheckpoint: NornFleetCheckpoint? {
-        progress.checkpoints.first { $0.state == .failed } ?? progress.checkpoints.first { $0.state == .active } ?? progress.checkpoints.first { $0.state == .pending }
-    }
-    private var mayAdvanceRunner: Bool {
-        runnerAttempt?.status.isActive == true && currentCheckpoint?.runnerAttempt?.id == runnerAttempt?.id && currentCheckpoint?.operation?.status == .succeeded && canOperateFleet
-    }
     private var safeRunnerURL: URL? {
         safeFleetRunnerURL(runnerAttempt?.workflowURL?.absoluteString)
     }
@@ -423,6 +479,10 @@ private struct FleetPlanJourney: View {
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
             VStack(alignment: .leading, spacing: 12) {
+                if let runnerAttempt {
+                    FleetTimingSummary(attempt: runnerAttempt, progress: progress)
+                }
+                FleetCheckpointProgress(progress: progress)
                 ForEach(progress.checkpoints) { checkpoint in
                     HStack(spacing: 10) {
                         ExecutionStateIcon(state: checkpoint.state)
@@ -461,12 +521,7 @@ private struct FleetPlanJourney: View {
                     } else if let workflowURL {
                         Link(destination: workflowURL) { Label("View Protected Runner", systemImage: "arrow.up.right.square") }
                     }
-					if mayAdvanceRunner, let runnerAttempt {
-						Button("Advance Proven Phase", systemImage: "checkmark.arrow.trianglehead.counterclockwise") { runAdvance(runnerAttempt) }
-							.buttonStyle(.borderedProminent)
-							.disabled(isWorking)
-							.help("Advance only after Norn has durable successful evidence for this attempt and phase")
-					} else if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
+					if let safeRunnerURL, (runnerAttempt?.status == .failed || runnerAttempt?.status == .abandoned) {
 						Link(destination: safeRunnerURL) { Label("Retry in Protected Runner", systemImage: "arrow.clockwise.circle") }
 					} else if let safeRunnerURL, runnerAttempt?.status.isActive == true {
 						Link(destination: safeRunnerURL) { Label("View Active Runner", systemImage: "arrow.up.right.square") }
@@ -480,8 +535,8 @@ private struct FleetPlanJourney: View {
                 } else if progress.state == .blocked {
                     Text("A failed or abandoned attempt blocks later phases. Retry launches in the protected runner, which registers the next numbered attempt without moving provider credentials into Norn.")
                         .font(.caption).foregroundStyle(.orange)
-                } else if runnerAttempt?.status.isActive == true && !canOperateFleet {
-                    Text("This principal can observe runner liveness but lacks fleet:operate permission to advance proven phases.")
+                } else if runnerAttempt?.status.isActive == true {
+                    Text("Runner phases advance only from protected workflow evidence.")
 						.font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -544,15 +599,6 @@ private struct FleetPlanJourney: View {
         }
     }
 
-    private func runAdvance(_ attempt: NornFleetRunnerAttempt) {
-        guard !isWorking else { return }
-        isWorking = true
-        Task {
-            _ = await onAdvanceRunner(plan.id, attempt)
-            isWorking = false
-        }
-    }
-
     private func runnerMessage(_ attempt: NornFleetRunnerAttempt, operation: NornOperation?) -> String {
         switch attempt.status {
         case .abandoned: return "Attempt \(attempt.attempt) stopped heartbeating and was durably marked abandoned."
@@ -571,6 +617,184 @@ private struct FleetPlanJourney: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(plan.id, forType: .string)
     }
+}
+
+private struct FleetCheckpointProgress: View {
+    let progress: NornFleetPlanProgress
+
+    var body: some View {
+        ProgressView(
+            value: Double(progress.provenCheckpointCount),
+            total: Double(max(progress.checkpoints.count, 1))
+        ) {
+            Text("Checkpoint progress")
+                .font(.caption.weight(.medium))
+        } currentValueLabel: {
+            Text(progress.checkpointProgressAccessibilityValue)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Checkpoint progress")
+        .accessibilityValue(progress.checkpointProgressAccessibilityValue)
+    }
+}
+
+private struct FleetTimingSummary: View {
+    let attempt: NornFleetRunnerAttempt
+    let progress: NornFleetPlanProgress
+
+    var body: some View {
+        timingContent(NornFleetTimingProjection(attempt: attempt))
+    }
+
+    private func timingContent(_ timing: NornFleetTimingProjection) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label(operationTitle(timing.operationClass), systemImage: "clock.badge")
+                    .font(.callout.weight(.semibold))
+                Spacer()
+                if let totalRange = timing.totalRange {
+                    Text("Provisional range \(durationRangeText(totalRange))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Text("Attempt \(attempt.attempt) · \(timing.phaseLabel)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            switch timing.state {
+            case .waiting:
+                Text("Waiting for the protected runner. Timing starts when it runs.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let elapsedMs = timing.elapsedMs, elapsedMs > 0 {
+                    Text("Runner-reported elapsed \(durationText(elapsedMs))")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            case .active:
+                HStack(spacing: 6) {
+                    if let elapsedMs = timing.elapsedMs {
+                        Text("Elapsed \(durationText(elapsedMs))")
+                    }
+                    if let remaining = timing.remaining {
+                        Text("· roughly \(durationRangeText(remaining)) remaining")
+                    }
+                }
+                .font(.callout.monospacedDigit())
+            case .completed:
+                if let completionDurationMs = timing.completionDurationMs {
+                    Text("Completed in \(durationText(completionDurationMs))")
+                        .font(.callout.monospacedDigit())
+                } else {
+                    Text("Protected runner reported completion; duration was unavailable.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .paused:
+                if let elapsedMs = timing.elapsedMs {
+                    Text("Timing paused at \(durationText(elapsedMs)); no remaining estimate.")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("Timing paused; no remaining estimate.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            if timing.availability == .unavailable || timing.totalRange == nil {
+                Text("Timing estimate unavailable. Elapsed time is shown only when the protected runner has started.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if let completion = timing.estimatedCompletion {
+                Text("Server completion window: \(completion.earliestAt.formatted(date: .omitted, time: .shortened))–\(completion.latestAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(provenanceText(timing))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityText(timing))
+    }
+
+    private func provenanceText(_ timing: NornFleetTimingProjection) -> String {
+        guard let provenance = timing.provenance else { return "No timing provenance was provided." }
+        let confidence = timing.confidence == .low ? "Low confidence" : "No confidence"
+        let method = provenance.method == .configuredRange ? "Configured range" : "Unavailable method"
+        var parts = [confidence, method]
+        if provenance.sampleCount > 0 { parts.append("\(provenance.successfulSampleCount)/\(provenance.sampleCount) successful samples") }
+        if let excludedWorkSummary = provenance.excludedWorkSummary { parts.append(excludedWorkSummary) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func accessibilityText(_ timing: NornFleetTimingProjection) -> String {
+        var parts = [operationTitle(timing.operationClass), "attempt \(attempt.attempt)", timing.phaseLabel]
+        if let totalRange = timing.totalRange { parts.append("provisional range \(accessibilityDurationRangeText(totalRange))") }
+        switch timing.state {
+        case .waiting:
+            parts.append("waiting for protected runner; timing has not started")
+            if let elapsedMs = timing.elapsedMs, elapsedMs > 0 { parts.append("runner-reported elapsed \(accessibilityDurationText(elapsedMs))") }
+        case .active:
+            if let elapsedMs = timing.elapsedMs { parts.append("elapsed \(accessibilityDurationText(elapsedMs))") }
+            if let remaining = timing.remaining { parts.append("roughly \(accessibilityDurationRangeText(remaining)) remaining") }
+        case .completed:
+            if let completionDurationMs = timing.completionDurationMs { parts.append("completed in \(accessibilityDurationText(completionDurationMs))") }
+        case .paused:
+            if let elapsedMs = timing.elapsedMs { parts.append("timing paused at \(accessibilityDurationText(elapsedMs))") }
+            parts.append("no remaining estimate")
+        }
+        parts.append(provenanceText(timing))
+        parts.append(progress.checkpointProgressAccessibilityValue)
+        return parts.joined(separator: ". ")
+    }
+
+    private func operationTitle(_ operationClass: NornFleetTimingOperationClass?) -> String {
+        switch operationClass {
+        case .coldStart: "Cold-start timing"
+        case .unknown, nil: "Infrastructure timing"
+        }
+    }
+}
+
+private func durationRangeText(_ range: NornFleetTimingRange) -> String {
+    if range.lowMs == range.highMs { return durationText(range.lowMs) }
+    return "\(durationText(range.lowMs))–\(durationText(range.highMs))"
+}
+
+private func durationText(_ milliseconds: Int64) -> String {
+    let milliseconds = max(Int64(0), milliseconds)
+    if milliseconds < 1_000 { return "\(milliseconds)ms" }
+    let seconds = Int((Double(milliseconds) / 1_000).rounded())
+    if seconds < 60 { return "\(seconds)s" }
+    let minutes = seconds / 60
+    if minutes < 60 { return "\(minutes)m" }
+    return "\(minutes / 60)h \(minutes % 60)m"
+}
+
+private func accessibilityDurationRangeText(_ range: NornFleetTimingRange) -> String {
+    if range.lowMs == range.highMs { return accessibilityDurationText(range.lowMs) }
+    return "\(accessibilityDurationText(range.lowMs)) to \(accessibilityDurationText(range.highMs))"
+}
+
+private func accessibilityDurationText(_ milliseconds: Int64) -> String {
+    let milliseconds = max(Int64(0), milliseconds)
+    if milliseconds < 1_000 { return "\(milliseconds) milliseconds" }
+    let seconds = Int((Double(milliseconds) / 1_000).rounded())
+    if seconds < 60 { return "\(seconds) seconds" }
+    let minutes = seconds / 60
+    if minutes < 60 { return "\(minutes) minutes" }
+    return "\(minutes / 60) hours \(minutes % 60) minutes"
 }
 
 private struct PoolSelection: Identifiable {
@@ -602,15 +826,14 @@ private func safeFleetRunnerURL(_ rawValue: String?) -> URL? {
             deploymentSteps: NornFixtures.deploymentSteps,
             deploymentVisibilitySupported: true,
             isSupported: true,
+            isAuthorityOnly: false,
             canPlan: true,
-            canOperateFleet: true,
             isStale: false,
             isRefreshing: false,
             onRefresh: {},
             onPlan: { _, _, _, _ in true },
             onOpenReview: { _ in nil },
             onDispatchApply: { _, _ in nil },
-			onAdvanceRunner: { _, _ in true },
 			onOpenOperation: { _ in }
         )
     }

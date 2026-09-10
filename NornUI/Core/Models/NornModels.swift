@@ -3,6 +3,7 @@ import Foundation
 nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Sendable {
     case overview
     case apps
+    case delivery
     case operations
     case fleet
     case platform
@@ -15,6 +16,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         switch self {
         case .overview: "Overview"
         case .apps: "Apps"
+        case .delivery: "Delivery"
         case .operations: "Operations"
         case .fleet: "Fleet"
         case .platform: "Releases"
@@ -27,6 +29,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         switch self {
         case .overview: "sparkles.rectangle.stack"
         case .apps: "square.stack.3d.up"
+        case .delivery: "arrow.triangle.branch"
         case .operations: "waveform.path.ecg.rectangle"
         case .fleet: "server.rack"
         case .platform: "shippingbox.and.arrow.backward"
@@ -115,6 +118,10 @@ nonisolated struct NornIssuedToken: Decodable, Sendable {
 }
 
 nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
+    struct Environment: Codable, Hashable, Sendable {
+        var id: String
+        var profile: String
+    }
     struct Authentication: Codable, Hashable, Sendable {
         struct Principal: Codable, Hashable, Sendable {
             var authenticated: Bool
@@ -141,16 +148,28 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     var features: [String]
     var auth: Authentication
     var endpoints: [String: String]
+    var environment: Environment? = nil
+    /// An authority-only Fleet endpoint intentionally does not expose the app,
+    /// host, release, or event runtime. This is negotiated before any of those
+    /// routes are requested.
+    var authority: String? = nil
+
+    var isFleetAuthorityOnly: Bool {
+        authority == "fleet-only" || features.contains("fleet-authority-only-v1")
+    }
 
     /// Host metrics are optional so older control planes continue to work without
     /// presenting a connection failure in the Host view.
     var supportsHostMetrics: Bool {
-        features.contains("host-metrics") && endpoints["hostMetrics"] != nil
+        !isFleetAuthorityOnly && features.contains("host-metrics") && endpoints["hostMetrics"] != nil
     }
 
-	var supportsAppCreation: Bool { features.contains("app-creation") && endpoints["appCreation"] != nil }
+	var supportsAppCreation: Bool {
+        !isFleetAuthorityOnly && features.contains("app-creation") && endpoints["appCreation"] != nil
+    }
 
     var supportsDurableAppRecovery: Bool {
+        !isFleetAuthorityOnly &&
         features.contains("durable-app-recovery-v1") &&
         endpoints["appSnapshots"] != nil &&
         endpoints["appSnapshotRestore"] != nil &&
@@ -189,6 +208,120 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
         features.contains("versioned-deployment-history-v1") &&
         endpoints["deployments"] != nil && endpoints["deploymentSteps"] != nil
     }
+
+    var supportsReleasePipeline: Bool {
+        !isFleetAuthorityOnly && ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"].allSatisfy(features.contains)
+    }
+
+    var supportsEventStream: Bool {
+        !isFleetAuthorityOnly && endpoints["events"] != nil
+    }
+
+    var environmentID: String { environment?.id ?? "development" }
+    var environmentProfile: String { environment?.profile ?? "development" }
+}
+
+/// The exact evidence staging provides for a production promotion. The server,
+/// not the client, verifies source and artifact equivalence when it is used.
+nonisolated struct NornReleaseQualification: Codable, Hashable, Sendable, Identifiable {
+    var schemaVersion: String
+    var id: String
+    var deploymentID: String
+    var app: String
+    var sourceSHA: String
+    var artifact: String
+    var environment: String
+    /// Retain the exact wire timestamps: they are part of the signed receipt
+    /// that production must receive unchanged.
+    var issuedAt: String
+    var expiresAt: String
+    var keyID: String
+    var signature: String
+    var candidate: NornReleaseCandidate
+    var dsse: NornDSSEEnvelope
+
+    var expiryDate: Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let value = fractional.date(from: expiresAt) { return value }
+        return ISO8601DateFormatter().date(from: expiresAt)
+    }
+    var isExpired: Bool { expiryDate.map { $0 < .now } ?? true }
+    var isV2Signed: Bool {
+        schemaVersion == "norn.release-qualification/v2" &&
+        !candidate.signerWorkflowRef.isEmpty &&
+        candidate.signerWorkflowRef.hasSuffix("@\(candidate.signerWorkflowSHA)") &&
+        !candidate.signerWorkflowSHA.isEmpty &&
+        dsse.payloadType == "application/vnd.norn.release-qualification.v2+json" &&
+        dsse.signatures.count == 1 &&
+        dsse.signatures.first?.keyID == keyID && dsse.signatures.first?.sig == signature
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion, id, app, artifact, environment, issuedAt, expiresAt, signature, candidate, dsse
+        case deploymentID = "deploymentId"
+        case sourceSHA = "sourceSha"
+        case keyID = "keyId"
+    }
+}
+
+nonisolated struct NornReleaseCandidate: Codable, Hashable, Sendable {
+    var provider: String
+    var repository: String
+    var repositoryID: String
+    var ownerID: String
+    var runID: String
+    var runAttempt: String?
+    var workflowRef: String
+    var workflowSHA: String
+    var signerWorkflowRef: String
+    var signerWorkflowSHA: String
+    var ref: String
+    var attestation: NornReleaseAttestation
+    enum CodingKeys: String, CodingKey { case provider, repository, ref, attestation; case repositoryID = "repositoryId"; case ownerID = "ownerId"; case runID = "runId"; case runAttempt = "runAttempt"; case workflowRef, workflowSHA = "workflowSha"; case signerWorkflowRef; case signerWorkflowSHA = "signerWorkflowSha" }
+}
+
+nonisolated struct NornReleaseAttestation: Codable, Hashable, Sendable { var issuer: String; var subjectDigest: String; var materialSHA: String; var provenanceURI: String?; var sbomURI: String?; enum CodingKeys: String, CodingKey { case issuer, subjectDigest; case materialSHA = "materialSha"; case provenanceURI = "provenanceUri"; case sbomURI = "sbomUri" } }
+nonisolated struct NornDSSEEnvelope: Codable, Hashable, Sendable { var payloadType: String; var payload: String; var signatures: [NornDSSESignature] }
+nonisolated struct NornDSSESignature: Codable, Hashable, Sendable { var keyID: String; var sig: String; enum CodingKeys: String, CodingKey { case sig; case keyID = "keyid" } }
+
+nonisolated struct NornReleaseQualificationList: Codable, Hashable, Sendable {
+	var schemaVersion: String
+    var qualifications: [NornReleaseQualification]
+    var count: Int
+}
+
+nonisolated struct NornReleaseActionRequest: Codable, Hashable, Sendable {
+    var sourceSHA: String
+    var artifact: String?
+
+    enum CodingKeys: String, CodingKey {
+        case artifact
+        case sourceSHA = "sourceSha"
+    }
+}
+
+nonisolated struct NornReleasePromotionRequest: Codable, Hashable, Sendable {
+    var qualification: NornReleaseQualification
+    var sourceSHA: String
+    var artifact: String
+
+    enum CodingKeys: String, CodingKey {
+        case qualification, artifact
+        case sourceSHA = "sourceSha"
+    }
+}
+
+nonisolated struct NornEventStreamInfo: Decodable, Hashable, Sendable {
+    struct Bounds: Decodable, Hashable, Sendable {
+        var oldestCursor: Int64
+        var latestCursor: Int64
+        var retainedEvents: Int64
+    }
+
+    var protocolVersion: Int
+    var bounds: Bounds
+    var gapDetection: Bool
 }
 
 nonisolated struct NornFleetNodePool: Codable, Hashable, Sendable {
@@ -313,6 +446,103 @@ nonisolated enum NornFleetRunnerAttemptStatus: String, Codable, Hashable, Sendab
     var isActive: Bool { self == .queued || self == .running }
 }
 
+nonisolated enum NornFleetTimingAvailability: String, Codable, Hashable, Sendable {
+    case available, unavailable
+}
+
+nonisolated enum NornFleetTimingOperationClass: String, Codable, Hashable, Sendable {
+    case coldStart = "cold_start"
+    case unknown
+}
+
+nonisolated enum NornFleetTimingConfidence: String, Codable, Hashable, Sendable {
+    case low, none
+}
+
+nonisolated enum NornFleetTimingProvenanceMethod: String, Codable, Hashable, Sendable {
+    case configuredRange = "configured_range"
+    case unavailable
+}
+
+/// Server-provided, non-authoritative timing range. Values are milliseconds;
+/// this client deliberately does not convert timestamps into a replacement ETA.
+nonisolated struct NornFleetTimingRange: Codable, Hashable, Sendable {
+    var lowMs: Int64
+    var highMs: Int64
+
+    var isUsable: Bool { lowMs >= 0 && highMs >= lowMs }
+}
+
+nonisolated struct NornFleetTimingCompletion: Codable, Hashable, Sendable {
+    var earliestAt: Date
+    var latestAt: Date
+}
+
+nonisolated struct NornFleetTimingProvenance: Codable, Hashable, Sendable {
+    var method: NornFleetTimingProvenanceMethod
+    var configuredRange: NornFleetTimingRange?
+    var sampleCount: Int
+    var successfulSampleCount: Int
+    var exclusions: [String]
+
+    /// Human-readable work excluded from the runner-only timing estimate.
+    /// Keep an unfamiliar server code legible without making it part of the
+    /// modeled contract.
+    var excludedWorkSummary: String? {
+        let labels = exclusions.map { exclusion in
+            switch exclusion {
+            case "review_approval": "review/approval"
+            case "github_queue": "GitHub queue"
+            case "dns_propagation": "DNS propagation"
+            case "application_migrations": "application migrations"
+            default: exclusion.replacingOccurrences(of: "_", with: " ")
+            }
+        }
+        guard !labels.isEmpty else { return nil }
+        return "Excludes \(Self.joined(labels))."
+    }
+
+    private static func joined(_ labels: [String]) -> String {
+        switch labels.count {
+        case 0: ""
+        case 1: labels[0]
+        case 2: "\(labels[0]) and \(labels[1])"
+        default: "\(labels.dropLast().joined(separator: ", ")), and \(labels.last!)"
+        }
+    }
+}
+
+nonisolated struct NornFleetTimingPhase: Codable, Hashable, Sendable {
+    var name: String
+    var state: NornFleetTimingPhaseState
+    var elapsedMs: Int64
+    var estimatedRemaining: NornFleetTimingRange?
+}
+
+nonisolated enum NornFleetTimingPhaseState: String, Codable, Hashable, Sendable {
+    case active
+    case complete
+    case terminal
+}
+
+/// Optional, server-authored timing context for one protected runner attempt.
+/// It describes runner work only: review and dispatch queue time are outside
+/// this contract.
+nonisolated struct NornFleetRunnerTiming: Codable, Hashable, Sendable {
+    var schemaVersion: String
+    var scope: String
+    var asOf: Date
+    var availability: NornFleetTimingAvailability
+    var operationClass: NornFleetTimingOperationClass
+    var elapsedMs: Int64
+    var estimatedRemaining: NornFleetTimingRange?
+    var estimatedTotal: NornFleetTimingRange?
+    var estimatedCompletion: NornFleetTimingCompletion?
+    var confidence: NornFleetTimingConfidence
+    var provenance: NornFleetTimingProvenance
+    var phases: [NornFleetTimingPhase]
+}
+
 nonisolated struct NornFleetRunnerAttempt: Identifiable, Codable, Hashable, Sendable {
     var schemaVersion: String
     var id: String
@@ -334,10 +564,12 @@ nonisolated struct NornFleetRunnerAttempt: Identifiable, Codable, Hashable, Send
     var updatedAt: Date
     var finishedAt: Date?
     var lastError: String?
+    var phaseStartedAt: Date? = nil
+    var timing: NornFleetRunnerTiming? = nil
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, id, attempt, status, currentPhase, retryOf, heartbeatSequence
-        case heartbeatTimeoutSeconds, revision, startedAt, heartbeatAt, heartbeatExpiresAt, updatedAt, finishedAt, lastError
+        case heartbeatTimeoutSeconds, revision, startedAt, heartbeatAt, heartbeatExpiresAt, updatedAt, finishedAt, lastError, phaseStartedAt, timing
         case planID = "planId"
         case runnerAttemptID = "runnerAttemptId"
         case commitSHA = "commitSha"
@@ -491,12 +723,24 @@ nonisolated struct NornFleetCheckpoint: Identifiable, Hashable, Sendable {
 /// that a protected workflow is running merely because it was dispatched.
 nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
     static let orderedPhases = [
+        "prechange_verified", "provider_applying",
         "infrastructure_applied", "inventory_generated", "nodes_configured",
         "nodes_enrolled", "readiness_verified", "old_nodes_drained", "complete"
+    ]
+    static let destructiveOnlyPhases: Set<String> = [
+        "prechange_verified", "provider_applying", "old_nodes_drained"
     ]
 
     var checkpoints: [NornFleetCheckpoint]
     var state: NornExecutionCheckpointState
+
+    var provenCheckpointCount: Int {
+        checkpoints.filter { $0.state == .completed }.count
+    }
+
+    var checkpointProgressAccessibilityValue: String {
+        "\(provenCheckpointCount) of \(checkpoints.count) provisioning checkpoints proven"
+    }
 
     init(plan: NornOperation, reconciliations: [NornOperation], runnerAttempt: NornFleetRunnerAttempt? = nil) {
         let payload = plan.payload ?? [:]
@@ -504,7 +748,9 @@ nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
         let currentDesired = payload["current"]?.objectValue?["desired"]?.intValue
         let proposedDesired = payload["proposed"]?.objectValue?["desired"]?.intValue
         let requiresDrain = action == "replace" || (action == "scale" && (proposedDesired ?? 0) < (currentDesired ?? 0))
-        let phases = Self.orderedPhases.filter { requiresDrain || $0 != "old_nodes_drained" }
+        let phases = requiresDrain
+            ? Self.orderedPhases
+            : Self.orderedPhases.filter { !Self.destructiveOnlyPhases.contains($0) }
         let newestByPhase = Dictionary(grouping: reconciliations) { $0.payload?["phase"]?.stringValue ?? "" }
             .mapValues { $0.max(by: { $0.updatedAt < $1.updatedAt })! }
 
@@ -541,6 +787,82 @@ nonisolated struct NornFleetPlanProgress: Hashable, Sendable {
         } else {
             state = .pending
         }
+    }
+}
+
+nonisolated enum NornFleetTimingState: String, Hashable, Sendable {
+    case waiting
+    case active
+    case completed
+    case paused
+}
+
+/// Display-ready timing derived only from a durable runner attempt. In
+/// particular, it does not use the plan receipt, review receipt, or dispatch
+/// receipt as a start time.
+nonisolated struct NornFleetTimingProjection: Hashable, Sendable {
+    var state: NornFleetTimingState
+    var phaseLabel: String
+    var availability: NornFleetTimingAvailability?
+    var operationClass: NornFleetTimingOperationClass?
+    var totalRange: NornFleetTimingRange?
+    var elapsedMs: Int64?
+    var remaining: NornFleetTimingRange?
+    var completionDurationMs: Int64?
+    var estimatedCompletion: NornFleetTimingCompletion?
+    var confidence: NornFleetTimingConfidence?
+    var provenance: NornFleetTimingProvenance?
+
+    init(attempt: NornFleetRunnerAttempt, now: Date = .now) {
+        let timing = attempt.timing
+        let phase = timing?.phases.first { $0.name == attempt.currentPhase }
+            ?? timing?.phases.first { $0.state == .active }
+        phaseLabel = phase?.name.replacingOccurrences(of: "_", with: " ").capitalized
+            ?? attempt.currentPhase.replacingOccurrences(of: "_", with: " ").capitalized
+        availability = timing?.availability
+        operationClass = timing?.operationClass
+        totalRange = timing?.availability == .available && timing?.estimatedTotal?.isUsable == true ? timing?.estimatedTotal : nil
+        remaining = timing?.availability == .available && timing?.estimatedRemaining?.isUsable == true ? timing?.estimatedRemaining : nil
+        estimatedCompletion = timing?.availability == .available ? timing?.estimatedCompletion : nil
+        confidence = timing?.confidence
+        provenance = timing?.provenance
+
+        let serverElapsed = timing.map { Swift.max(Int64(0), $0.elapsedMs) }
+
+        switch attempt.status {
+        case .queued:
+            state = .waiting
+            elapsedMs = serverElapsed
+            completionDurationMs = nil
+        case .running:
+            state = .active
+            elapsedMs = serverElapsed ?? Self.elapsedSince(attempt.startedAt, now: now)
+            completionDurationMs = nil
+        case .succeeded:
+            state = .completed
+            elapsedMs = serverElapsed ?? attempt.finishedAt.map { Self.elapsedSince(attempt.startedAt, now: $0) }
+            completionDurationMs = elapsedMs
+        case .failed, .canceled, .abandoned:
+            state = .paused
+            let terminal = attempt.finishedAt ?? attempt.updatedAt
+            elapsedMs = serverElapsed ?? Self.elapsedSince(attempt.startedAt, now: terminal)
+            completionDurationMs = nil
+        }
+
+        if timing?.availability != .available {
+            totalRange = nil
+            remaining = nil
+            estimatedCompletion = nil
+        }
+
+        if state == .paused {
+            remaining = nil
+            estimatedCompletion = nil
+        }
+    }
+
+    private static func elapsedSince(_ start: Date, now: Date) -> Int64 {
+        Swift.max(0, Int64((now.timeIntervalSince(start) * 1_000).rounded()))
     }
 }
 
@@ -662,6 +984,131 @@ nonisolated struct NornHostMetrics: Codable, Hashable, Sendable {
     var memory: Memory
 }
 
+/// A compact, locally retained host sample. The control plane intentionally
+/// serves a current sample only; the native app builds this bounded history
+/// without requiring a new server capability.
+nonisolated struct NornHostMetricSample: Codable, Hashable, Sendable, Identifiable {
+    var observedAt: Date
+    var cpuPercent: Double
+    var memoryUsedBytes: UInt64
+    var memoryTotalBytes: UInt64
+
+    var id: Date { observedAt }
+    var memoryPercent: Double {
+        guard memoryTotalBytes > 0 else { return 0 }
+        return Double(memoryUsedBytes) / Double(memoryTotalBytes) * 100
+    }
+
+    init(metrics: NornHostMetrics) {
+        observedAt = metrics.observedAt
+        cpuPercent = metrics.cpu.utilizationPercent
+        memoryUsedBytes = metrics.memory.usedBytes
+        memoryTotalBytes = metrics.memory.totalBytes
+    }
+
+    init(observedAt: Date, cpuPercent: Double, memoryUsedBytes: UInt64, memoryTotalBytes: UInt64) {
+        self.observedAt = observedAt
+        self.cpuPercent = cpuPercent
+        self.memoryUsedBytes = memoryUsedBytes
+        self.memoryTotalBytes = memoryTotalBytes
+    }
+}
+
+/// Current Nomad allocation usage exposed by Norn's compatibility resource
+/// suggestions route. The macOS app records this alongside host samples so
+/// tenant overlays remain useful without inventing container measurements.
+nonisolated struct NornResourceSuggestionList: Codable, Hashable, Sendable {
+    var suggestions: [NornResourceSuggestion]
+}
+
+nonisolated struct NornResourceSuggestion: Codable, Hashable, Sendable {
+    var app: String
+    var process: String
+    var declaredMemoryMB: Int
+    var declaredCpuMHz: Int
+    var usedMemoryMB: Int
+    var peakMemoryMB: Int
+    var cpuPercent: Double
+    var status: String
+    var reason: String
+}
+
+nonisolated struct NornServiceMetricSample: Codable, Hashable, Sendable, Identifiable {
+    var observedAt: Date
+    var app: String
+    var process: String
+    var cpuPercent: Double
+    var memoryPercent: Double
+
+    var seriesID: String { "\(app)/\(process)" }
+    var displayName: String { app == process ? app : "\(app) / \(process)" }
+    var id: String { "\(seriesID)@\(observedAt.timeIntervalSinceReferenceDate)" }
+
+    init(observedAt: Date, suggestion: NornResourceSuggestion) {
+        self.observedAt = observedAt
+        app = suggestion.app
+        process = suggestion.process
+        cpuPercent = max(0, suggestion.cpuPercent)
+        if suggestion.declaredMemoryMB > 0 {
+            memoryPercent = max(0, Double(suggestion.usedMemoryMB) / Double(suggestion.declaredMemoryMB) * 100)
+        } else {
+            memoryPercent = 0
+        }
+    }
+
+    init(observedAt: Date, app: String, process: String, cpuPercent: Double, memoryPercent: Double) {
+        self.observedAt = observedAt
+        self.app = app
+        self.process = process
+        self.cpuPercent = cpuPercent
+        self.memoryPercent = memoryPercent
+    }
+}
+
+nonisolated enum NornHostMetricsRefreshInterval: Int, CaseIterable, Codable, Identifiable, Sendable {
+    case seconds5 = 5
+    case seconds10 = 10
+    case seconds30 = 30
+    case minute1 = 60
+    case minutes5 = 300
+    case minutes10 = 600
+
+    var id: Int { rawValue }
+    var title: String {
+        switch self {
+        case .seconds5: "5 sec"
+        case .seconds10: "10 sec"
+        case .seconds30: "30 sec"
+        case .minute1: "1 min"
+        case .minutes5: "5 min"
+        case .minutes10: "10 min"
+        }
+    }
+}
+
+nonisolated enum NornHostMetricsWindow: Int, CaseIterable, Codable, Identifiable, Sendable {
+    case minutes5 = 300
+    case minutes15 = 900
+    case hour1 = 3_600
+    case hours6 = 21_600
+    case hours24 = 86_400
+    case days7 = 604_800
+    case days30 = 2_592_000
+
+    var id: Int { rawValue }
+    var title: String {
+        switch self {
+        case .minutes5: "5 min"
+        case .minutes15: "15 min"
+        case .hour1: "1 hr"
+        case .hours6: "6 hr"
+        case .hours24: "24 hr"
+        case .days7: "7 days"
+        case .days30: "30 days"
+        }
+    }
+}
+
 nonisolated struct NornHealth: Codable, Hashable, Sendable {
     struct Network: Codable, Hashable, Sendable {
         var mode: String?
@@ -729,13 +1176,24 @@ nonisolated struct NornService: Identifiable, Codable, Hashable, Sendable {
     var process: String
     var type: String
     var status: String
+    var expectedState: String? = nil
+    var schedule: String? = nil
     var healthPath: String?
     var reachability: Reachability
     var endpoints: [Endpoint]?
     var instances: [Instance]?
 
     var id: String { name }
-    var isPassing: Bool { status == "passing" }
+    var isPassing: Bool { ["passing", "up", "ok"].contains(status.lowercased()) }
+    var isExpectedIdle: Bool {
+        switch expectedState?.lowercased() {
+        case "disabled", "paused": true
+        case "scheduled", "on_demand": instances?.isEmpty != false
+        default: false
+        }
+    }
+    var needsAttention: Bool { !isPassing && !isExpectedIdle }
+    var displayStatus: String { isExpectedIdle ? (expectedState ?? status) : status }
 }
 
 nonisolated enum NornOperationStatus: String, Codable, Hashable, Sendable {

@@ -1,8 +1,13 @@
 import Foundation
 
 protocol NornEnrollmentClientProtocol: Sendable {
+    func capabilities() async throws -> NornCapabilities
     func start(_ request: NornEnrollmentStartRequest) async throws -> NornEnrollmentSession
     func exchange(_ session: NornEnrollmentSession) async throws -> NornIssuedToken
+}
+
+extension NornEnrollmentClientProtocol {
+    func capabilities() async throws -> NornCapabilities { throw NornEnrollmentClientError.invalidResponse }
 }
 
 nonisolated enum NornEnrollmentClientError: LocalizedError, Sendable, Equatable {
@@ -58,6 +63,32 @@ actor NornEnrollmentClient: NornEnrollmentClientProtocol {
             body: try Self.encode(request),
             expectedStatus: 201
         )
+    }
+
+    /// Capabilities are deliberately public so pairing can request only the
+    /// scopes a selected authority accepts, before a credential exists.
+    func capabilities() async throws -> NornCapabilities {
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/capabilities"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw NornEnrollmentClientError.transport(message: (error as NSError).localizedDescription)
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NornEnrollmentClientError.invalidResponse
+        }
+        do {
+            return try Self.decode(NornCapabilities.self, from: data)
+        } catch {
+            throw NornEnrollmentClientError.decoding(message: String(describing: error))
+        }
     }
 
     func exchange(_ enrollment: NornEnrollmentSession) async throws -> NornIssuedToken {

@@ -7,33 +7,42 @@ import SwiftUI
 struct OverviewView: View {
     let snapshot: NornDashboardSnapshot?
     let connectionState: NornConnectionState
+    @Binding var updateMode: NornOverviewUpdateMode
     var isRefreshing: Bool = false
     var onRefresh: () -> Void = {}
     var onShowServices: () -> Void = {}
     var onShowOperations: () -> Void = {}
     var onShowReleases: () -> Void = {}
     var onShowHost: () -> Void = {}
+    var onOpenService: (NornService) -> Void = { _ in }
+    var onOpenOperation: (NornOperation) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         snapshot: NornDashboardSnapshot?,
         connectionState: NornConnectionState,
+        updateMode: Binding<NornOverviewUpdateMode> = .constant(.live),
         isRefreshing: Bool = false,
         onRefresh: @escaping () -> Void = {},
         onShowServices: @escaping () -> Void = {},
         onShowOperations: @escaping () -> Void = {},
         onShowReleases: @escaping () -> Void = {},
-        onShowHost: @escaping () -> Void = {}
+        onShowHost: @escaping () -> Void = {},
+        onOpenService: @escaping (NornService) -> Void = { _ in },
+        onOpenOperation: @escaping (NornOperation) -> Void = { _ in }
     ) {
         self.snapshot = snapshot
         self.connectionState = connectionState
+        self._updateMode = updateMode
         self.isRefreshing = isRefreshing
         self.onRefresh = onRefresh
         self.onShowServices = onShowServices
         self.onShowOperations = onShowOperations
         self.onShowReleases = onShowReleases
         self.onShowHost = onShowHost
+        self.onOpenService = onOpenService
+        self.onOpenOperation = onOpenOperation
     }
 
     var body: some View {
@@ -46,7 +55,21 @@ struct OverviewView: View {
         }
         .navigationTitle("Overview")
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Menu {
+                    Picker("Overview Updates", selection: $updateMode) {
+                        ForEach(NornOverviewUpdateMode.allCases) { mode in
+                            Label(mode.title, systemImage: updateModeSymbol(mode))
+                                .tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                } label: {
+                    Label("Updates: \(updateMode.shortTitle)", systemImage: updateModeSymbol(updateMode))
+                }
+                .help("Choose live event updates or a refresh cadence")
+                .accessibilityIdentifier("overview.update-mode")
+
                 Button(action: onRefresh) {
                     Label("Refresh Overview", systemImage: "arrow.clockwise")
                 }
@@ -176,7 +199,16 @@ struct OverviewView: View {
         ) {
             VStack(spacing: 2) {
                 ForEach(snapshot.services.prefix(5)) { service in
-                    OverviewServiceRow(service: service)
+                    Button { onOpenService(service) } label: {
+                        OverviewServiceRow(service: service)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open \(service.app) · \(service.process)")
+                    .accessibilityHint("Opens this service in Apps")
+                    .contextMenu {
+                        Button("Open Service") { onOpenService(service) }
+                        Button("Show All Services", action: onShowServices)
+                    }
                 }
             }
             if snapshot.services.count > 5 {
@@ -208,7 +240,16 @@ struct OverviewView: View {
             } else {
                 VStack(spacing: 2) {
                     ForEach(snapshot.operations.sorted { $0.updatedAt > $1.updatedAt }.prefix(4)) { operation in
-                        OverviewOperationRow(operation: operation)
+                        Button { onOpenOperation(operation) } label: {
+                            OverviewOperationRow(operation: operation)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open operation receipt")
+                        .accessibilityHint("Opens this exact receipt in Operations")
+                        .contextMenu {
+                            Button("Open Receipt") { onOpenOperation(operation) }
+                            Button("Show All Operations", action: onShowOperations)
+                        }
                     }
                 }
             }
@@ -309,7 +350,7 @@ struct OverviewView: View {
     }
 
     private func attentionServiceCount(_ snapshot: NornDashboardSnapshot) -> Int {
-        snapshot.services.filter { !$0.isPassing }.count
+        snapshot.services.filter(\.needsAttention).count
     }
 
     private func headline(_ snapshot: NornDashboardSnapshot) -> String {
@@ -321,7 +362,9 @@ struct OverviewView: View {
 
     private func serviceSubtitle(_ snapshot: NornDashboardSnapshot) -> String {
         let count = attentionServiceCount(snapshot)
-        return count == 0 ? "All observed services are passing" : "\(count) service\(count == 1 ? "" : "s") need attention"
+        guard count == 0 else { return "\(count) service\(count == 1 ? "" : "s") need attention" }
+        let expectedIdle = snapshot.services.filter(\.isExpectedIdle).count
+        return expectedIdle == 0 ? "All observed services are passing" : "No services need attention · \(expectedIdle) expected idle"
     }
 
     private func activeOperationDetail(_ snapshot: NornDashboardSnapshot) -> String {
@@ -332,6 +375,14 @@ struct OverviewView: View {
     private func observationLabel(_ date: Date) -> String {
         "Observed \(date.formatted(.relative(presentation: .named)))"
     }
+
+    private func updateModeSymbol(_ mode: NornOverviewUpdateMode) -> String {
+        switch mode {
+        case .live: "dot.radiowaves.left.and.right"
+        case .manual: "pause.circle"
+        default: "clock.arrow.circlepath"
+        }
+    }
 }
 
 private struct OverviewServiceRow: View {
@@ -340,7 +391,7 @@ private struct OverviewServiceRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            NornStatusGlyph(status: NornStatus(serviceStatus: service.status), size: 14)
+            NornStatusGlyph(status: service.needsAttention ? NornStatus(serviceStatus: service.status) : (service.isPassing ? .healthy : .neutral), size: 14)
             VStack(alignment: .leading, spacing: 2) {
                 Text(service.app)
                     .font(.subheadline.weight(.medium))
@@ -349,14 +400,18 @@ private struct OverviewServiceRow: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            NornStatusBadge(status: NornStatus(serviceStatus: service.status), label: service.status.capitalized)
+            NornStatusBadge(status: service.needsAttention ? NornStatus(serviceStatus: service.status) : (service.isPassing ? .healthy : .neutral), label: service.displayStatus.replacingOccurrences(of: "_", with: " ").capitalized)
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 9)
         .background(isHovered ? Color.primary.opacity(0.045) : Color.clear, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .onHover { isHovered = $0 }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(service.app), \(service.status)")
+        .accessibilityLabel("\(service.app), \(service.displayStatus)")
     }
 }
 
@@ -382,6 +437,10 @@ private struct OverviewOperationRow: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
+            Image(systemName: "chevron.right")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 9)

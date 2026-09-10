@@ -15,7 +15,7 @@ struct InfrastructureTopologyView: View {
                     id: service.id,
                     title: service.name,
                     detail: endpoint,
-                    state: service.isPassing ? .healthy : .attention
+                    state: service.needsAttention ? .attention : .healthy
                 )
             }
     }

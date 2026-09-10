@@ -5,6 +5,7 @@ struct NornSettingsView: View {
     let selectedProfileID: UUID?
     let onSelect: (UUID?) async -> Void
     let onManualSave: (NornServerProfile, String) async throws -> Void
+    let onDiscoverCapabilities: ServerProfileEditor.CapabilityDiscovery
     let onStartEnrollment: ServerProfileEditor.EnrollmentStart
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
     let onRotate: () async -> Void
@@ -131,6 +132,7 @@ struct NornSettingsView: View {
             profile: profile,
             startsWithPairing: true,
             onManualSave: onManualSave,
+            onDiscoverCapabilities: onDiscoverCapabilities,
             onStartEnrollment: onStartEnrollment,
             onCompleteEnrollment: onCompleteEnrollment
         )
