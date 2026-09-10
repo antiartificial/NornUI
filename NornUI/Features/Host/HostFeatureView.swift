@@ -1008,21 +1008,33 @@ private struct HostMetricsHistoryChart: View {
     let onRequestHistory: (NornHostMetricsWindow, Date) async -> Void
 
     @State private var requestedViewportStart: Date?
+    @State private var requestedViewportDuration: TimeInterval?
     @State private var hoveredDate: Date?
+    @State private var dragSelection: HostChartDragSelection?
     @State private var followsLatest = true
     @State private var prepared: HostMetricsChartPreparation?
     @State private var historyRequestID: UUID?
     @State private var isLoadingHistory = false
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var viewport: HostChartViewport {
-        HostChartViewport(latest: latest.observedAt, window: window, requestedStart: requestedViewportStart)
+        HostChartViewport(
+            latest: latest.observedAt,
+            window: window,
+            requestedStart: requestedViewportStart,
+            duration: requestedViewportDuration
+        )
     }
+
+    private var isCustomZoom: Bool { requestedViewportDuration != nil }
 
     private var chartData: HostMetricsChartPreparation {
         prepared ?? HostMetricsChartPreparation.prepare(
             samples: [], serviceSamples: [], latest: latest, window: window,
             requestedViewportStart: viewport.start,
-            includesServiceMetrics: false
+            includesServiceMetrics: false,
+            viewportDuration: viewport.duration
         )
     }
     private var hoveredHostSample: NornHostMetricSample? {
@@ -1036,13 +1048,14 @@ private struct HostMetricsHistoryChart: View {
         return HostChartPreparationKey(
             hostCount: samples.count, hostLast: samples.last?.observedAt, serviceCount: serviceSamples.count,
             serviceLast: serviceSamples.last?.observedAt, historyRevision: historyRevision, latest: latest, window: window,
-            viewport: viewport.start, includesServiceMetrics: serviceMetricsCollectionEnabled
+            viewport: viewport.start, viewportDuration: viewport.duration,
+            includesServiceMetrics: serviceMetricsCollectionEnabled
         )
     }
     private var historyRequestKey: HostChartHistoryRequestKey {
         return HostChartHistoryRequestKey(
-            window: window,
-            viewportEnd: viewport.end,
+            window: viewport.historyWindow,
+            viewportEnd: requestedViewportStart == nil ? nil : viewport.end,
             includesServiceMetrics: serviceMetricsCollectionEnabled
         )
     }
@@ -1165,23 +1178,48 @@ private struct HostMetricsHistoryChart: View {
                     GeometryReader { geometry in
                         Color.clear
                             .contentShape(Rectangle())
-                            .onContinuousHover { phase in
-                                switch phase {
-                                case let .active(location): updateHover(at: location, proxy: proxy, geometry: geometry)
-                                case .ended: hoveredDate = nil
+                            .background {
+                                HostChartScrollWheelMonitor { deltaY in
+                                    zoomForScroll(deltaY)
                                 }
                             }
+                            .overlay(alignment: .topLeading) {
+                                if let dragSelection, let plotFrame = proxy.plotFrame {
+                                    HostChartSelectionOverlay(
+                                        selection: dragSelection,
+                                        plotFrame: geometry[plotFrame]
+                                    )
+                                }
+                            }
+                            .onContinuousHover { phase in
+                                switch phase {
+                                case let .active(location):
+                                    updateHover(at: location, proxy: proxy, geometry: geometry)
+                                case .ended:
+                                    hoveredDate = nil
+                                }
+                            }
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 8)
+                                    .onChanged { value in
+                                        updateSelection(at: value, proxy: proxy, geometry: geometry)
+                                    }
+                                    .onEnded { value in
+                                        finishSelection(at: value, proxy: proxy, geometry: geometry)
+                                    }
+                            )
                     }
                 }
                 .frame(minHeight: 142)
                 .accessibilityIdentifier("host.history.chart")
-                .accessibilityLabel("Norn mini CPU and memory use for the last \(window.title). CPU high water \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
+                .accessibilityLabel("Norn mini CPU and memory use for the selected history range. CPU high water \(chartData.cpuHighWater.formatted(.number.precision(.fractionLength(1)))) percent. Memory high water \(chartData.memoryHighWater.formatted(.number.precision(.fractionLength(1)))) percent.")
+                .accessibilityValue("\(chartData.viewportStart.formatted(date: .abbreviated, time: .shortened)) to \(chartData.viewportEnd.formatted(date: .abbreviated, time: .shortened)); \(Int(chartData.viewportEnd.timeIntervalSince(chartData.viewportStart))) seconds")
 
                 hoverReadout
 
                 HStack(spacing: 6) {
                     Image(systemName: "clock.arrow.circlepath")
-                    Text("Use Earlier and Later to browse history; choose a window to change its range.")
+                    Text("Drag across the chart to zoom. Use Option-scroll to zoom at the pointer.")
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -1196,6 +1234,7 @@ private struct HostMetricsHistoryChart: View {
             let latestInput = latest
             let windowInput = window
             let viewportInput = viewport.start
+            let viewportDurationInput = viewport.duration
             let includesServiceMetrics = serviceMetricsCollectionEnabled
             let preparationTask = Task.detached(priority: .userInitiated) {
                 HostMetricsChartPreparation.prepare(
@@ -1204,7 +1243,8 @@ private struct HostMetricsHistoryChart: View {
                     latest: latestInput,
                     window: windowInput,
                     requestedViewportStart: viewportInput,
-                    includesServiceMetrics: includesServiceMetrics
+                    includesServiceMetrics: includesServiceMetrics,
+                    viewportDuration: viewportDurationInput
                 )
             }
             let result = await withTaskCancellationHandler(
@@ -1212,22 +1252,34 @@ private struct HostMetricsHistoryChart: View {
                 onCancel: { preparationTask.cancel() }
             )
             guard !Task.isCancelled else { return }
-            prepared = result
+            if reduceMotion {
+                prepared = result
+            } else {
+                withAnimation(.easeInOut(duration: 0.24)) {
+                    prepared = result
+                }
+            }
         }
         .task(id: historyRequestKey) {
             let requestID = UUID()
+            let viewportEnd = viewport.end
             historyRequestID = requestID
             isLoadingHistory = true
-            await onRequestHistory(window, historyRequestKey.viewportEnd)
+            try? await Task.sleep(for: .milliseconds(80))
+            guard !Task.isCancelled else { return }
+            await onRequestHistory(historyRequestKey.window, viewportEnd)
             guard !Task.isCancelled, historyRequestID == requestID else { return }
             isLoadingHistory = false
             historyRequestID = nil
         }
         .onChange(of: window) { _, _ in
+            requestedViewportDuration = nil
             if followsLatest { requestedViewportStart = nil }
             hoveredDate = nil
         }
-        .onDisappear { hoveredDate = nil }
+        .onDisappear {
+            hoveredDate = nil
+        }
     }
 
     private var metricLegend: some View {
@@ -1274,13 +1326,21 @@ private struct HostMetricsHistoryChart: View {
                 .help("Load the next time window")
                 .accessibilityIdentifier("host.history.later")
             Button(action: zoomOut) { Image(systemName: "minus.magnifyingglass") }
-                .disabled(window == NornHostMetricsWindow.allCases.last)
+                .disabled(viewport.duration >= HostChartViewport.maximumDuration)
                 .help("Show a longer time window")
+                .accessibilityIdentifier("host.history.zoom-out")
             Button(action: zoomIn) { Image(systemName: "plus.magnifyingglass") }
-                .disabled(window == NornHostMetricsWindow.allCases.first)
+                .disabled(viewport.duration <= HostChartViewport.minimumDuration)
                 .help("Show a shorter time window")
+                .accessibilityIdentifier("host.history.zoom-in")
+            Button(action: resetZoom) { Image(systemName: "arrow.counterclockwise") }
+                .disabled(!isCustomZoom)
+                .help("Restore the selected time window")
+                .accessibilityLabel("Reset zoom")
+                .accessibilityIdentifier("host.history.reset-zoom")
             Button(action: scrollToLatest) { Image(systemName: "arrow.right.to.line") }
                 .help("Return to the latest sample")
+                .accessibilityLabel("Return to latest")
         }
         .buttonStyle(.borderless)
         .controlSize(.small)
@@ -1298,37 +1358,83 @@ private struct HostMetricsHistoryChart: View {
 
     @ViewBuilder
     private var hoverReadout: some View {
-        if let sample = hoveredHostSample {
-            HStack(spacing: 10) {
-                Text(sample.observedAt.formatted(date: .abbreviated, time: .standard))
-                Text("CPU \(sample.cpuPercent.formatted(.number.precision(.fractionLength(1))))%")
-                    .foregroundStyle(Color.accentColor)
-                Text("Memory \(sample.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
-                    .foregroundStyle(Color.purple)
-                ForEach(hoveredTenantSamples.prefix(2), id: \.0.id) { series, tenant in
-                    Text("\(series.name) CPU \(tenant.cpuPercent.formatted(.number.precision(.fractionLength(1))))% · limit \(tenant.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
-                        .foregroundStyle(series.color)
-                        .lineLimit(1)
+        ZStack(alignment: .leading) {
+            if let sample = hoveredHostSample {
+                HStack(spacing: 10) {
+                    Text(sample.observedAt.formatted(date: .abbreviated, time: .standard))
+                    Text("CPU \(sample.cpuPercent.formatted(.number.precision(.fractionLength(1))))%")
+                        .foregroundStyle(Color.accentColor)
+                    Text("Memory \(sample.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
+                        .foregroundStyle(Color.purple)
+                    ForEach(hoveredTenantSamples.prefix(2), id: \.0.id) { series, tenant in
+                        Text("\(series.name) CPU \(tenant.cpuPercent.formatted(.number.precision(.fractionLength(1))))% · limit \(tenant.memoryPercent.formatted(.number.precision(.fractionLength(1))))%")
+                            .foregroundStyle(series.color)
+                            .lineLimit(1)
+                    }
                 }
+                .font(.caption2.monospacedDigit())
+                .lineLimit(1)
+                .accessibilityIdentifier("host.history.hover-readout")
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
-            .font(.caption2.monospacedDigit())
-            .transition(.opacity)
         }
+        .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: hoveredHostSample != nil)
     }
 
     private func updateHover(at location: CGPoint, proxy: ChartProxy, geometry: GeometryProxy) {
+        hoveredDate = chartDate(at: location, proxy: proxy, geometry: geometry)
+    }
+
+    private func chartDate(at location: CGPoint, proxy: ChartProxy, geometry: GeometryProxy) -> Date? {
+        guard let plotFrame = proxy.plotFrame else { return nil }
+        let frame = geometry[plotFrame]
+        guard frame.width > 0,
+              location.x >= frame.minX, location.x <= frame.maxX,
+              location.y >= frame.minY, location.y <= frame.maxY else {
+            return nil
+        }
+        let fraction = min(max((location.x - frame.minX) / frame.width, 0), 1)
+        return chartData.viewportStart.addingTimeInterval(
+            chartData.viewportEnd.timeIntervalSince(chartData.viewportStart) * fraction
+        )
+    }
+
+    private func updateSelection(at value: DragGesture.Value, proxy: ChartProxy, geometry: GeometryProxy) {
         guard let plotFrame = proxy.plotFrame else { return }
         let frame = geometry[plotFrame]
-        guard frame.contains(location) else {
-            hoveredDate = nil
-            return
-        }
-        hoveredDate = proxy.value(atX: location.x - frame.minX, as: Date.self)
+        let start = CGPoint(
+            x: min(max(value.startLocation.x, frame.minX), frame.maxX),
+            y: min(max(value.startLocation.y, frame.minY), frame.maxY)
+        )
+        let current = CGPoint(
+            x: min(max(value.location.x, frame.minX), frame.maxX),
+            y: min(max(value.location.y, frame.minY), frame.maxY)
+        )
+        dragSelection = HostChartDragSelection(start: start, current: current)
+    }
+
+    private func finishSelection(at value: DragGesture.Value, proxy: ChartProxy, geometry: GeometryProxy) {
+        defer { dragSelection = nil }
+        guard let start = chartDate(at: value.startLocation, proxy: proxy, geometry: geometry),
+              let end = chartDate(at: clampedLocation(value.location, proxy: proxy, geometry: geometry), proxy: proxy, geometry: geometry),
+              abs(end.timeIntervalSince(start)) >= 8 else { return }
+        apply(viewport.selectedRange(from: start, to: end))
+    }
+
+    private func clampedLocation(_ location: CGPoint, proxy: ChartProxy, geometry: GeometryProxy) -> CGPoint {
+        guard let plotFrame = proxy.plotFrame else { return location }
+        let frame = geometry[plotFrame]
+        return CGPoint(
+            x: min(max(location.x, frame.minX), frame.maxX),
+            y: min(max(location.y, frame.minY), frame.maxY)
+        )
     }
 
     private func scrollToLatest() {
         followsLatest = true
         requestedViewportStart = nil
+        requestedViewportDuration = nil
         hoveredDate = nil
     }
 
@@ -1340,14 +1446,119 @@ private struct HostMetricsHistoryChart: View {
     }
 
     private func zoomOut() {
-        guard let index = NornHostMetricsWindow.allCases.firstIndex(of: window),
-              NornHostMetricsWindow.allCases.indices.contains(index + 1) else { return }
-        window = NornHostMetricsWindow.allCases[index + 1]
+        zoom(by: 2, anchor: hoveredDate)
     }
 
     private func zoomIn() {
-        guard let index = NornHostMetricsWindow.allCases.firstIndex(of: window), index > 0 else { return }
-        window = NornHostMetricsWindow.allCases[index - 1]
+        zoom(by: 0.5, anchor: hoveredDate)
+    }
+
+    private func zoom(by scale: Double, anchor: Date?) {
+        apply(viewport.zoomed(by: scale, anchor: anchor), preserving: anchor)
+    }
+
+    private func zoomForScroll(_ deltaY: CGFloat) {
+        let boundedDelta = min(max(Double(deltaY), -8), 8)
+        guard abs(boundedDelta) > 0.01 else { return }
+        zoom(by: exp(-boundedDelta * 0.015), anchor: hoveredDate)
+    }
+
+    private func resetZoom() {
+        requestedViewportDuration = nil
+        hoveredDate = nil
+    }
+
+    private func apply(_ next: HostChartViewport, preserving anchor: Date? = nil) {
+        followsLatest = next.start >= next.latestStart
+        requestedViewportStart = followsLatest ? nil : next.start
+        requestedViewportDuration = abs(next.duration - TimeInterval(window.rawValue)) < 0.5 ? nil : next.duration
+        if let anchor {
+            hoveredDate = min(max(anchor, next.start), next.end)
+        } else {
+            hoveredDate = nil
+        }
+    }
+}
+
+private struct HostChartDragSelection: Equatable {
+    let start: CGPoint
+    let current: CGPoint
+}
+
+private struct HostChartSelectionOverlay: View {
+    let selection: HostChartDragSelection
+    let plotFrame: CGRect
+
+    var body: some View {
+        let lowerX = min(selection.start.x, selection.current.x)
+        let upperX = max(selection.start.x, selection.current.x)
+        Rectangle()
+            .fill(Color.accentColor.opacity(0.14))
+            .overlay {
+                Rectangle()
+                    .stroke(Color.accentColor.opacity(0.55), lineWidth: 1)
+            }
+            .frame(width: max(upperX - lowerX, 1), height: plotFrame.height)
+            .offset(x: lowerX, y: plotFrame.minY)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+}
+
+/// Watches Option-scroll while the pointer is inside this chart surface. The
+/// monitor's closure is replaced on every SwiftUI update, so it never holds a
+/// stale metrics snapshot after a background refresh.
+private struct HostChartScrollWheelMonitor: NSViewRepresentable {
+    let onScroll: (CGFloat) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onScroll: onScroll) }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.install(on: view)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.onScroll = onScroll
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator {
+        var onScroll: (CGFloat) -> Void
+        private weak var view: NSView?
+        private var monitor: Any?
+
+        init(onScroll: @escaping (CGFloat) -> Void) {
+            self.onScroll = onScroll
+        }
+
+        func install(on view: NSView) {
+            self.view = view
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      event.modifierFlags.contains(.option),
+                      let view = self.view,
+                      let window = view.window,
+                      event.window === window else { return event }
+                let point = view.convert(event.locationInWindow, from: nil)
+                guard view.bounds.contains(point) else { return event }
+                self.onScroll(event.scrollingDeltaY)
+                return nil
+            }
+        }
+
+        func remove() {
+            if let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
+            }
+        }
+
+        deinit { remove() }
     }
 }
 
@@ -1368,12 +1579,13 @@ private struct HostChartPreparationKey: Hashable {
     let latest: NornHostMetrics
     let window: NornHostMetricsWindow
     let viewport: Date
+    let viewportDuration: TimeInterval
     let includesServiceMetrics: Bool
 }
 
 private struct HostChartHistoryRequestKey: Hashable {
     let window: NornHostMetricsWindow
-    let viewportEnd: Date
+    let viewportEnd: Date?
     let includesServiceMetrics: Bool
 }
 

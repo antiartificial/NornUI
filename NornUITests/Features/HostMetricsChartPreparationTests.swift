@@ -56,4 +56,32 @@ final class HostMetricsChartPreparationTests: XCTestCase {
         XCTAssertEqual(prepared.earliestDate, latest.observedAt.addingTimeInterval(-Double(NornHostMetricsWindow.days30.rawValue)))
         XCTAssertEqual(prepared.viewportStart, prepared.earliestDate)
     }
+    func testCustomViewportSlicesOnlyTheSelectedRange() {
+        let latest = NornFixtures.hostMetrics
+        let end = latest.observedAt
+        let samples = (0...600).map { offset in
+            NornHostMetricSample(
+                observedAt: end.addingTimeInterval(Double(offset - 600)),
+                cpuPercent: 10,
+                memoryUsedBytes: 20,
+                memoryTotalBytes: 100
+            )
+        }
+        let prepared = HostMetricsChartPreparation.prepare(
+            samples: samples,
+            serviceSamples: [],
+            latest: latest,
+            window: .minutes5,
+            requestedViewportStart: end.addingTimeInterval(-400),
+            includesServiceMetrics: false,
+            viewportDuration: 123
+        )
+
+        XCTAssertEqual(prepared.viewportStart, end.addingTimeInterval(-400))
+        XCTAssertEqual(prepared.viewportEnd, end.addingTimeInterval(-277))
+        XCTAssertEqual(prepared.hostSamples.first?.observedAt, prepared.viewportStart)
+        XCTAssertEqual(prepared.hostSamples.last?.observedAt, prepared.viewportEnd)
+        XCTAssertTrue(prepared.hostSamples.allSatisfy { (prepared.viewportStart...prepared.viewportEnd).contains($0.observedAt) })
+    }
+
 }
