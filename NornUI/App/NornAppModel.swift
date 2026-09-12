@@ -244,11 +244,17 @@ final class NornAppModel {
     }
 
     var availableNavigationDestinations: [NornNavigation] {
-        isFleetAuthorityOnly ? [.overview, .fleet] : NornNavigation.allCases.filter { $0 != .activity }
+        permittedNavigationDestinations.filter { $0 != .activity }
+    }
+
+    /// Activity has its own sidebar rollup, rather than a Control Room row, but
+    /// remains a permitted runtime destination.
+    private var permittedNavigationDestinations: [NornNavigation] {
+        isFleetAuthorityOnly ? [.overview, .fleet] : NornNavigation.allCases
     }
 
     func navigate(to destination: NornNavigation) {
-        guard availableNavigationDestinations.contains(destination) else {
+        guard permittedNavigationDestinations.contains(destination) else {
             lastError = "This server authority does not expose \(destination.title)."
             return
         }
