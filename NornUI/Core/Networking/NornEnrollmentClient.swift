@@ -1,6 +1,6 @@
 import Foundation
 
-protocol NornEnrollmentClientProtocol: Sendable {
+nonisolated protocol NornEnrollmentClientProtocol: Sendable {
     func capabilities() async throws -> NornCapabilities
     func start(_ request: NornEnrollmentStartRequest) async throws -> NornEnrollmentSession
     func exchange(_ session: NornEnrollmentSession) async throws -> NornIssuedToken

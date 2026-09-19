@@ -397,6 +397,7 @@ final class NornAppModelTests: XCTestCase {
 
         await model.start()
 
+        XCTAssertTrue(model.isServerReadReachable)
         XCTAssertFalse(model.canReadRuntime)
         XCTAssertFalse(model.canWriteRuntime)
         XCTAssertFalse(model.canRunHostAssurance)
@@ -689,6 +690,7 @@ final class NornAppModelTests: XCTestCase {
         await model.start()
 
         XCTAssertFalse(model.isServerAuthenticated)
+        XCTAssertFalse(model.isServerReadReachable)
         XCTAssertFalse(model.canOperateFleet)
         XCTAssertEqual(model.availableNavigationDestinations, [.overview, .fleet])
         let queued = await model.queue(.platformSmoke, context: model.issueMutationContext())
@@ -1418,6 +1420,233 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertFalse(String(decoding: storedProfileData, as: UTF8.self).contains("managed-device-token"))
         XCTAssertFalse(String(decoding: storedProfileData, as: UTF8.self).contains("memory-only-verifier"))
     }
+
+    func testConnectionUsesOnlyAnEphemeralTokenVault() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let profile = NornServerProfile(name: "Studio", baseURL: URL(string: "https://norn.example.test")!)
+        let persistentVault = ModelCredentialVault()
+        let recorder = ConnectionTestRecorder()
+        let model = NornAppModel(
+            profileStore: NornProfileStore(defaults: defaults),
+            connectionTestClientFactory: { testedProfile, vault in
+                await recorder.record(
+                    profileID: testedProfile.id,
+                    token: try await vault.credential(for: testedProfile.credentialID)?.accessToken
+                )
+                return MockNornClient()
+            },
+            credentialVault: persistentVault
+        )
+
+        let result = try await model.testConnection(profile: profile, token: " trial-token ")
+
+        XCTAssertEqual(result, "Connected to Norn v2.16.2-control as fixture-operator.")
+        let testedToken = await recorder.token()
+        let persistedToken = await persistentVault.savedToken(for: profile.credentialID)
+        XCTAssertEqual(testedToken, "trial-token")
+        XCTAssertNil(persistedToken)
+        XCTAssertTrue(model.profiles.isEmpty)
+        XCTAssertNil(model.selectedProfileID)
+    }
+
+    func testConnectionUsesProtectedAppsReadForLegacyCapabilityDocuments() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let profile = NornServerProfile(name: "Legacy", baseURL: URL(string: "https://norn.example.test")!)
+        let model = NornAppModel(
+            profileStore: NornProfileStore(defaults: defaults),
+            connectionTestClientFactory: { testedProfile, vault in
+                let credential = try await vault.credential(for: testedProfile.credentialID)
+                return LegacyAppsAuthenticationClient(acceptsCredential: credential?.accessToken == "legacy-token")
+            }
+        )
+
+        let result = try await model.testConnection(profile: profile, token: "legacy-token")
+
+        XCTAssertEqual(result, "Verified read access to Norn legacy-control. This server does not report token scopes.")
+    }
+
+    func testConnectionRejectsLegacyAppsEndpointThatAllowsAnonymousAccess() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let profile = NornServerProfile(name: "Unsafe", baseURL: URL(string: "https://norn.example.test")!)
+        let model = NornAppModel(
+            profileStore: NornProfileStore(defaults: defaults),
+            connectionTestClientFactory: { _, _ in LegacyAppsAuthenticationClient(acceptsCredential: true) }
+        )
+
+        do {
+            _ = try await model.testConnection(profile: profile, token: "token")
+            XCTFail("Expected anonymous apps access to reject compatibility authentication")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Norn did not reject an anonymous apps request, so this server cannot verify the access token safely."
+            )
+        }
+    }
+
+    func testSaveProfileValidatesBeforePersistingTokenOrProfile() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let profile = NornServerProfile(name: "Studio", baseURL: URL(string: "https://norn.example.test")!)
+        let vault = ModelCredentialVault()
+        let model = NornAppModel(
+            profileStore: NornProfileStore(defaults: defaults),
+            connectionTestClientFactory: { _, _ in
+                throw NornClientError.transport(message: "TLS certificate verification failed.")
+            },
+            credentialVault: vault
+        )
+
+        do {
+            try await model.saveProfile(profile, token: "new-token")
+            XCTFail("Expected connection validation to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("TLS certificate verification failed."))
+        }
+
+        XCTAssertTrue(model.profiles.isEmpty)
+        let persistedToken = await vault.savedToken(for: profile.credentialID)
+        XCTAssertNil(persistedToken)
+        XCTAssertNil(defaults.data(forKey: "norn.serverProfiles.v1"))
+    }
+
+    func testSaveProfileNeverReusesCredentialAtChangedOrigin() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let saved = NornServerProfile(name: "Studio", baseURL: URL(string: "https://norn.example.test")!)
+        store.saveProfiles([saved])
+        store.saveSelection(saved.id)
+        let vault = ModelCredentialVault()
+        try await vault.store(NornCredential(accessToken: "saved-token"), for: saved.credentialID)
+        let recorder = ConnectionTestRecorder()
+        let changed = NornServerProfile(
+            id: saved.id,
+            name: saved.name,
+            baseURL: URL(string: "https://another.example.test")!,
+            credentialID: saved.credentialID
+        )
+        let model = NornAppModel(
+            profileStore: store,
+            connectionTestClientFactory: { _, _ in
+                await recorder.record(profileID: saved.id, token: "unexpected")
+                return MockNornClient()
+            },
+            credentialVault: vault
+        )
+
+        do {
+            try await model.saveProfile(changed, token: "")
+            XCTFail("Expected a replacement token requirement")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Enter a replacement access token before testing or saving a different server address."
+            )
+        }
+
+        let testedToken = await recorder.token()
+        let persistedToken = await vault.savedToken(for: saved.credentialID)
+        XCTAssertNil(testedToken)
+        XCTAssertEqual(persistedToken, "saved-token")
+        XCTAssertEqual(model.selectedProfile?.baseURL, saved.baseURL)
+    }
+
+    func testBlankTokenSavePreservesManagedMetadataAfterValidation() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let saved = NornServerProfile(
+            name: "Studio",
+            baseURL: URL(string: "https://norn.example.test")!,
+            deviceID: "device-1",
+            tokenID: "token-1",
+            grantedScopes: ["api:read"],
+            tokenExpiresAt: .now.addingTimeInterval(600),
+            lastRotatedAt: .now
+        )
+        store.saveProfiles([saved])
+        store.saveSelection(saved.id)
+        let vault = ModelCredentialVault()
+        try await vault.store(NornCredential(accessToken: "saved-token"), for: saved.credentialID)
+        let recorder = ConnectionTestRecorder()
+        var edited = saved
+        edited.name = "Renamed Studio"
+        edited.deviceID = nil
+        edited.tokenID = nil
+        edited.grantedScopes = nil
+        edited.tokenExpiresAt = nil
+        edited.lastRotatedAt = nil
+        let model = NornAppModel(
+            profileStore: store,
+            connectionTestClientFactory: { testedProfile, temporaryVault in
+                await recorder.record(
+                    profileID: testedProfile.id,
+                    token: try await temporaryVault.credential(for: testedProfile.credentialID)?.accessToken
+                )
+                return MockNornClient()
+            },
+            credentialVault: vault
+        )
+
+        try await model.saveProfile(edited, token: "")
+
+        let testedToken = await recorder.token()
+        let persistedToken = await vault.savedToken(for: saved.credentialID)
+        XCTAssertEqual(testedToken, "saved-token")
+        XCTAssertEqual(persistedToken, "saved-token")
+        XCTAssertEqual(model.selectedProfile?.name, "Renamed Studio")
+        XCTAssertEqual(model.selectedProfile?.deviceID, "device-1")
+        XCTAssertEqual(model.selectedProfile?.tokenID, "token-1")
+        XCTAssertEqual(model.selectedProfile?.grantedScopes, ["api:read"])
+    }
+
+    func testRemovingProfileDuringValidationDoesNotResurrectIt() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Studio", baseURL: URL(string: "https://norn.example.test")!)
+        store.saveProfiles([profile])
+        let vault = ModelCredentialVault()
+        try await vault.store(NornCredential(accessToken: "old-token"), for: profile.credentialID)
+        let gate = ConnectionTestGate()
+        let model = NornAppModel(
+            profileStore: store,
+            connectionTestClientFactory: { _, _ in
+                await gate.wait()
+                return MockNornClient()
+            },
+            credentialVault: vault
+        )
+
+        let save = Task { () -> Error? in
+            do {
+                try await model.saveProfile(profile, token: "replacement-token")
+                return nil
+            } catch {
+                return error
+            }
+        }
+        await gate.waitUntilStarted()
+        model.removeProfile(id: profile.id)
+        await gate.release()
+
+        let error = await save.value
+        XCTAssertEqual(error?.localizedDescription, "This server profile was removed while its connection was being validated.")
+        XCTAssertTrue(model.profiles.isEmpty)
+        let persistedToken = await vault.savedToken(for: profile.credentialID)
+        XCTAssertEqual(persistedToken, "old-token")
+    }
 }
 
 private actor ModelDeviceIdentityVault: NornDeviceIdentityVault {
@@ -1435,6 +1664,76 @@ private actor ModelCredentialVault: NornCredentialVault {
     func store(_ credential: NornCredential, for identifier: String) { credentials[identifier] = credential }
     func removeCredential(for identifier: String) { credentials.removeValue(forKey: identifier) }
     func savedToken(for identifier: String) -> String? { credentials[identifier]?.accessToken }
+}
+
+private actor ConnectionTestRecorder {
+    private var recordedToken: String?
+
+    func record(profileID: UUID, token: String?) { recordedToken = token }
+    func token() -> String? { recordedToken }
+}
+
+private struct LegacyAppsAuthenticationClient: NornClientProtocol {
+    let acceptsCredential: Bool
+    private let base = MockNornClient()
+
+    func capabilities() async throws -> NornCapabilities {
+        var capabilities = NornFixtures.snapshot.capabilities
+        capabilities.serverVersion = "legacy-control"
+        capabilities.auth.principal = nil
+        return capabilities
+    }
+
+    func apps() async throws -> [NornAppStatus] {
+        guard acceptsCredential else {
+            throw NornClientError.http(status: 401, message: nil, requestID: nil)
+        }
+        return []
+    }
+
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] {
+        try await base.operations(activeOnly: activeOnly, limit: limit)
+    }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation {
+        try await base.queue(request, idempotencyKey: idempotencyKey)
+    }
+
+    nonisolated func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
+}
+
+private actor ConnectionTestGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters = []
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func waitUntilStarted() async {
+        guard !started else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters = []
+        waiters.forEach { $0.resume() }
+    }
 }
 
 private actor ModelEnrollmentClient: NornEnrollmentClientProtocol {

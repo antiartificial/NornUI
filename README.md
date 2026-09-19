@@ -98,6 +98,18 @@ Manual token entry remains available under **Access Token** for older servers
 or recovery. It is not the recommended onboarding path because a pasted token
 does not receive native renewal or device-level revocation metadata.
 
+Use **Manage Connections…** in the server menu to edit a saved name/address,
+replace its token, test authentication, or remove the connection from this Mac.
+Testing does not save changes. Saving verifies the endpoint and token before
+replacing the saved connection; changing the server URL requires a newly entered
+token or a new pairing. Removal does not delete a cluster or its infrastructure.
+
+Remote servers must expose HTTPS with a trusted certificate matching the URL's
+hostname. A plain HTTP API port cannot accept an HTTPS request. For private
+Tailscale clusters, configure a private HTTPS proxy and permit its HTTPS port in
+the tailnet policy. An SSH forward to a loopback HTTP address is also supported.
+There is no certificate-verification bypass or automatic HTTP downgrade.
+
 ## Provisioning contract boundaries
 
 - Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.

@@ -1,6 +1,6 @@
 import Foundation
 
-protocol NornClientProtocol: Sendable {
+nonisolated protocol NornClientProtocol: Sendable {
     func capabilities() async throws -> NornCapabilities
     func hostMetricsHistory(range: NornHistoryRange) async throws -> NornHostHistoryPage
     func hostMetrics() async throws -> NornHostMetrics

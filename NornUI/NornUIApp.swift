@@ -76,6 +76,7 @@ struct NornUIApp: App {
                 selectedProfileID: appModel.selectedProfileID,
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onTestConnection: { try await appModel.testConnection(profile: $0, token: $1) },
                 onDiscoverCapabilities: { try await appModel.discoverEnrollmentCapabilities(profile: $0) },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)

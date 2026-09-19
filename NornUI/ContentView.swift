@@ -35,7 +35,7 @@ struct ContentView: View {
                         appModel.isShowingProfileEditor = true
                     }
                     SettingsLink {
-                        Label("Server Settings…", systemImage: "gear")
+                        Label("Manage Connections…", systemImage: "gear")
                     }
                 } label: {
                     Label("Server Actions", systemImage: "ellipsis.circle")
@@ -46,6 +46,9 @@ struct ContentView: View {
             ServerProfileEditor(
                 onManualSave: { profile, token in
                     try await appModel.saveProfile(profile, token: token)
+                },
+                onTestConnection: { profile, token in
+                    try await appModel.testConnection(profile: profile, token: token)
                 },
                 onDiscoverCapabilities: { profile in
                     try await appModel.discoverEnrollmentCapabilities(profile: profile)
@@ -280,6 +283,7 @@ struct ContentView: View {
 				profileID: appModel.selectedProfileID,
                 isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
+                isConnectionVerified: appModel.isFixtureMode || appModel.isServerReadReachable,
                 onRefresh: refreshFleet,
                 issueMutationContext: { appModel.issueMutationContext() },
                 onPlan: { pool, desired, size, reason, context in
@@ -319,7 +323,7 @@ struct ContentView: View {
             if appModel.connectionState == .online {
                 await appModel.refreshFleet()
             } else {
-                await appModel.refresh()
+                await appModel.connect()
             }
         }
     }
@@ -379,6 +383,9 @@ private struct ProfileMenu: View {
             Divider()
             Button("Add Server…", systemImage: "plus") {
                 appModel.isShowingProfileEditor = true
+            }
+            SettingsLink {
+                Label("Manage Connections…", systemImage: "gear")
             }
         } label: {
             Label(appModel.selectedProfile?.name ?? "Explore Norn", systemImage: "point.3.connected.trianglepath.dotted")

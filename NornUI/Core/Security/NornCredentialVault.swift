@@ -14,7 +14,7 @@ nonisolated struct NornCredential: Sendable, Equatable {
     }
 }
 
-protocol NornCredentialVault: Sendable {
+nonisolated protocol NornCredentialVault: Sendable {
     func credential(for identifier: String) async throws -> NornCredential?
     func store(_ credential: NornCredential, for identifier: String) async throws
     func removeCredential(for identifier: String) async throws

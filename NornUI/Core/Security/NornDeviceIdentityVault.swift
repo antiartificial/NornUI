@@ -12,7 +12,7 @@ nonisolated struct NornDeviceIdentity: Hashable, Sendable {
     let protection: NornDeviceIdentityProtection
 }
 
-protocol NornDeviceIdentityVault: Sendable {
+nonisolated protocol NornDeviceIdentityVault: Sendable {
     func identity(for identifier: String) async throws -> NornDeviceIdentity
     func removeIdentity(for identifier: String) async throws
 }

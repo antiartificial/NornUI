@@ -5,6 +5,7 @@ struct NornSettingsView: View {
     let selectedProfileID: UUID?
     let onSelect: (UUID?) async -> Void
     let onManualSave: (NornServerProfile, String) async throws -> Void
+    let onTestConnection: ServerProfileEditor.ConnectionTest?
     let onDiscoverCapabilities: ServerProfileEditor.CapabilityDiscovery
     let onStartEnrollment: ServerProfileEditor.EnrollmentStart
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
@@ -13,6 +14,7 @@ struct NornSettingsView: View {
     let onRemove: (UUID) -> Void
 
     @State private var isAddingServer = false
+    @State private var editingProfile: NornServerProfile?
     @State private var pairingProfile: NornServerProfile?
     @State private var pendingRemoval: NornServerProfile?
 
@@ -51,6 +53,9 @@ struct NornSettingsView: View {
                                 Task { await onSelect(profile.id) }
                             }
                             .disabled(profile.id == selectedProfileID)
+                            Button("Edit…") {
+                                editingProfile = profile
+                            }
                             if !profile.isManagedDevice {
                                 Button("Pair…") {
                                     pairingProfile = profile
@@ -59,6 +64,13 @@ struct NornSettingsView: View {
                             Button("Remove", role: .destructive) {
                                 pendingRemoval = profile
                             }
+                        }
+                        .contextMenu {
+                            Button("Use") { Task { await onSelect(profile.id) } }
+                            Button("Edit…") { editingProfile = profile }
+                            Button("Pair…") { pairingProfile = profile }
+                            Divider()
+                            Button("Remove", role: .destructive) { pendingRemoval = profile }
                         }
                     }
                 }
@@ -106,8 +118,11 @@ struct NornSettingsView: View {
         .sheet(isPresented: $isAddingServer) {
             editor(profile: nil)
         }
+        .sheet(item: $editingProfile) { profile in
+            editor(profile: profile, startsWithPairing: false)
+        }
         .sheet(item: $pairingProfile) { profile in
-            editor(profile: profile)
+            editor(profile: profile, startsWithPairing: true)
         }
         .alert(
             "Remove \(pendingRemoval?.name ?? "Server")?",
@@ -129,11 +144,12 @@ struct NornSettingsView: View {
         }
     }
 
-    private func editor(profile: NornServerProfile?) -> some View {
+    private func editor(profile: NornServerProfile?, startsWithPairing: Bool = true) -> some View {
         ServerProfileEditor(
             profile: profile,
-            startsWithPairing: true,
+            startsWithPairing: startsWithPairing,
             onManualSave: onManualSave,
+            onTestConnection: onTestConnection,
             onDiscoverCapabilities: onDiscoverCapabilities,
             onStartEnrollment: onStartEnrollment,
             onCompleteEnrollment: onCompleteEnrollment
