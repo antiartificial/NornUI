@@ -149,6 +149,7 @@ private struct NornCommands: Commands {
         case .apps: "2"
         case .operations: "3"
         case .fleet: "4"
+        case .fleetBuilder: "9"
         case .platform: "5"
         case .host: "6"
         case .activity: "7"

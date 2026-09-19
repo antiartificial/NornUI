@@ -301,6 +301,8 @@ struct ContentView: View {
             )
             .onAppear { appModel.setFleetVisible(true) }
             .onDisappear { appModel.setFleetVisible(false) }
+        case .fleetBuilder:
+            FleetBuilderView()
         case .activity:
             ActivityFeatureView(
                 snapshot: appModel.snapshot,

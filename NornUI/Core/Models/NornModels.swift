@@ -6,6 +6,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
     case delivery
     case operations
     case fleet
+    case fleetBuilder
     case platform
     case host
     case activity
@@ -19,6 +20,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .delivery: "Delivery"
         case .operations: "Operations"
         case .fleet: "Fleet"
+        case .fleetBuilder: "Fleet Builder"
         case .platform: "Releases"
         case .host: "Host"
         case .activity: "Activity"
@@ -32,6 +34,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .delivery: "arrow.triangle.branch"
         case .operations: "waveform.path.ecg.rectangle"
         case .fleet: "server.rack"
+        case .fleetBuilder: "point.3.connected.trianglepath.dotted"
         case .platform: "shippingbox.and.arrow.backward"
         case .host: "macmini"
         case .activity: "bolt.horizontal.circle"
