@@ -7,7 +7,10 @@ import UniformTypeIdentifiers
 struct FleetBuilderView: View {
     @State private var model = FleetBuilderModel()
     @State private var exporting = false
+    @State private var exportingJSON = false
+    @State private var importingJSON = false
     @State private var showYAML = false
+    @State private var shareError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +35,18 @@ struct FleetBuilderView: View {
             contentType: .plainText,
             defaultFilename: "\(model.draft.name)-fleet.yaml"
         ) { _ in }
+        .fileExporter(
+            isPresented: $exportingJSON,
+            document: JSONDocument(data: (try? model.exportDraftJSON()) ?? Data()),
+            contentType: .json,
+            defaultFilename: "\(model.draft.name).fleet.json"
+        ) { _ in }
+        .fileImporter(isPresented: $importingJSON, allowedContentTypes: [.json]) { result in
+            importDraft(result)
+        }
+        .alert("Import failed", isPresented: Binding(get: { shareError != nil }, set: { if !$0 { shareError = nil } })) {
+            Button("OK", role: .cancel) { shareError = nil }
+        } message: { Text(shareError ?? "") }
     }
 
     // MARK: Window toolbar
@@ -49,6 +64,33 @@ struct FleetBuilderView: View {
                 .help("Copy cluster.yaml to the clipboard")
             Button { exporting = true } label: { Label("Export", systemImage: "square.and.arrow.down") }
                 .help("Save cluster.yaml")
+            Menu {
+                Button { copyJSON() } label: { Label("Copy fleet JSON", systemImage: "doc.on.doc") }
+                Button { exportingJSON = true } label: { Label("Export fleet JSON…", systemImage: "square.and.arrow.up") }
+                Button { importingJSON = true } label: { Label("Import fleet JSON…", systemImage: "square.and.arrow.down.on.square") }
+            } label: { Label("Share", systemImage: "square.and.arrow.up.on.square") }
+                .help("Share this fleet as a portable JSON config")
+        }
+    }
+
+    private func copyJSON() {
+        guard let data = try? model.exportDraftJSON(), let text = String(data: data, encoding: .utf8) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func importDraft(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                try model.importDraftJSON(try Data(contentsOf: url))
+            } catch {
+                shareError = error.localizedDescription
+            }
+        case .failure(let error):
+            shareError = error.localizedDescription
         }
     }
 
@@ -388,5 +430,18 @@ struct YAMLDocument: FileDocument {
     }
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+
+/// Minimal document for exporting the shareable fleet JSON.
+struct JSONDocument: FileDocument {
+    static let readableContentTypes: [UTType] = [.json]
+    var data: Data
+    init(data: Data) { self.data = data }
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }

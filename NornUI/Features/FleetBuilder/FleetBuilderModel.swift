@@ -86,6 +86,23 @@ final class FleetBuilderModel {
         if id != nil { selectedRegion = nil }
     }
 
+    // MARK: Share (portable FleetDraft JSON)
+
+    /// Serialize the full draft as shareable JSON — the complete topology, distinct from
+    /// the applied cluster.yaml. Portable across NornUI, the web builder, and the CLI.
+    func exportDraftJSON() throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try encoder.encode(draft)
+    }
+
+    /// Replace the current draft with an imported one (undoable).
+    func importDraftJSON(_ data: Data) throws {
+        let decoded = try JSONDecoder().decode(FleetDraft.self, from: data)
+        mutate { $0 = decoded }
+        clearSelection()
+    }
+
     /// Select a region band for editing (clears any node selection).
     func selectRegion(_ region: Int?) {
         selectedRegion = region
