@@ -87,11 +87,52 @@ final class FleetBuilderTests: XCTestCase {
     // MARK: cluster.yaml
 
     func testClusterYAMLShape() {
-        let yaml = FleetDraft().clusterYAML()
+        // Default draft: 1 region, self-managed DB, no managed extras -> a single valid Cluster doc.
+        let docs = FleetDraft().fleetDocuments()
+        XCTAssertEqual(docs.count, 1)
+        let doc = docs[0]
+        XCTAssertEqual(doc.filename, "norn-prod-nyc3.cluster.yaml")
+        let yaml = doc.yaml
         XCTAssertTrue(yaml.contains("apiVersion: norn.dev/fleet/v1"))
         XCTAssertTrue(yaml.contains("kind: Cluster"))
-        XCTAssertTrue(yaml.contains("name: norn-prod"))
-        XCTAssertTrue(yaml.contains("managed: false"))
+        XCTAssertTrue(yaml.contains("cluster:\n  name: norn-prod\n  provider: digitalocean\n  region: nyc3"))
+        XCTAssertTrue(yaml.contains("nodePools:"))
+        XCTAssertTrue(yaml.contains("control-nyc3:"))
+        XCTAssertTrue(yaml.contains("app-nyc3:"))
+        XCTAssertTrue(yaml.contains("db-nyc3:"))
+        XCTAssertTrue(yaml.contains("workload: control"))
+        // Control quorum is pinned (min == desired == max); apps get one node of headroom.
+        XCTAssertTrue(yaml.contains("min: 3\n    desired: 3\n    max: 3"))
+        XCTAssertTrue(yaml.contains("min: 2\n    desired: 2\n    max: 3"))
+        XCTAssertTrue(yaml.contains("strategy: blueGreen"))
+        XCTAssertTrue(yaml.contains("requireCapacityHeadroom: true"))
+        XCTAssertTrue(yaml.contains("drainTimeout: 15m"))
+    }
+
+    func testManagedDatabaseGoesToExtrasSidecar() {
+        var draft = FleetDraft()
+        draft.db.mode = .managed
+        let docs = draft.fleetDocuments()
+        XCTAssertEqual(docs.count, 2)
+        let cluster = docs[0].yaml
+        XCTAssertFalse(cluster.contains("db-nyc3:"))          // managed DB is not a node pool
+        let extras = docs[1]
+        XCTAssertEqual(extras.filename, "norn-prod.fleet-extras.yaml")
+        XCTAssertTrue(extras.yaml.contains("apiVersion: norn.dev/fleet-extras/v1"))
+        XCTAssertTrue(extras.yaml.contains("managedDatabase:"))
+    }
+
+    func testTwoRegionsEmitOneClusterDocEach() {
+        var draft = FleetDraft()
+        draft.regions = 2
+        draft.secondRegion = "sfo3"
+        let docs = draft.fleetDocuments()
+        XCTAssertTrue(docs.contains { $0.filename == "norn-prod-nyc3.cluster.yaml" })
+        XCTAssertTrue(docs.contains { $0.filename == "norn-prod-sfo3.cluster.yaml" })
+        let b = docs.first { $0.filename.contains("sfo3") }!.yaml
+        XCTAssertTrue(b.contains("region: sfo3"))
+        XCTAssertTrue(b.contains("app-sfo3:"))
+        XCTAssertFalse(b.contains("db-sfo3:"))                // DB stays in the primary region
     }
 
     // MARK: Graph

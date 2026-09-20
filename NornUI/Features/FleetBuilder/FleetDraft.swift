@@ -210,45 +210,119 @@ extension FleetDraft {
     func totalMonthlyUSD() -> Int { costLines().reduce(0) { $0 + $1.usdMonthly } }
 }
 
-// MARK: - cluster.yaml export
+// MARK: - fleet document export (norn.dev/fleet/v1)
 
 extension FleetDraft {
-    /// Emit a `norn.dev/fleet/v1` Cluster document. Mirrors the web `toClusterYaml`.
+    nonisolated struct FleetDocument: Sendable, Hashable, Identifiable {
+        let filename: String
+        let yaml: String
+        var id: String { filename }
+    }
+
+    /// The emitted documents: one valid single-region `norn.dev/fleet/v1` Cluster per region,
+    /// plus a `fleet-extras.yaml` sidecar for managed services the contract doesn't model.
+    /// Mirror of the web `fleetDocuments` in v2/ui/src/lib/fleetDraft.ts.
+    func fleetDocuments() -> [FleetDocument] {
+        var docs: [FleetDocument] = []
+        for r in 0..<regions {
+            let regionName = r == 0 ? region : secondRegion
+            docs.append(FleetDocument(filename: "\(name)-\(regionName).cluster.yaml",
+                                      yaml: clusterDoc(regionIndex: r, regionName: regionName)))
+        }
+        if let extras = extrasDoc() {
+            docs.append(FleetDocument(filename: "\(name).fleet-extras.yaml", yaml: extras))
+        }
+        return docs
+    }
+
+    /// Combined, human-readable view of every emitted document (for the YAML pane + clipboard).
+    /// Each document is preceded by a `# ===== <filename> =====` comment, which YAML ignores, so a
+    /// single-document export remains a valid Cluster.
     func clusterYAML() -> String {
-        var out = ""
-        out += "apiVersion: norn.dev/fleet/v1\n"
-        out += "kind: Cluster\n"
-        out += "metadata:\n  name: \(name)\n"
-        out += "spec:\n"
-        out += "  provider: digitalocean\n"
-        out += "  regions:\n"
-        out += "    - name: \(region)\n      role: primary\n"
-        if regions == 2 { out += "    - name: \(secondRegion)\n      role: secondary\n" }
-        out += "  nodePools:\n"
-        out += pool("control-\(region)", size: sizes.control, count: controlA)
-        if regions == 2 && controlB > 0 { out += pool("control-\(secondRegion)", size: sizes.control, count: controlB) }
-        out += pool("app-\(region)", size: sizes.app, count: appA)
-        if regions == 2 { out += pool("app-\(secondRegion)", size: sizes.app, count: appB) }
-        out += "  database:\n"
-        if db.mode == .managed {
-            out += "    managed: true\n    engine: \(db.engine.rawValue)\n    size: \(db.managedSize)\n    region: \(region)\n"
-            if db.replica { out += "    readReplica:\n      region: \(replicaResidesInRegionB ? secondRegion : region)\n" }
-        } else {
-            out += "    managed: false\n    engine: pg\n    patroni: 3\n    size: \(db.selfSize)\n    region: \(region)\n"
-        }
-        if !services.isEmpty {
-            out += "  services:\n"
-            for svc in services {
-                out += "    - kind: \(svc.kind.rawValue)\n      engine: \(svc.engine.lowercased())\n      size: \(svc.size)\n      count: \(svc.count)\n"
-            }
-        }
-        out += "  ingress:\n    loadBalancer: do-regional\n"
-        if edge == .cloudflare { out += "    edge: cloudflare\n" }
-        out += "  objectStorage:\n    spaces: \(hasSpaces)\n"
+        fleetDocuments().map { "# ===== \($0.filename) =====\n\($0.yaml)" }.joined(separator: "\n")
+    }
+
+    // Auto-derive capacity bounds from the single builder count. Stateful/quorum pools stay pinned;
+    // stateless pools get one node of blue/green headroom.
+    private func nodePoolYAML(name poolName: String, size: String,
+                             min: Int, desired: Int, max: Int, workload: String) -> String {
+        var out = "  \(poolName):\n"
+        out += "    size: \(size)\n"
+        out += "    min: \(min)\n    desired: \(desired)\n    max: \(max)\n"
+        out += "    labels:\n      workload: \(workload)\n"
+        out += "    replacement:\n"
+        out += "      strategy: blueGreen\n"
+        out += "      requireCapacityHeadroom: true\n"
+        out += "      requireReadiness: true\n"
+        out += "      drainTimeout: 15m\n"
         return out
     }
 
-    private func pool(_ name: String, size: String, count: Int) -> String {
-        "    - name: \(name)\n      size: \(size)\n      count: \(count)\n"
+    private func clusterDoc(regionIndex r: Int, regionName: String) -> String {
+        var out = ""
+        out += "apiVersion: norn.dev/fleet/v1\n"
+        out += "kind: Cluster\n"
+        out += "cluster:\n  name: \(name)\n  provider: digitalocean\n  region: \(regionName)\n"
+        // Object storage + edge are managed separately (see fleet-extras); noted here for context.
+        out += "# objectStorage: DO Spaces (terraform state + WAL) in \(region)\(hasSpaces ? "" : " — none available")\n"
+        if edge == .cloudflare { out += "# edge: cloudflare in front of the regional load balancer\n" }
+        out += "nodePools:\n"
+
+        let controlCount = r == 0 ? controlA : controlB
+        if controlCount > 0 {
+            out += nodePoolYAML(name: "control-\(regionName)", size: sizes.control,
+                                min: controlCount, desired: controlCount, max: controlCount, workload: "control")
+        }
+        let appCount = r == 0 ? appA : appB
+        out += nodePoolYAML(name: "app-\(regionName)", size: sizes.app,
+                            min: appCount, desired: appCount, max: appCount + 1, workload: "app")
+
+        // DB, cache/queue and self-managed test DBs live in the primary region.
+        if r == 0 {
+            if db.mode == .selfManaged {
+                out += nodePoolYAML(name: "db-\(regionName)", size: db.selfSize,
+                                    min: 3, desired: 3, max: 3, workload: "database")
+            }
+            var cacheN = 0, queueN = 0
+            for svc in services {
+                let kind = svc.kind == .cache ? "cache" : "queue"
+                let n: Int
+                if svc.kind == .cache { n = cacheN; cacheN += 1 } else { n = queueN; queueN += 1 }
+                let poolName = n == 0 ? "\(kind)-\(regionName)" : "\(kind)-\(regionName)-\(n + 1)"
+                out += nodePoolYAML(name: poolName, size: svc.size,
+                                    min: svc.count, desired: svc.count, max: svc.count + 1, workload: kind)
+            }
+            for (i, ex) in extras.enumerated() where ex.mode == .selfManaged {
+                out += nodePoolYAML(name: "db-test-\(i + 1)-\(regionName)", size: ex.size,
+                                    min: 1, desired: 1, max: 1, workload: "database")
+            }
+        }
+        return out
+    }
+
+    /// Managed services that are NOT part of norn.dev/fleet/v1 (provisioned separately). Returns nil
+    /// when there is nothing managed to record.
+    private func extrasDoc() -> String? {
+        let managedExtras = extras.filter { $0.mode == .managed }
+        guard db.mode == .managed || edge == .cloudflare || !managedExtras.isEmpty else { return nil }
+
+        var out = "# Managed services not modelled by norn.dev/fleet/v1 — provisioned separately.\n"
+        out += "apiVersion: norn.dev/fleet-extras/v1\n"
+        out += "cluster: \(name)\n"
+        if db.mode == .managed {
+            out += "managedDatabase:\n  engine: \(db.engine.rawValue)\n  size: \(db.managedSize)\n  region: \(region)\n"
+            if db.replica {
+                out += "  readReplica:\n    region: \(replicaResidesInRegionB ? secondRegion : region)\n"
+            }
+        }
+        if !managedExtras.isEmpty {
+            out += "testDatabases:\n"
+            for ex in managedExtras {
+                out += "  - engine: \(ex.engine.rawValue)\n    size: \(ex.size)\n    region: \(region)\n"
+            }
+        }
+        if edge == .cloudflare { out += "edge:\n  provider: cloudflare\n" }
+        out += "objectStorage:\n  spaces: \(hasSpaces)\n  region: \(region)\n"
+        return out
     }
 }

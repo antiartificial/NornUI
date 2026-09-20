@@ -30,7 +30,7 @@ struct FleetBuilderView: View {
             isPresented: $exporting,
             document: YAMLDocument(text: model.clusterYAML()),
             contentType: .plainText,
-            defaultFilename: "cluster.yaml"
+            defaultFilename: "\(model.draft.name)-fleet.yaml"
         ) { _ in }
     }
 
