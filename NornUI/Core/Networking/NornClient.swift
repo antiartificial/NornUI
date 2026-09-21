@@ -133,6 +133,16 @@ actor NornClient: NornClientProtocol {
         return result.events
     }
 
+    func beaconEvents(limit: Int) async throws -> [NornBeaconEvent] {
+        var components = URLComponents(url: try url(path: "api/events"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200)))]
+        guard let endpoint = components?.url else {
+            throw NornClientError.invalidBaseURL
+        }
+        let result: NornBeaconList = try await perform(url: endpoint, method: "GET")
+        return result.events
+    }
+
     func releases() async throws -> NornReleaseList {
         do {
             let releases: NornReleaseList = try await get("api/v1/releases")

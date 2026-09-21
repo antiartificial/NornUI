@@ -25,7 +25,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .platform: "Releases"
         case .host: "Host"
         case .activity: "Activity"
-        case .audit: "Audit"
+        case .audit: "Activity Log"
         }
     }
 
@@ -40,7 +40,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .platform: "shippingbox.and.arrow.backward"
         case .host: "macmini"
         case .activity: "bolt.horizontal.circle"
-        case .audit: "checklist"
+        case .audit: "list.bullet.rectangle"
         }
     }
 }
@@ -1385,6 +1385,47 @@ nonisolated struct MutationAuditList: Codable, Hashable, Sendable {
     var schema: String?
     var events: [MutationAuditEvent]
     var count: Int
+}
+
+/// An operator-facing beacon event from GET /api/events (api:read) — the
+/// activity ledger of workload (app-scoped) and cell (infra) actions, distinct
+/// from the admin mutation-audit receipts.
+nonisolated struct NornBeaconEvent: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var source: String? = nil
+    var app: String? = nil
+    var environment: String? = nil
+    var type: String
+    var severity: String
+    var state: String? = nil
+    var title: String
+    var body: String? = nil
+    var occurredAt: Date
+    var metadata: [String: JSONValue]? = nil
+
+    /// Cell-scoped events have no app; workload (pod) events carry one.
+    var isCellScoped: Bool { (app ?? "").isEmpty }
+
+    /// Who took the action, recorded by emitAppActivity in the metadata.
+    var actor: String? {
+        if case let .string(value)? = metadata?["actor"] { return value }
+        return nil
+    }
+
+    static func filter(_ events: [NornBeaconEvent], query: String) -> [NornBeaconEvent] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return events }
+        return events.filter {
+            $0.title.lowercased().contains(needle)
+                || $0.type.lowercased().contains(needle)
+                || ($0.app ?? "").lowercased().contains(needle)
+                || ($0.actor ?? "").lowercased().contains(needle)
+        }
+    }
+}
+
+nonisolated struct NornBeaconList: Codable, Hashable, Sendable {
+    var events: [NornBeaconEvent]
 }
 
 nonisolated struct NornReleaseList: Codable, Hashable, Sendable {

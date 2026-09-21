@@ -321,12 +321,14 @@ struct ContentView: View {
                 onShowApps: { appModel.navigate(to: .apps) }
             )
         case .audit:
-            AuditFeatureView(
-                events: appModel.auditMutations,
-                canRead: appModel.canReadAudit,
-                onRefresh: refreshAudit
+            ActivityLogFeatureView(
+                beaconEvents: appModel.beaconEvents,
+                auditEvents: appModel.auditMutations,
+                canReadActivity: appModel.canReadRuntime,
+                canReadAudit: appModel.canReadAudit,
+                onRefresh: refreshActivityLog
             )
-            .task(id: appModel.selectedProfileID) { await appModel.refreshAuditMutations() }
+            .task(id: appModel.selectedProfileID) { await appModel.refreshActivityLog() }
         }
     }
 
@@ -338,8 +340,8 @@ struct ContentView: View {
         Task { await appModel.refreshHost() }
     }
 
-    private func refreshAudit() {
-        Task { await appModel.refreshAuditMutations() }
+    private func refreshActivityLog() {
+        Task { await appModel.refreshActivityLog() }
     }
 
     private func refreshFleet() {

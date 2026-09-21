@@ -36,6 +36,14 @@ enum NornStatus: String, CaseIterable, Sendable {
         }
     }
 
+    init(beaconSeverity: String) {
+        switch beaconSeverity.lowercased() {
+        case "critical": self = .critical
+        case "warning": self = .attention
+        default: self = .neutral
+        }
+    }
+
     var title: String {
         switch self {
         case .healthy: "Healthy"

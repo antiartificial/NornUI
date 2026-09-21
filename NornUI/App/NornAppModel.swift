@@ -131,6 +131,7 @@ final class NornAppModel {
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
     var auditMutations: [MutationAuditEvent] = []
+    var beaconEvents: [NornBeaconEvent] = []
     var remoteHostMetricsHistory: [NornHostMetricSample] = []
     var remoteServiceMetricsHistory: [NornServiceMetricSample] = []
     var historyStatus: String?
@@ -1146,6 +1147,32 @@ final class NornAppModel {
             let events = try await client.auditMutations(limit: 100)
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             auditMutations = events
+            lastError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Loads both Activity Log sources: the operator-facing beacon feed (Pods /
+    /// Cell) and, when permitted, the admin mutation-audit (Receipts).
+    func refreshActivityLog() async {
+        await refreshBeaconEvents()
+        if canReadAudit {
+            await refreshAuditMutations()
+        }
+    }
+
+    func refreshBeaconEvents() async {
+        guard let client, connectionState == .online, canReadRuntime else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        do {
+            let events = try await client.beaconEvents(limit: 100)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            beaconEvents = events
             lastError = nil
         } catch is CancellationError {
             return
