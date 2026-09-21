@@ -6,42 +6,96 @@ struct FleetBuilderCanvas: View {
     let model: FleetBuilderModel
 
     @State private var dragStart: [String: CGPoint] = [:]
+    @State private var zoom: CGFloat = 1
+    @State private var gestureZoom: CGFloat?
+    private let viewportInset: CGFloat = 24
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let graph = model.graph
         let frames = regionFrames(graph)
-        let canvas = canvasSize(graph, frames: frames)
-        ScrollView([.horizontal, .vertical]) {
-            ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.4))
-                    .frame(width: canvas.width, height: canvas.height)
+        let bounds = contentBounds(graph, frames: frames)
+        GeometryReader { viewport in
+            ScrollView([.horizontal, .vertical]) {
+                ZStack(alignment: .topLeading) {
+                    ForEach(frames) { frame in
+                        regionFrameView(frame)
+                            .offset(x: frame.rect.minX, y: frame.rect.minY)
+                    }
+
+                    connectors(graph)
+                        .frame(width: bounds.maxX, height: bounds.maxY)
+                        .allowsHitTesting(false)
+
+                    ForEach(graph.nodes) { node in
+                        FleetNodeCard(node: node, selected: node.id == model.selectedNodeID)
+                            .offset(x: node.position.x, y: node.position.y)
+                            .highPriorityGesture(dragGesture(node))
+                            .onTapGesture { model.select(node.id) }
+                    }
+                }
+                .offset(x: -bounds.minX, y: -bounds.minY)
+                .frame(width: bounds.width, height: bounds.height, alignment: .topLeading)
+                .scaleEffect(zoom, anchor: .topLeading)
+                .frame(width: bounds.width * zoom, height: bounds.height * zoom, alignment: .topLeading)
+                .padding(viewportInset)
+                .padding(.bottom, 48)
+            }
+            .background {
+                Color(nsColor: .underPageBackgroundColor)
                     .contentShape(Rectangle())
                     .onTapGesture { model.clearSelection() }
-
-                ForEach(frames) { frame in
-                    regionFrameView(frame)
-                        .offset(x: frame.rect.minX, y: frame.rect.minY)
-                }
-
-                connectors(graph)
-                    .frame(width: canvas.width, height: canvas.height)
-                    .allowsHitTesting(false)
-
-                ForEach(graph.nodes) { node in
-                    FleetNodeCard(node: node, selected: node.id == model.selectedNodeID)
-                        .offset(x: node.position.x, y: node.position.y)
-                        .highPriorityGesture(dragGesture(node))
-                        .onTapGesture { model.select(node.id) }
-                }
             }
-            .frame(width: canvas.width, height: canvas.height, alignment: .topLeading)
-            .padding(20)
+            .simultaneousGesture(MagnifyGesture()
+                .onChanged { value in
+                    if gestureZoom == nil { gestureZoom = zoom }
+                    zoom = Self.clampedZoom((gestureZoom ?? zoom) * value.magnification)
+                }
+                .onEnded { _ in gestureZoom = nil })
+            .overlay(alignment: .topTrailing) { zoomControls(viewport: viewport.size, content: bounds.size) }
+            .overlay(alignment: .bottom) { legend(graph) }
+            .clipped()
         }
-        .background(Color(nsColor: .underPageBackgroundColor))
-        .overlay(alignment: .bottom) { legend(graph) }
         .accessibilityLabel("Fleet topology canvas")
+    }
+
+    private static func clampedZoom(_ value: CGFloat) -> CGFloat { min(2, max(0.25, value)) }
+
+    private func setZoom(_ value: CGFloat) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+            zoom = Self.clampedZoom(value)
+        }
+    }
+
+    private func zoomControls(viewport: CGSize, content: CGSize) -> some View {
+        HStack(spacing: 8) {
+            Button { setZoom(zoom / 1.2) } label: { Image(systemName: "minus.magnifyingglass") }
+                .help("Zoom out")
+                .accessibilityLabel("Zoom out")
+                .disabled(zoom <= 0.25)
+            Button { setZoom(1) } label: {
+                Text("\(Int((zoom * 100).rounded()))%")
+                    .monospacedDigit()
+                    .frame(minWidth: 38)
+            }
+            .help("Actual size")
+            .accessibilityLabel("Actual size, current zoom \(Int((zoom * 100).rounded())) percent")
+            Button { setZoom(zoom * 1.2) } label: { Image(systemName: "plus.magnifyingglass") }
+                .help("Zoom in")
+                .accessibilityLabel("Zoom in")
+                .disabled(zoom >= 2)
+            Divider().frame(height: 14)
+            Button("Fit") {
+                setZoom(min((viewport.width - 2 * viewportInset) / content.width,
+                            (viewport.height - 2 * viewportInset - 48) / content.height))
+            }
+            .help("Fit topology in view")
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .padding(9)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .padding(12)
     }
 
     // MARK: Connector legend
@@ -174,18 +228,17 @@ struct FleetBuilderCanvas: View {
         .frame(width: frame.rect.width, height: frame.rect.height, alignment: .topLeading)
     }
 
-    /// Canvas must cover the region frames too, so it grows when frames extend past the base size.
-    private func canvasSize(_ graph: FleetGraph, frames: [FleetRegionFrame]) -> CGSize {
-        var size = graph.canvasSize
-        for frame in frames {
-            size.width = max(size.width, frame.rect.maxX + 24)
-            size.height = max(size.height, frame.rect.maxY + 24)
-        }
-        return size
+    /// Include negative region-header coordinates before sizing the scroll content. Padding
+    /// outside this normalized rectangle stays constant in screen points at every zoom level.
+    private func contentBounds(_ graph: FleetGraph, frames: [FleetRegionFrame]) -> CGRect {
+        var bounds = CGRect(origin: .zero, size: graph.canvasSize)
+        for frame in frames { bounds = bounds.union(frame.rect) }
+        for node in graph.nodes { bounds = bounds.union(CGRect(origin: node.position, size: node.size)) }
+        return bounds
     }
 
     private func dragGesture(_ node: FleetGraphNode) -> some Gesture {
-        DragGesture(minimumDistance: 3)
+        DragGesture(minimumDistance: 3, coordinateSpace: .global)
             .onChanged { value in
                 if dragStart[node.id] == nil {
                     dragStart[node.id] = node.position
@@ -193,8 +246,8 @@ struct FleetBuilderCanvas: View {
                     model.select(node.id)
                 }
                 let start = dragStart[node.id] ?? node.position
-                model.moveNode(id: node.id, to: CGPoint(x: start.x + value.translation.width,
-                                                        y: start.y + value.translation.height))
+                model.moveNode(id: node.id, to: CGPoint(x: start.x + value.translation.width / zoom,
+                                                        y: start.y + value.translation.height / zoom))
             }
             .onEnded { _ in dragStart[node.id] = nil }
     }

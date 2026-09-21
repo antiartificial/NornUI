@@ -1313,6 +1313,13 @@ final class NornAppModel {
         return "Verified read access to Norn \(capabilities.serverVersion). This server does not report token scopes."
     }
 
+    /// Cosmetic preferences never reconnect or touch authentication.
+    func setConnectionHue(_ hue: NornConnectionHue?, for profileID: UUID) {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        profiles[index].connectionHue = hue
+        persistProfiles()
+    }
+
     func exportConnections() throws -> Data {
         try NornConnectionArchive.encode(profiles)
     }
@@ -1326,7 +1333,8 @@ final class NornAppModel {
             guard endpoints.insert(NornConnectionArchive.endpointKey(connection.baseURL)).inserted else { continue }
             additions.append(NornServerProfile(
                 name: connection.name.trimmingCharacters(in: .whitespacesAndNewlines),
-                baseURL: connection.baseURL
+                baseURL: connection.baseURL,
+                connectionHue: connection.connectionHue
             ))
         }
         profiles.append(contentsOf: additions)

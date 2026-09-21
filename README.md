@@ -110,10 +110,21 @@ Tailscale clusters, configure a private HTTPS proxy and permit its HTTPS port in
 the tailnet policy. An SSH forward to a loopback HTTP address is also supported.
 There is no certificate-verification bypass or automatic HTTP downgrade.
 
+### Fleet Builder and connection context
+
+The generated `cluster.yaml` preview highlights keys, strings, numbers, booleans,
+and comments while preserving selectable text. The topology canvas keeps region
+borders inside its padding and supports zoom buttons, actual size, Fit, and
+trackpad pinch. Scrolling pans the canvas; node dragging accounts for zoom.
+
+Choose a context color beside a saved server in Manage Connections, or in its
+editor. The active server menu keeps its name and a matching hue visible. Color
+changes save locally without reconnecting or changing credentials.
+
 ### Connection backups and app identity
 
 Settings → **Connection Backups** exports/imports a versioned JSON file containing
-connection names and server addresses. Import merges new addresses, preserves
+connection names, server addresses, and optional context colors. Import merges new addresses, preserves
 existing connections and their credentials, and does not connect automatically.
 Tokens, device keys, and enrollment metadata are never exported. Pair or enter a
 token after importing a new connection.

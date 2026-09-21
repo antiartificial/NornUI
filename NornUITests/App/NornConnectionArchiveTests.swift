@@ -4,13 +4,54 @@ import XCTest
 @MainActor
 final class NornConnectionArchiveTests: XCTestCase {
     func testExportContainsOnlyPortableFields() throws {
-        let profile = NornServerProfile(name: "Mini", baseURL: URL(string: "https://mini.example")!, credentialID: "secret-keychain-id", deviceID: "device-id", tokenID: "token-id", grantedScopes: ["admin"])
+        let profile = NornServerProfile(name: "Mini", baseURL: URL(string: "https://mini.example")!, credentialID: "secret-keychain-id", deviceID: "device-id", tokenID: "token-id", grantedScopes: ["admin"], connectionHue: .purple)
         let data = try NornConnectionArchive.encode([profile])
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let entries = try XCTUnwrap(object["connections"] as? [[String: Any]])
-        XCTAssertEqual(Set(entries[0].keys), ["name", "baseURL"])
+        XCTAssertEqual(Set(entries[0].keys), ["name", "baseURL", "connectionHue"])
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("secret-keychain-id"))
         XCTAssertEqual(try NornConnectionArchive.decode(data).connections.first?.name, "Mini")
+        XCTAssertEqual(try NornConnectionArchive.decode(data).connections.first?.connectionHue, .purple)
+    }
+
+    func testLegacyProfilesAndArchivesDoNotNeedAColor() throws {
+        let original = NornServerProfile(name: "Mini", baseURL: URL(string: "https://mini.example")!)
+        let decoded = try JSONDecoder().decode(NornServerProfile.self, from: JSONEncoder().encode(original))
+        XCTAssertNil(decoded.connectionHue)
+        let data = Data(#"{"format":"nornui.connections","version":1,"connections":[{"name":"Mini","baseURL":"https://mini.example"}]}"#.utf8)
+        XCTAssertNil(try NornConnectionArchive.decode(data).connections.first?.connectionHue)
+    }
+
+    func testUnknownFutureColorKeepsConnectionReadable() throws {
+        let data = Data(#"{"format":"nornui.connections","version":1,"connections":[{"name":"Mini","baseURL":"https://mini.example","connectionHue":"future-color"}]}"#.utf8)
+        let connection = try XCTUnwrap(NornConnectionArchive.decode(data).connections.first)
+        XCTAssertEqual(connection.name, "Mini")
+        XCTAssertEqual(connection.connectionHue, .blue)
+        let original = NornServerProfile(name: "Mini", baseURL: URL(string: "https://mini.example")!, connectionHue: .purple)
+        let encoded = String(decoding: try JSONEncoder().encode(original), as: UTF8.self)
+            .replacingOccurrences(of: "purple", with: "future-color")
+        let decoded = try JSONDecoder().decode(NornServerProfile.self, from: Data(encoded.utf8))
+        XCTAssertEqual(decoded.id, original.id)
+        XCTAssertEqual(decoded.credentialID, original.credentialID)
+        XCTAssertEqual(decoded.connectionHue, .blue)
+    }
+
+    func testChangingColorPreservesCredentialsAndDoesNotReconnect() throws {
+        let defaults = UserDefaults(suiteName: #function)!
+        defer { defaults.removePersistentDomain(forName: #function) }
+        defaults.removePersistentDomain(forName: #function)
+        let store = NornProfileStore(defaults: defaults)
+        var original = NornServerProfile(name: "Mini", baseURL: URL(string: "https://mini.example")!, credentialID: "saved", deviceID: "device", tokenID: "token")
+        store.saveProfiles([original])
+        store.saveSelection(original.id)
+        let model = NornAppModel(profileStore: store)
+        model.setConnectionHue(.orange, for: original.id)
+        original.connectionHue = .orange
+        XCTAssertEqual(model.selectedProfile, original)
+        XCTAssertEqual(store.loadProfiles(), [original])
+        XCTAssertEqual(model.connectionState, .idle)
+        model.setConnectionHue(nil, for: original.id)
+        XCTAssertNil(store.loadProfiles().first?.connectionHue)
     }
 
     func testImportMergesAndPreservesExistingIdentitySelectionAndMetadata() throws {
@@ -24,7 +65,7 @@ final class NornConnectionArchiveTests: XCTestCase {
         let model = NornAppModel(profileStore: store)
         let incoming = [
             NornServerProfile(name: "Different name", baseURL: URL(string: "https://MINI.example:443/")!),
-            NornServerProfile(name: "Pilot", baseURL: URL(string: "https://pilot.example")!),
+            NornServerProfile(name: "Pilot", baseURL: URL(string: "https://pilot.example")!, connectionHue: .teal),
             NornServerProfile(name: "Duplicate Pilot", baseURL: URL(string: "https://pilot.example/")!)
         ]
         let result = try model.importConnections(NornConnectionArchive.encode(incoming))
@@ -36,6 +77,7 @@ final class NornConnectionArchiveTests: XCTestCase {
         let added = try XCTUnwrap(model.profiles.last)
         XCTAssertNotEqual(added.id, incoming[1].id)
         XCTAssertNotEqual(added.credentialID, incoming[1].credentialID)
+        XCTAssertEqual(added.connectionHue, .teal)
         XCTAssertNil(added.deviceID)
         XCTAssertEqual(store.loadProfiles(), model.profiles)
     }

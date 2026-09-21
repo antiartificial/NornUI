@@ -74,6 +74,7 @@ struct NornUIApp: App {
             NornSettingsView(
                 profiles: appModel.profiles,
                 selectedProfileID: appModel.selectedProfileID,
+                onSetConnectionHue: { appModel.setConnectionHue($1, for: $0) },
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
                 onTestConnection: { try await appModel.testConnection(profile: $0, token: $1) },

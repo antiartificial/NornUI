@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct NornSettingsView: View {
     let profiles: [NornServerProfile]
     let selectedProfileID: UUID?
+    var onSetConnectionHue: ((UUID, NornConnectionHue?) -> Void)? = nil
     let onSelect: (UUID?) async -> Void
     let onManualSave: (NornServerProfile, String) async throws -> Void
     let onTestConnection: ServerProfileEditor.ConnectionTest?
@@ -38,6 +39,10 @@ struct NornSettingsView: View {
                 } else {
                     ForEach(profiles) { profile in
                         HStack {
+                            Circle()
+                                .fill((profile.connectionHue?.color ?? .accentColor))
+                                .frame(width: 9, height: 9)
+                                .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(profile.name)
                                     .fontWeight(.medium)
@@ -47,6 +52,15 @@ struct NornSettingsView: View {
                                     .textSelection(.enabled)
                             }
                             Spacer()
+                            if let onSetConnectionHue {
+                                ConnectionHuePicker(selection: Binding(
+                                    get: { profile.connectionHue },
+                                    set: { onSetConnectionHue(profile.id, $0) }
+                                ))
+                                .labelsHidden()
+                                .frame(width: 100)
+                                .accessibilityLabel("Color for \(profile.name)")
+                            }
                             if profile.id == selectedProfileID {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.tint)
@@ -103,7 +117,7 @@ struct NornSettingsView: View {
                     .disabled(isReadingImport)
                     if isReadingImport { ProgressView().controlSize(.small) }
                 }
-                Text("Backups contain connection names and addresses. Tokens and device keys stay in Keychain. Imported connections need pairing or a token; existing connections are preserved.")
+                Text("Backups contain connection names, addresses, and colors. Tokens and device keys stay in Keychain. Imported connections need pairing or a token; existing connections are preserved.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -226,5 +240,40 @@ private struct ConnectionArchiveDocument: FileDocument {
     }
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: data)
+    }
+}
+
+
+extension NornConnectionHue {
+    var color: Color {
+        switch self {
+        case .blue: .blue
+        case .teal: .teal
+        case .green: .green
+        case .amber: Color(red: 0.72, green: 0.49, blue: 0.08)
+        case .orange: .orange
+        case .red: .red
+        case .pink: .pink
+        case .purple: .purple
+        }
+    }
+}
+
+struct ConnectionHuePicker: View {
+    @Binding var selection: NornConnectionHue?
+
+    var body: some View {
+        Picker("Connection color", selection: $selection) {
+            Text("Default").tag(nil as NornConnectionHue?)
+            ForEach(NornConnectionHue.allCases, id: \.self) { hue in
+                Label {
+                    Text(hue.title)
+                } icon: {
+                    Image(systemName: "circle.fill").foregroundStyle(hue.color)
+                }
+                .tag(Optional(hue))
+            }
+        }
+        .help("Identify this connection by color; the name always remains visible")
     }
 }

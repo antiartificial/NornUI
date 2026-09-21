@@ -26,6 +26,7 @@ struct ServerProfileEditor: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var connectionHue: NornConnectionHue?
     @State private var name: String
     @State private var address: String
     @State private var token = ""
@@ -57,6 +58,7 @@ struct ServerProfileEditor: View {
         self.onDiscoverCapabilities = onDiscoverCapabilities
         self.onStartEnrollment = onStartEnrollment
         self.onCompleteEnrollment = onCompleteEnrollment
+        _connectionHue = State(initialValue: profile?.connectionHue)
         _name = State(initialValue: profile?.name ?? "")
         _address = State(initialValue: profile?.baseURL.absoluteString ?? "https://")
         _authenticationMethod = State(initialValue: startsWithPairing ? .pair : .token)
@@ -83,7 +85,8 @@ struct ServerProfileEditor: View {
             tokenID: existingProfile?.tokenID,
             grantedScopes: existingProfile?.grantedScopes,
             tokenExpiresAt: existingProfile?.tokenExpiresAt,
-            lastRotatedAt: existingProfile?.lastRotatedAt
+            lastRotatedAt: existingProfile?.lastRotatedAt,
+            connectionHue: connectionHue
         )
     }
 
@@ -130,6 +133,7 @@ struct ServerProfileEditor: View {
             Form {
                 Section("Server") {
                     TextField("Name", text: $name, prompt: Text("Studio Mini"))
+                    ConnectionHuePicker(selection: $connectionHue)
                     TextField("Server URL", text: $address, prompt: Text("https://norn.example.com"))
                         .textContentType(.URL)
                     if normalizedURL?.host?.isTailscaleHostname == true {

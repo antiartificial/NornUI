@@ -8,6 +8,7 @@ nonisolated struct NornConnectionArchive: Codable, Sendable {
     struct Connection: Codable, Sendable {
         var name: String
         var baseURL: URL
+        var connectionHue: NornConnectionHue? = nil
     }
 
     var format = "nornui.connections"
@@ -15,7 +16,7 @@ nonisolated struct NornConnectionArchive: Codable, Sendable {
     var connections: [Connection]
 
     static func encode(_ profiles: [NornServerProfile]) throws -> Data {
-        let archive = Self(connections: profiles.map { Connection(name: $0.name, baseURL: $0.baseURL) })
+        let archive = Self(connections: profiles.map { Connection(name: $0.name, baseURL: $0.baseURL, connectionHue: $0.connectionHue) })
         try archive.validate()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

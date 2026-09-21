@@ -50,6 +50,17 @@ nonisolated enum NornConnectionState: Equatable, Sendable {
     case offline(String)
 }
 
+nonisolated enum NornConnectionHue: String, Codable, CaseIterable, Sendable {
+    case blue, teal, green, amber, orange, red, pink, purple
+    var title: String { rawValue.capitalized }
+
+    init(from decoder: any Decoder) throws {
+        // A color from a newer app must never make the saved connection list unreadable.
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .blue
+    }
+}
+
 nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var name: String
@@ -60,6 +71,7 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
     var grantedScopes: [String]?
     var tokenExpiresAt: Date?
     var lastRotatedAt: Date?
+    var connectionHue: NornConnectionHue?
 
     init(
         id: UUID = UUID(),
@@ -70,7 +82,8 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
         tokenID: String? = nil,
         grantedScopes: [String]? = nil,
         tokenExpiresAt: Date? = nil,
-        lastRotatedAt: Date? = nil
+        lastRotatedAt: Date? = nil,
+        connectionHue: NornConnectionHue? = nil
     ) {
         self.id = id
         self.name = name
@@ -81,6 +94,7 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
         self.grantedScopes = grantedScopes
         self.tokenExpiresAt = tokenExpiresAt
         self.lastRotatedAt = lastRotatedAt
+        self.connectionHue = connectionHue
     }
 
     var isManagedDevice: Bool { deviceID != nil && tokenID != nil }

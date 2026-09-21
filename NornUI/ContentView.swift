@@ -109,6 +109,15 @@ struct ContentView: View {
             }
             }
         }
+        .safeAreaInset(edge: .top) {
+            if appModel.selectedProfile != nil {
+                ProfileMenu(appModel: appModel)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             ConnectionCard(appModel: appModel)
                 .padding(10)
@@ -374,9 +383,11 @@ private struct ProfileMenu: View {
                         Task { await appModel.selectProfile(id: profile.id) }
                     } label: {
                         if profile.id == appModel.selectedProfileID {
-                            Label(profile.name, systemImage: "checkmark")
+                            Label(profile.name, systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(profile.connectionHue?.color ?? .accentColor)
                         } else {
-                            Text(profile.name)
+                            Label(profile.name, systemImage: "circle.fill")
+                                .foregroundStyle(profile.connectionHue?.color ?? .accentColor)
                         }
                     }
                 }
@@ -390,7 +401,14 @@ private struct ProfileMenu: View {
                 Label("Manage Connections…", systemImage: "gear")
             }
         } label: {
-            Label(appModel.selectedProfile?.name ?? "Explore Norn", systemImage: "point.3.connected.trianglepath.dotted")
+            HStack(spacing: 6) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .foregroundStyle(appModel.selectedProfile?.connectionHue?.color ?? .accentColor)
+                Text(appModel.selectedProfile?.name ?? "Explore Norn")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background((appModel.selectedProfile?.connectionHue?.color ?? .accentColor).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
         }
         .help("Choose a Norn server")
     }

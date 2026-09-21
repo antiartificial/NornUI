@@ -166,9 +166,7 @@ struct FleetBuilderView: View {
             .padding(.horizontal, 12).padding(.vertical, 8)
             Divider()
             ScrollView([.vertical, .horizontal]) {
-                Text(yaml)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
+                FleetYAMLPreview(source: yaml)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
             }
