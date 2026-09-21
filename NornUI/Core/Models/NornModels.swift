@@ -10,6 +10,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
     case platform
     case host
     case activity
+    case audit
 
     var id: String { rawValue }
 
@@ -24,6 +25,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .platform: "Releases"
         case .host: "Host"
         case .activity: "Activity"
+        case .audit: "Audit"
         }
     }
 
@@ -38,6 +40,7 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .platform: "shippingbox.and.arrow.backward"
         case .host: "macmini"
         case .activity: "bolt.horizontal.circle"
+        case .audit: "checklist"
         }
     }
 }
@@ -1331,6 +1334,56 @@ nonisolated struct NornOperation: Identifiable, Codable, Hashable, Sendable {
 
 nonisolated struct NornOperationList: Codable, Hashable, Sendable {
     var operations: [NornOperation]
+    var count: Int
+}
+
+/// A signed control-plane mutation receipt from GET /api/v1/audit/mutations.
+/// Every mutating /api/ request is recorded by route + outcome; `integrity`
+/// reflects the HMAC signature state at read time.
+nonisolated struct MutationAuditEvent: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var requestID: String? = nil
+    var principalSubject: String
+    var tokenID: String? = nil
+    var deviceID: String? = nil
+    var scopes: [String]? = nil
+    var method: String
+    var path: String
+    var clientIP: String? = nil
+    var userAgent: String? = nil
+    var status: Int
+    var outcome: String
+    var startedAt: Date
+    var finishedAt: Date? = nil
+    var durationMs: Int
+    var keyID: String? = nil
+    var integrity: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, principalSubject, scopes, method, path, status, outcome, startedAt, finishedAt, userAgent, durationMs, integrity
+        case requestID = "requestId"
+        case tokenID = "tokenId"
+        case deviceID = "deviceId"
+        case clientIP = "clientIp"
+        case keyID = "keyId"
+    }
+
+    /// Case-insensitive substring match across the fields an operator searches.
+    static func filter(_ events: [MutationAuditEvent], query: String) -> [MutationAuditEvent] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return events }
+        return events.filter {
+            $0.principalSubject.lowercased().contains(needle)
+                || $0.method.lowercased().contains(needle)
+                || $0.path.lowercased().contains(needle)
+                || $0.outcome.lowercased().contains(needle)
+        }
+    }
+}
+
+nonisolated struct MutationAuditList: Codable, Hashable, Sendable {
+    var schema: String?
+    var events: [MutationAuditEvent]
     var count: Int
 }
 

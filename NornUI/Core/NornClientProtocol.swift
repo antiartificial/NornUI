@@ -11,6 +11,7 @@ nonisolated protocol NornClientProtocol: Sendable {
 	func apps() async throws -> [NornAppStatus]
     func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation]
     func operation(id: String) async throws -> NornOperation
+    func auditMutations(limit: Int) async throws -> [MutationAuditEvent]
     func releases() async throws -> NornReleaseList
 	func rotateCredential() async throws -> NornIssuedToken
 	func revokeCredential() async throws
@@ -79,4 +80,5 @@ extension NornClientProtocol {
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
 	func queueAppOperation(_ request: NornAppOperationRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func eventStreamInfo() async throws -> NornEventStreamInfo { throw NornClientError.invalidResponse }
+	func auditMutations(limit: Int) async throws -> [MutationAuditEvent] { [] }
 }

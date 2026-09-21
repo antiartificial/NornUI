@@ -130,6 +130,7 @@ final class NornAppModel {
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
+    var auditMutations: [MutationAuditEvent] = []
     var remoteHostMetricsHistory: [NornHostMetricSample] = []
     var remoteServiceMetricsHistory: [NornServiceMetricSample] = []
     var historyStatus: String?
@@ -287,6 +288,8 @@ final class NornAppModel {
     var assertedAuthority: String? { snapshot.capabilities.authority }
 
     var canReadRuntime: Bool { hasScope("api:read") && !isFleetAuthorityOnly }
+    /// The mutation-audit log is a privileged read; the server requires the admin scope.
+    var canReadAudit: Bool { hasScope("admin") && !isFleetAuthorityOnly }
     var canWriteRuntime: Bool { hasScope("api:write") && !isFleetAuthorityOnly }
     var canRunPlatformMaintenance: Bool { hasScope("platform:operate") && !isFleetAuthorityOnly }
     var canRunHostAssurance: Bool { hasScope("host:operate") && !isFleetAuthorityOnly }
@@ -1131,6 +1134,23 @@ final class NornAppModel {
         } catch {
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             clearFleetAndDeploymentState()
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refreshAuditMutations() async {
+        guard let client, connectionState == .online, canReadAudit else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        do {
+            let events = try await client.auditMutations(limit: 100)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            auditMutations = events
+            lastError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
             lastError = error.localizedDescription
         }
     }

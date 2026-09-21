@@ -26,6 +26,16 @@ enum NornStatus: String, CaseIterable, Sendable {
         }
     }
 
+    init(auditOutcome: String) {
+        switch auditOutcome.lowercased() {
+        case "succeeded": self = .healthy
+        case "started": self = .active
+        case "rejected": self = .attention
+        case "failed", "crashed": self = .critical
+        default: self = .neutral
+        }
+    }
+
     var title: String {
         switch self {
         case .healthy: "Healthy"

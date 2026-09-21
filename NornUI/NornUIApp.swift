@@ -157,6 +157,7 @@ private struct NornCommands: Commands {
         case .host: "6"
         case .activity: "7"
         case .delivery: "8"
+        case .audit: "0"
         }
     }
 }

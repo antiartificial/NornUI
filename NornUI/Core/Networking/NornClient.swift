@@ -123,6 +123,16 @@ actor NornClient: NornClientProtocol {
         return try await get("api/v1/operations/\(id.pathComponentEncoded)")
     }
 
+    func auditMutations(limit: Int) async throws -> [MutationAuditEvent] {
+        var components = URLComponents(url: try url(path: "api/v1/audit/mutations"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 500)))]
+        guard let endpoint = components?.url else {
+            throw NornClientError.invalidBaseURL
+        }
+        let result: MutationAuditList = try await perform(url: endpoint, method: "GET")
+        return result.events
+    }
+
     func releases() async throws -> NornReleaseList {
         do {
             let releases: NornReleaseList = try await get("api/v1/releases")

@@ -320,6 +320,13 @@ struct ContentView: View {
                 onOpenOperation: openOperation,
                 onShowApps: { appModel.navigate(to: .apps) }
             )
+        case .audit:
+            AuditFeatureView(
+                events: appModel.auditMutations,
+                canRead: appModel.canReadAudit,
+                onRefresh: refreshAudit
+            )
+            .task(id: appModel.selectedProfileID) { await appModel.refreshAuditMutations() }
         }
     }
 
@@ -329,6 +336,10 @@ struct ContentView: View {
 
     private func refreshHost() {
         Task { await appModel.refreshHost() }
+    }
+
+    private func refreshAudit() {
+        Task { await appModel.refreshAuditMutations() }
     }
 
     private func refreshFleet() {
