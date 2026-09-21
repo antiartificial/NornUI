@@ -25,6 +25,8 @@ struct ContentView: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: appModel.lastError)
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbarBackground((appModel.selectedProfile?.connectionHue?.color ?? .accentColor).opacity(0.28), for: .windowToolbar)
+        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 ProfileMenu(appModel: appModel)
@@ -382,12 +384,11 @@ private struct ProfileMenu: View {
                     Button {
                         Task { await appModel.selectProfile(id: profile.id) }
                     } label: {
-                        if profile.id == appModel.selectedProfileID {
-                            Label(profile.name, systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(profile.connectionHue?.color ?? .accentColor)
-                        } else {
-                            Label(profile.name, systemImage: "circle.fill")
-                                .foregroundStyle(profile.connectionHue?.color ?? .accentColor)
+                        Label {
+                            Text(profile.name + (profile.id == appModel.selectedProfileID ? " ✓" : ""))
+                        } icon: {
+                            Image(nsImage: (profile.connectionHue ?? .blue).swatch)
+                                .renderingMode(.original)
                         }
                     }
                 }

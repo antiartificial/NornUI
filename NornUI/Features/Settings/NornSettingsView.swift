@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -245,6 +246,17 @@ private struct ConnectionArchiveDocument: FileDocument {
 
 
 extension NornConnectionHue {
+    /// Native menus discard SwiftUI symbol tint. Supply actual non-template pixels.
+    var swatch: NSImage {
+        let image = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { rect in
+            NSColor(self.color).setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 1, dy: 1)).fill()
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
     var color: Color {
         switch self {
         case .blue: .blue
@@ -269,7 +281,7 @@ struct ConnectionHuePicker: View {
                 Label {
                     Text(hue.title)
                 } icon: {
-                    Image(systemName: "circle.fill").foregroundStyle(hue.color)
+                    Image(nsImage: hue.swatch).renderingMode(.original)
                 }
                 .tag(Optional(hue))
             }
