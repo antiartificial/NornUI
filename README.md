@@ -110,6 +110,20 @@ Tailscale clusters, configure a private HTTPS proxy and permit its HTTPS port in
 the tailnet policy. An SSH forward to a loopback HTTP address is also supported.
 There is no certificate-verification bypass or automatic HTTP downgrade.
 
+### Connection backups and app identity
+
+Settings → **Connection Backups** exports/imports a versioned JSON file containing
+connection names and server addresses. Import merges new addresses, preserves
+existing connections and their credentials, and does not connect automatically.
+Tokens, device keys, and enrollment metadata are never exported. Pair or enter a
+token after importing a new connection.
+
+For everyday use, run a signed build with the app sandbox entitlement. An unsigned
+`CODE_SIGNING_ALLOWED=NO` build is useful for CI but reads the non-sandboxed
+preferences domain, so it can appear to have no saved servers. The signed app's
+connections remain in `~/Library/Containers/com.antiartificial.NornUI/Data/Library/Preferences/`.
+Changing build configuration alone does not migrate or erase that store.
+
 ## Provisioning contract boundaries
 
 - Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.

@@ -1313,6 +1313,30 @@ final class NornAppModel {
         return "Verified read access to Norn \(capabilities.serverVersion). This server does not report token scopes."
     }
 
+    func exportConnections() throws -> Data {
+        try NornConnectionArchive.encode(profiles)
+    }
+
+    /// Merge portable endpoints without touching credentials or the active connection.
+    func importConnections(_ data: Data) throws -> NornConnectionImportResult {
+        let archive = try NornConnectionArchive.decode(data)
+        var endpoints = Set(profiles.map { NornConnectionArchive.endpointKey($0.baseURL) })
+        var additions: [NornServerProfile] = []
+        for connection in archive.connections {
+            guard endpoints.insert(NornConnectionArchive.endpointKey(connection.baseURL)).inserted else { continue }
+            additions.append(NornServerProfile(
+                name: connection.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                baseURL: connection.baseURL
+            ))
+        }
+        profiles.append(contentsOf: additions)
+        persistProfiles()
+        return NornConnectionImportResult(
+            importedCount: additions.count,
+            skippedCount: archive.connections.count - additions.count
+        )
+    }
+
     func saveProfile(_ profile: NornServerProfile, token: String) async throws {
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         var profile = profile

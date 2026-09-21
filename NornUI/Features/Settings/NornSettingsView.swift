@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct NornSettingsView: View {
     let profiles: [NornServerProfile]
@@ -12,7 +13,14 @@ struct NornSettingsView: View {
     let issueMutationContext: () -> NornMutationContext?
     let onRotate: (NornMutationContext) async -> Void
     let onRemove: (UUID) -> Void
+    let onExportConnections: () throws -> Data
+    let onImportConnections: (Data) throws -> NornConnectionImportResult
 
+    @State private var isExporting = false
+    @State private var isImporting = false
+    @State private var archive = ConnectionArchiveDocument()
+    @State private var transferMessage: String?
+    @State private var isReadingImport = false
     @State private var isAddingServer = false
     @State private var editingProfile: NornServerProfile?
     @State private var pairingProfile: NornServerProfile?
@@ -80,6 +88,26 @@ struct NornSettingsView: View {
                 }
             }
 
+            Section("Connection Backups") {
+                HStack {
+                    Button("Export Connections…", systemImage: "square.and.arrow.up") {
+                        do {
+                            archive = ConnectionArchiveDocument(data: try onExportConnections())
+                            isExporting = true
+                        } catch { transferMessage = error.localizedDescription }
+                    }
+                    .disabled(profiles.isEmpty || isReadingImport)
+                    Button("Import Connections…", systemImage: "square.and.arrow.down") {
+                        isImporting = true
+                    }
+                    .disabled(isReadingImport)
+                    if isReadingImport { ProgressView().controlSize(.small) }
+                }
+                Text("Backups contain connection names and addresses. Tokens and device keys stay in Keychain. Imported connections need pairing or a token; existing connections are preserved.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Security") {
                 LabeledContent("Credential storage", value: "Login Keychain")
                 if let profile = profiles.first(where: { $0.id == selectedProfileID }) {
@@ -115,6 +143,38 @@ struct NornSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 680, height: 520)
+        .fileExporter(isPresented: $isExporting, document: archive, contentType: .json, defaultFilename: "NornUI Connections") { result in
+            switch result {
+            case .success: transferMessage = "Connection backup exported. Credentials were not included."
+            case let .failure(error): transferMessage = error.localizedDescription
+            }
+        }
+        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
+            guard case let .success(url) = result else {
+                if case let .failure(error) = result { transferMessage = error.localizedDescription }
+                return
+            }
+            isReadingImport = true
+            Task {
+                defer { isReadingImport = false }
+                do {
+                    let data = try await Task.detached {
+                        let access = url.startAccessingSecurityScopedResource()
+                        defer { if access { url.stopAccessingSecurityScopedResource() } }
+                        let handle = try FileHandle(forReadingFrom: url)
+                        defer { try? handle.close() }
+                        // Bound the read before decoding even when file metadata is absent.
+                        let data = try handle.read(upToCount: 1_048_577) ?? Data()
+                        guard data.count <= 1_048_576 else { throw CocoaError(.fileReadTooLarge) }
+                        return data
+                    }.value
+                    transferMessage = try onImportConnections(data).summary
+                } catch { transferMessage = error.localizedDescription }
+            }
+        }
+        .alert("Connection Backup", isPresented: Binding(get: { transferMessage != nil }, set: { if !$0 { transferMessage = nil } })) {
+            Button("OK") { transferMessage = nil }
+        } message: { Text(transferMessage ?? "") }
         .sheet(isPresented: $isAddingServer) {
             editor(profile: nil)
         }
@@ -154,5 +214,17 @@ struct NornSettingsView: View {
             onStartEnrollment: onStartEnrollment,
             onCompleteEnrollment: onCompleteEnrollment
         )
+    }
+}
+
+private struct ConnectionArchiveDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data = Data()
+    init(data: Data = Data()) { self.data = data }
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }

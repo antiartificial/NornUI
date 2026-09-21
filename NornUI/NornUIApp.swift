@@ -88,7 +88,9 @@ struct NornUIApp: App {
                 onRotate: { context in await appModel.rotateManagedCredentialNow(context: context) },
                 onRemove: { id in
                     Task { await appModel.removeProfileAndCredential(id: id) }
-                }
+                },
+                onExportConnections: { try appModel.exportConnections() },
+                onImportConnections: { try appModel.importConnections($0) }
             )
         }
     }
