@@ -111,15 +111,6 @@ struct ContentView: View {
             }
             }
         }
-        .safeAreaInset(edge: .top) {
-            if appModel.selectedProfile != nil {
-                ProfileMenu(appModel: appModel)
-                    .menuStyle(.borderlessButton)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-            }
-        }
         .safeAreaInset(edge: .bottom) {
             ConnectionCard(appModel: appModel)
                 .padding(10)
