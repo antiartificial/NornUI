@@ -15,15 +15,18 @@ struct ServerProfileEditor: View {
         [String]
     ) async throws -> (session: NornEnrollmentSession, protection: NornDeviceIdentityProtection)
     typealias CapabilityDiscovery = (NornServerProfile) async throws -> NornCapabilities
+    typealias ConnectionTest = (NornServerProfile, String) async throws -> String
 
     let existingProfile: NornServerProfile?
     let onManualSave: (NornServerProfile, String) async throws -> Void
+    let onTestConnection: ConnectionTest?
     let onDiscoverCapabilities: CapabilityDiscovery
     let onStartEnrollment: EnrollmentStart
     let onCompleteEnrollment: (NornServerProfile, NornEnrollmentSession) async throws -> Void
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var connectionHue: NornConnectionHue?
     @State private var name: String
     @State private var address: String
     @State private var token = ""
@@ -38,20 +41,24 @@ struct ServerProfileEditor: View {
     @State private var identityProtection: NornDeviceIdentityProtection?
     @State private var isWorking = false
     @State private var errorMessage: String?
+    @State private var connectionTestResult: String?
 
     init(
         profile: NornServerProfile? = nil,
         startsWithPairing: Bool = true,
         onManualSave: @escaping (NornServerProfile, String) async throws -> Void,
+        onTestConnection: ConnectionTest? = nil,
         onDiscoverCapabilities: @escaping CapabilityDiscovery,
         onStartEnrollment: @escaping EnrollmentStart,
         onCompleteEnrollment: @escaping (NornServerProfile, NornEnrollmentSession) async throws -> Void
     ) {
         existingProfile = profile
         self.onManualSave = onManualSave
+        self.onTestConnection = onTestConnection
         self.onDiscoverCapabilities = onDiscoverCapabilities
         self.onStartEnrollment = onStartEnrollment
         self.onCompleteEnrollment = onCompleteEnrollment
+        _connectionHue = State(initialValue: profile?.connectionHue)
         _name = State(initialValue: profile?.name ?? "")
         _address = State(initialValue: profile?.baseURL.absoluteString ?? "https://")
         _authenticationMethod = State(initialValue: startsWithPairing ? .pair : .token)
@@ -59,9 +66,7 @@ struct ServerProfileEditor: View {
 
     private var normalizedURL: URL? {
         guard let url = URL(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "https" || (scheme == "http" && url.host?.isLoopbackHost == true),
-              url.host != nil
+              NornClient.isAllowedBaseURL(url)
         else {
             return nil
         }
@@ -80,7 +85,8 @@ struct ServerProfileEditor: View {
             tokenID: existingProfile?.tokenID,
             grantedScopes: existingProfile?.grantedScopes,
             tokenExpiresAt: existingProfile?.tokenExpiresAt,
-            lastRotatedAt: existingProfile?.lastRotatedAt
+            lastRotatedAt: existingProfile?.lastRotatedAt,
+            connectionHue: connectionHue
         )
     }
 
@@ -104,8 +110,20 @@ struct ServerProfileEditor: View {
         guard profile != nil, !isWorking else { return false }
         switch authenticationMethod {
         case .pair: return enrollment == nil
-        case .token: return !token.isEmpty || existingProfile != nil
+        case .token:
+            return !token.isEmpty || (existingProfile != nil && !hasChangedOrigin)
         }
+    }
+
+    private var hasChangedOrigin: Bool {
+        guard let existingProfile else { return false }
+        return normalizedURL?.standardized != existingProfile.baseURL.standardized
+    }
+
+    private var canTestConnection: Bool {
+        guard onTestConnection != nil, profile != nil, !isWorking else { return false }
+        return authenticationMethod == .token
+            && (!token.isEmpty || (existingProfile != nil && !hasChangedOrigin))
     }
 
     var body: some View {
@@ -115,6 +133,7 @@ struct ServerProfileEditor: View {
             Form {
                 Section("Server") {
                     TextField("Name", text: $name, prompt: Text("Studio Mini"))
+                    ConnectionHuePicker(selection: $connectionHue)
                     TextField("Server URL", text: $address, prompt: Text("https://norn.example.com"))
                         .textContentType(.URL)
                     if normalizedURL?.host?.isTailscaleHostname == true {
@@ -145,16 +164,29 @@ struct ServerProfileEditor: View {
                         .textContentType(.password)
                         Text("Manual tokens are a compatibility path and may expire without renewal.")
                             .foregroundStyle(.secondary)
+                        if hasChangedOrigin && token.isEmpty {
+                            Label("Enter a replacement token or pair this Mac before using a new server URL. The saved credential is never sent to a changed origin.", systemImage: "lock.shield")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }
             .formStyle(.grouped)
+            .disabled(enrollment != nil || isWorking)
 
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .font(.callout)
                     .accessibilityLabel("Connection error: \(errorMessage)")
+            }
+
+            if let connectionTestResult {
+                Label(connectionTestResult, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.callout)
+                    .accessibilityLabel("Connection test succeeded: \(connectionTestResult)")
             }
 
             footer
@@ -168,7 +200,10 @@ struct ServerProfileEditor: View {
         .onChange(of: address) { _, _ in
             guard enrollment == nil else { return }
             discoveredCapabilities = nil
+            connectionTestResult = nil
         }
+        .onChange(of: name) { _, _ in connectionTestResult = nil }
+        .onChange(of: token) { _, _ in connectionTestResult = nil }
     }
 
     private var header: some View {
@@ -178,9 +213,11 @@ struct ServerProfileEditor: View {
                 .foregroundStyle(.tint)
                 .symbolEffect(.breathe, options: .nonRepeating, isActive: !reduceMotion)
             VStack(alignment: .leading, spacing: 2) {
-                Text(existingProfile == nil ? "Connect to Norn" : "Secure Norn Connection")
+                Text(existingProfile == nil ? "Connect to Norn" : "Edit Norn Connection")
                     .font(.title2.weight(.semibold))
-                Text("Pairing keeps the control-plane token off this Mac.")
+                Text(authenticationMethod == .pair
+                    ? "Pairing keeps the control-plane token off this Mac."
+                    : "Update this saved connection without exposing its current token.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -271,6 +308,18 @@ struct ServerProfileEditor: View {
             Spacer()
             Button("Cancel", role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
+            if enrollment == nil, authenticationMethod == .token, onTestConnection != nil {
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    if isWorking {
+                        Label("Testing…", systemImage: "arrow.triangle.2.circlepath")
+                    } else {
+                        Text("Test Connection")
+                    }
+                }
+                .disabled(!canTestConnection)
+            }
             if enrollment == nil {
                 Button(primaryActionTitle) {
                     Task { await performPrimaryAction() }
@@ -286,6 +335,7 @@ struct ServerProfileEditor: View {
         guard let profile else { return }
         isWorking = true
         errorMessage = nil
+        connectionTestResult = nil
         defer { isWorking = false }
         do {
             switch authenticationMethod {
@@ -315,6 +365,19 @@ struct ServerProfileEditor: View {
                 try await onManualSave(profile, token)
                 dismiss()
             }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func testConnection() async {
+        guard let profile, let onTestConnection else { return }
+        isWorking = true
+        errorMessage = nil
+        connectionTestResult = nil
+        defer { isWorking = false }
+        do {
+            connectionTestResult = try await onTestConnection(profile, token)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -353,10 +416,6 @@ struct ServerProfileEditor: View {
 }
 
 private extension String {
-    var isLoopbackHost: Bool {
-        self == "localhost" || self == "127.0.0.1" || self == "::1"
-    }
-
     var isTailscaleHostname: Bool {
         lowercased().hasSuffix(".ts.net")
     }

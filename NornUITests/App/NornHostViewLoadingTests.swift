@@ -246,7 +246,7 @@ private actor HostLoadingClient: NornClientProtocol {
         NornFixtures.snapshot.operations[0]
     }
 
-    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
+    nonisolated func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
         AsyncThrowingStream { $0.finish() }
     }
 }

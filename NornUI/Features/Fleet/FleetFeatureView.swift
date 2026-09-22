@@ -17,6 +17,7 @@ struct FleetFeatureView: View {
 	let profileID: UUID?
     let isStale: Bool
     let isRefreshing: Bool
+    var isConnectionVerified: Bool = true
     let onRefresh: () -> Void
 	let issueMutationContext: () -> NornMutationContext?
     let onPlan: (String, Int, String, String, NornMutationContext) async -> Bool
@@ -35,7 +36,16 @@ struct FleetFeatureView: View {
 
     var body: some View {
         Group {
-            if !isSupported && !ReleasePipelineFeaturePolicy.requiresManagedFleet(in: environmentID) {
+            if !isConnectionVerified {
+                ContentUnavailableView {
+                    Label("Connect to view Fleet", systemImage: "network")
+                } description: {
+                    Text("Connect to your saved cluster to discover its Fleet capabilities. Check the server address and access token in connection settings.")
+                } actions: {
+                    Button("Retry Connection", action: onRefresh)
+                    SettingsLink { Text("Manage Connections…") }
+                }
+            } else if !isSupported && !ReleasePipelineFeaturePolicy.requiresManagedFleet(in: environmentID) {
                 ContentUnavailableView(
                     "Fleet not needed for local development",
                     systemImage: "macmini",

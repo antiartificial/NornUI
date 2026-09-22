@@ -74,8 +74,10 @@ struct NornUIApp: App {
             NornSettingsView(
                 profiles: appModel.profiles,
                 selectedProfileID: appModel.selectedProfileID,
+                onSetConnectionHue: { appModel.setConnectionHue($1, for: $0) },
                 onSelect: { await appModel.selectProfile(id: $0) },
                 onManualSave: { try await appModel.saveProfile($0, token: $1) },
+                onTestConnection: { try await appModel.testConnection(profile: $0, token: $1) },
                 onDiscoverCapabilities: { try await appModel.discoverEnrollmentCapabilities(profile: $0) },
                 onStartEnrollment: { profile, scopes in
                     try await appModel.startDeviceEnrollment(profile: profile, requestedScopes: scopes)
@@ -87,7 +89,9 @@ struct NornUIApp: App {
                 onRotate: { context in await appModel.rotateManagedCredentialNow(context: context) },
                 onRemove: { id in
                     Task { await appModel.removeProfileAndCredential(id: id) }
-                }
+                },
+                onExportConnections: { try appModel.exportConnections() },
+                onImportConnections: { try appModel.importConnections($0) }
             )
         }
     }
@@ -148,10 +152,12 @@ private struct NornCommands: Commands {
         case .apps: "2"
         case .operations: "3"
         case .fleet: "4"
+        case .fleetBuilder: "9"
         case .platform: "5"
         case .host: "6"
         case .activity: "7"
         case .delivery: "8"
+        case .audit: "0"
         }
     }
 }

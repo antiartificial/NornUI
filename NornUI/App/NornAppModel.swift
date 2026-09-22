@@ -4,6 +4,13 @@ import Observation
 
 typealias NornClientFactory = @Sendable (NornServerProfile) async throws -> any NornClientProtocol
 
+/// Builds a short-lived client for connection validation. The credential vault
+/// passed here is in-memory and contains only the token being tested.
+typealias NornConnectionTestClientFactory = @Sendable (
+    NornServerProfile,
+    any NornCredentialVault
+) async throws -> any NornClientProtocol
+
 typealias NornEnrollmentClientFactory = @Sendable (URL) async throws -> any NornEnrollmentClientProtocol
 
 nonisolated struct NornServiceSelection: Equatable, Sendable {
@@ -44,6 +51,37 @@ nonisolated private func captureRefreshValue<Value: Sendable>(
     } catch {
         return .failure
     }
+}
+
+nonisolated private enum NornConnectionValidationError: LocalizedError, Sendable {
+    case tokenRequiredForChangedServer
+    case storedCredentialUnavailable
+    case unauthenticated
+    case profileRemovedDuringValidation
+    case legacyAppsEndpointDidNotRequireAuthentication
+
+    var errorDescription: String? {
+        switch self {
+        case .tokenRequiredForChangedServer:
+            "Enter a replacement access token before testing or saving a different server address."
+        case .storedCredentialUnavailable:
+            "The saved access token is unavailable. Enter a replacement token before testing this connection."
+        case .unauthenticated:
+            "Norn responded, but did not confirm an authenticated principal for this access token."
+        case .profileRemovedDuringValidation:
+            "This server profile was removed while its connection was being validated."
+        case .legacyAppsEndpointDidNotRequireAuthentication:
+            "Norn did not reject an anonymous apps request, so this server cannot verify the access token safely."
+        }
+    }
+}
+
+private actor NornEphemeralCredentialVault: NornCredentialVault {
+    private var credentials: [String: NornCredential] = [:]
+
+    func credential(for identifier: String) -> NornCredential? { credentials[identifier] }
+    func store(_ credential: NornCredential, for identifier: String) { credentials[identifier] = credential }
+    func removeCredential(for identifier: String) { credentials.removeValue(forKey: identifier) }
 }
 
 @MainActor
@@ -92,6 +130,8 @@ final class NornAppModel {
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
+    var auditMutations: [MutationAuditEvent] = []
+    var beaconEvents: [NornBeaconEvent] = []
     var remoteHostMetricsHistory: [NornHostMetricSample] = []
     var remoteServiceMetricsHistory: [NornServiceMetricSample] = []
     var historyStatus: String?
@@ -118,9 +158,14 @@ final class NornAppModel {
 	var isShowingCreateApp = false
     var lastError: String?
     var isFixtureMode: Bool
+    /// Legacy control planes do not return a capability principal. A successful
+    /// `/api/v1/apps` read establishes read reachability only; it never
+    /// supplies scopes or enables mutations.
+    var hasVerifiedCompatibilityReadAccess = false
 
     @ObservationIgnored private let profileStore: NornProfileStore
     @ObservationIgnored private let clientFactory: NornClientFactory?
+    @ObservationIgnored private let connectionTestClientFactory: NornConnectionTestClientFactory
     @ObservationIgnored private let credentialVault: (any NornCredentialVault)?
     @ObservationIgnored private let deviceIdentityVault: (any NornDeviceIdentityVault)?
     @ObservationIgnored private let enrollmentClientFactory: NornEnrollmentClientFactory?
@@ -160,6 +205,7 @@ final class NornAppModel {
     init(
         profileStore: NornProfileStore? = nil,
         clientFactory: NornClientFactory? = nil,
+        connectionTestClientFactory: NornConnectionTestClientFactory? = nil,
         credentialVault: (any NornCredentialVault)? = nil,
         deviceIdentityVault: (any NornDeviceIdentityVault)? = nil,
         enrollmentClientFactory: NornEnrollmentClientFactory? = nil,
@@ -169,6 +215,9 @@ final class NornAppModel {
         let storedProfiles = profileStore.loadProfiles()
         self.profileStore = profileStore
         self.clientFactory = clientFactory
+        self.connectionTestClientFactory = connectionTestClientFactory ?? { profile, vault in
+            try await NornClient(profile: profile, credentialVault: vault)
+        }
         self.credentialVault = credentialVault
         self.deviceIdentityVault = deviceIdentityVault
         self.enrollmentClientFactory = enrollmentClientFactory
@@ -227,12 +276,21 @@ final class NornAppModel {
     }
 
     var isFleetAuthorityOnly: Bool { snapshot.capabilities.isFleetAuthorityOnly }
+    /// Principal discovery is the only source of scope-bearing authentication.
     var isServerAuthenticated: Bool { snapshot.capabilities.authenticatedPrincipal != nil }
+    /// A read-reachable connection for Fleet navigation. Legacy servers report
+    /// this after their apps endpoint responds, without asserting identity or
+    /// scopes.
+    var isServerReadReachable: Bool {
+        isServerAuthenticated || hasVerifiedCompatibilityReadAccess
+    }
     var assertedEnvironmentID: String? { snapshot.capabilities.assertedEnvironmentID }
     var assertedEnvironmentProfile: String? { snapshot.capabilities.assertedEnvironmentProfile }
     var assertedAuthority: String? { snapshot.capabilities.authority }
 
     var canReadRuntime: Bool { hasScope("api:read") && !isFleetAuthorityOnly }
+    /// The mutation-audit log is a privileged read; the server requires the admin scope.
+    var canReadAudit: Bool { hasScope("admin") && !isFleetAuthorityOnly }
     var canWriteRuntime: Bool { hasScope("api:write") && !isFleetAuthorityOnly }
     var canRunPlatformMaintenance: Bool { hasScope("platform:operate") && !isFleetAuthorityOnly }
     var canRunHostAssurance: Bool { hasScope("host:operate") && !isFleetAuthorityOnly }
@@ -1081,6 +1139,49 @@ final class NornAppModel {
         }
     }
 
+    func refreshAuditMutations() async {
+        guard let client, connectionState == .online, canReadAudit else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        do {
+            let events = try await client.auditMutations(limit: 100)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            auditMutations = events
+            lastError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// Loads both Activity Log sources: the operator-facing beacon feed (Pods /
+    /// Cell) and, when permitted, the admin mutation-audit (Receipts).
+    func refreshActivityLog() async {
+        await refreshBeaconEvents()
+        if canReadAudit {
+            await refreshAuditMutations()
+        }
+    }
+
+    func refreshBeaconEvents() async {
+        guard let client, connectionState == .online, canReadRuntime else { return }
+        let generation = connectionGeneration
+        let profileID = selectedProfileID
+        do {
+            let events = try await client.beaconEvents(limit: 100)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            beaconEvents = events
+            lastError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            lastError = error.localizedDescription
+        }
+    }
+
     @discardableResult
     func createFleetPullRequest(planID: String, context: NornMutationContext) async -> URL? {
         guard let client, isValidMutationContext(context, permits: canOperateFleet && fleetGitHubSupported && fleetGitHubStatus.connected) else { return nil }
@@ -1201,9 +1302,104 @@ final class NornAppModel {
         persistProfiles()
     }
 
+    /// Validates the supplied token against capabilities without changing the
+    /// saved profile, selected profile, or persistent credential vault.
+    func testConnection(profile: NornServerProfile, token: String) async throws -> String {
+        guard NornClient.isAllowedBaseURL(profile.baseURL) else {
+            throw NornClientError.invalidBaseURL
+        }
+
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let temporaryVault = NornEphemeralCredentialVault()
+        if trimmedToken.isEmpty {
+            guard let savedProfile = profiles.first(where: { $0.id == profile.id }),
+                  savedProfile.baseURL.standardized == profile.baseURL.standardized else {
+                throw NornConnectionValidationError.tokenRequiredForChangedServer
+            }
+            guard let credentialVault,
+                  let credential = try await credentialVault.credential(for: savedProfile.credentialID) else {
+                throw NornConnectionValidationError.storedCredentialUnavailable
+            }
+            try await temporaryVault.store(credential, for: profile.credentialID)
+        } else {
+            try await temporaryVault.store(
+                NornCredential(accessToken: trimmedToken),
+                for: profile.credentialID
+            )
+        }
+
+        let client = try await connectionTestClientFactory(profile, temporaryVault)
+        let capabilities = try await client.capabilities()
+        if let principal = capabilities.authenticatedPrincipal {
+            let subject = principal.subject?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let subject, !subject.isEmpty {
+                return "Connected to Norn \(capabilities.serverVersion) as \(subject)."
+            }
+            return "Connected to Norn \(capabilities.serverVersion) with an authenticated access token."
+        }
+
+        // v2.20 compatibility: this version omits `auth.principal`, but its
+        // apps route remains a bearer-protected read endpoint. Confirm that
+        // the same endpoint rejects a deliberately invalid ephemeral token; an
+        // empty vault would fail locally before reaching the server. This avoids
+        // treating a public endpoint as token authentication. Do not infer
+        // scopes from either request.
+        _ = try await client.apps()
+        let invalidCredentialVault = NornEphemeralCredentialVault()
+        try await invalidCredentialVault.store(
+            NornCredential(accessToken: "norn-connection-check-invalid-\(UUID().uuidString)"),
+            for: profile.credentialID
+        )
+        let anonymousClient = try await connectionTestClientFactory(profile, invalidCredentialVault)
+        do {
+            _ = try await anonymousClient.apps()
+            throw NornConnectionValidationError.legacyAppsEndpointDidNotRequireAuthentication
+        } catch let NornClientError.http(status, _, _) where status == 401 || status == 403 {
+            // Anonymous access is rejected as required by the legacy contract.
+        }
+        return "Verified read access to Norn \(capabilities.serverVersion). This server does not report token scopes."
+    }
+
+    /// Cosmetic preferences never reconnect or touch authentication.
+    func setConnectionHue(_ hue: NornConnectionHue?, for profileID: UUID) {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else { return }
+        profiles[index].connectionHue = hue
+        persistProfiles()
+    }
+
+    func exportConnections() throws -> Data {
+        try NornConnectionArchive.encode(profiles)
+    }
+
+    /// Merge portable endpoints without touching credentials or the active connection.
+    func importConnections(_ data: Data) throws -> NornConnectionImportResult {
+        let archive = try NornConnectionArchive.decode(data)
+        var endpoints = Set(profiles.map { NornConnectionArchive.endpointKey($0.baseURL) })
+        var additions: [NornServerProfile] = []
+        for connection in archive.connections {
+            guard endpoints.insert(NornConnectionArchive.endpointKey(connection.baseURL)).inserted else { continue }
+            additions.append(NornServerProfile(
+                name: connection.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                baseURL: connection.baseURL,
+                connectionHue: connection.connectionHue
+            ))
+        }
+        profiles.append(contentsOf: additions)
+        persistProfiles()
+        return NornConnectionImportResult(
+            importedCount: additions.count,
+            skippedCount: archive.connections.count - additions.count
+        )
+    }
+
     func saveProfile(_ profile: NornServerProfile, token: String) async throws {
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
         var profile = profile
+        let wasStoredBeforeValidation = profiles.contains { $0.id == profile.id }
+        try await testConnection(profile: profile, token: trimmedToken)
+        guard !wasStoredBeforeValidation || profiles.contains(where: { $0.id == profile.id }) else {
+            throw NornConnectionValidationError.profileRemovedDuringValidation
+        }
         if !trimmedToken.isEmpty {
             guard let credentialVault else { throw NornCredentialVaultError.invalidCredential }
             try await credentialVault.store(
@@ -1215,6 +1411,16 @@ final class NornAppModel {
             profile.grantedScopes = nil
             profile.tokenExpiresAt = nil
             profile.lastRotatedAt = nil
+        } else if let savedProfile = profiles.first(where: { $0.id == profile.id }),
+                  savedProfile.baseURL.standardized == profile.baseURL.standardized {
+            // A no-token edit reuses the existing credential and keeps the
+            // managed-device record that owns it.
+            profile.credentialID = savedProfile.credentialID
+            profile.deviceID = savedProfile.deviceID
+            profile.tokenID = savedProfile.tokenID
+            profile.grantedScopes = savedProfile.grantedScopes
+            profile.tokenExpiresAt = savedProfile.tokenExpiresAt
+            profile.lastRotatedAt = savedProfile.lastRotatedAt
         }
         addProfile(profile)
         await selectProfile(id: profile.id)
@@ -1503,6 +1709,10 @@ final class NornAppModel {
         case .failure: failures.append("apps")
         case .unavailable: next.apps = []
         }
+        hasVerifiedCompatibilityReadAccess = capabilities.authenticatedPrincipal == nil && {
+            if case .value = result.5 { return true }
+            return false
+        }()
 
         // Host status is its own versioned resource. Merge its latest receipt
         // after the bounded general history so assurance never appears stale
@@ -2015,6 +2225,7 @@ final class NornAppModel {
         isRefreshing = false
         isFleetRefreshing = false
         snapshot = Self.emptySnapshot
+        hasVerifiedCompatibilityReadAccess = false
         hostMetrics = nil
         clearFleetAndDeploymentState()
         selectedOperationID = nil

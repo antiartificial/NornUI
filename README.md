@@ -98,6 +98,43 @@ Manual token entry remains available under **Access Token** for older servers
 or recovery. It is not the recommended onboarding path because a pasted token
 does not receive native renewal or device-level revocation metadata.
 
+Use **Manage Connections…** in the server menu to edit a saved name/address,
+replace its token, test authentication, or remove the connection from this Mac.
+Testing does not save changes. Saving verifies the endpoint and token before
+replacing the saved connection; changing the server URL requires a newly entered
+token or a new pairing. Removal does not delete a cluster or its infrastructure.
+
+Remote servers must expose HTTPS with a trusted certificate matching the URL's
+hostname. A plain HTTP API port cannot accept an HTTPS request. For private
+Tailscale clusters, configure a private HTTPS proxy and permit its HTTPS port in
+the tailnet policy. An SSH forward to a loopback HTTP address is also supported.
+There is no certificate-verification bypass or automatic HTTP downgrade.
+
+### Fleet Builder and connection context
+
+The generated `cluster.yaml` preview highlights keys, strings, numbers, booleans,
+and comments while preserving selectable text. The topology canvas keeps region
+borders inside its padding and supports zoom buttons, actual size, Fit, and
+trackpad pinch. Scrolling pans the canvas; node dragging accounts for zoom.
+
+Choose a context color beside a saved server in Manage Connections, or in its
+editor. The active server menu keeps its name and a matching hue visible. Color
+changes save locally without reconnecting or changing credentials.
+
+### Connection backups and app identity
+
+Settings → **Connection Backups** exports/imports a versioned JSON file containing
+connection names, server addresses, and optional context colors. Import merges new addresses, preserves
+existing connections and their credentials, and does not connect automatically.
+Tokens, device keys, and enrollment metadata are never exported. Pair or enter a
+token after importing a new connection.
+
+For everyday use, run a signed build with the app sandbox entitlement. An unsigned
+`CODE_SIGNING_ALLOWED=NO` build is useful for CI but reads the non-sandboxed
+preferences domain, so it can appear to have no saved servers. The signed app's
+connections remain in `~/Library/Containers/com.antiartificial.NornUI/Data/Library/Preferences/`.
+Changing build configuration alone does not migrate or erase that store.
+
 ## Provisioning contract boundaries
 
 - Fleet plans and reconciliations use the versioned `/api/v1/fleet` contract.

@@ -25,6 +25,8 @@ struct ContentView: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: appModel.lastError)
         }
         .navigationSplitViewStyle(.balanced)
+        .toolbarBackground((appModel.selectedProfile?.connectionHue?.color ?? .accentColor).opacity(0.28), for: .windowToolbar)
+        .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 ProfileMenu(appModel: appModel)
@@ -35,7 +37,7 @@ struct ContentView: View {
                         appModel.isShowingProfileEditor = true
                     }
                     SettingsLink {
-                        Label("Server Settings…", systemImage: "gear")
+                        Label("Manage Connections…", systemImage: "gear")
                     }
                 } label: {
                     Label("Server Actions", systemImage: "ellipsis.circle")
@@ -46,6 +48,9 @@ struct ContentView: View {
             ServerProfileEditor(
                 onManualSave: { profile, token in
                     try await appModel.saveProfile(profile, token: token)
+                },
+                onTestConnection: { profile, token in
+                    try await appModel.testConnection(profile: profile, token: token)
                 },
                 onDiscoverCapabilities: { profile in
                     try await appModel.discoverEnrollmentCapabilities(profile: profile)
@@ -280,6 +285,7 @@ struct ContentView: View {
 				profileID: appModel.selectedProfileID,
                 isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
+                isConnectionVerified: appModel.isFixtureMode || appModel.isServerReadReachable,
                 onRefresh: refreshFleet,
                 issueMutationContext: { appModel.issueMutationContext() },
                 onPlan: { pool, desired, size, reason, context in
@@ -297,12 +303,23 @@ struct ContentView: View {
             )
             .onAppear { appModel.setFleetVisible(true) }
             .onDisappear { appModel.setFleetVisible(false) }
+        case .fleetBuilder:
+            FleetBuilderView()
         case .activity:
             ActivityFeatureView(
                 snapshot: appModel.snapshot,
                 onOpenOperation: openOperation,
                 onShowApps: { appModel.navigate(to: .apps) }
             )
+        case .audit:
+            ActivityLogFeatureView(
+                beaconEvents: appModel.beaconEvents,
+                auditEvents: appModel.auditMutations,
+                canReadActivity: appModel.canReadRuntime,
+                canReadAudit: appModel.canReadAudit,
+                onRefresh: refreshActivityLog
+            )
+            .task(id: appModel.selectedProfileID) { await appModel.refreshActivityLog() }
         }
     }
 
@@ -314,12 +331,16 @@ struct ContentView: View {
         Task { await appModel.refreshHost() }
     }
 
+    private func refreshActivityLog() {
+        Task { await appModel.refreshActivityLog() }
+    }
+
     private func refreshFleet() {
         Task {
             if appModel.connectionState == .online {
                 await appModel.refreshFleet()
             } else {
-                await appModel.refresh()
+                await appModel.connect()
             }
         }
     }
@@ -367,10 +388,11 @@ private struct ProfileMenu: View {
                     Button {
                         Task { await appModel.selectProfile(id: profile.id) }
                     } label: {
-                        if profile.id == appModel.selectedProfileID {
-                            Label(profile.name, systemImage: "checkmark")
-                        } else {
-                            Text(profile.name)
+                        Label {
+                            Text(profile.name + (profile.id == appModel.selectedProfileID ? " ✓" : ""))
+                        } icon: {
+                            Image(nsImage: (profile.connectionHue ?? .blue).swatch)
+                                .renderingMode(.original)
                         }
                     }
                 }
@@ -380,8 +402,18 @@ private struct ProfileMenu: View {
             Button("Add Server…", systemImage: "plus") {
                 appModel.isShowingProfileEditor = true
             }
+            SettingsLink {
+                Label("Manage Connections…", systemImage: "gear")
+            }
         } label: {
-            Label(appModel.selectedProfile?.name ?? "Explore Norn", systemImage: "point.3.connected.trianglepath.dotted")
+            HStack(spacing: 6) {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .foregroundStyle(appModel.selectedProfile?.connectionHue?.color ?? .accentColor)
+                Text(appModel.selectedProfile?.name ?? "Explore Norn")
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background((appModel.selectedProfile?.connectionHue?.color ?? .accentColor).opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
         }
         .help("Choose a Norn server")
     }

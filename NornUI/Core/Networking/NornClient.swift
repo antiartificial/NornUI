@@ -88,7 +88,15 @@ actor NornClient: NornClientProtocol {
     }
 
     func serviceManifest() async throws -> NornServiceManifest {
-        try await get("api/v1/services/manifest")
+        do {
+            return try await get("api/v1/services/manifest")
+        } catch let NornClientError.http(status, _, _) where status == 404 {
+            // Norn v2.20 and earlier expose the same authenticated manifest
+            // schema on this compatibility route. Keep the fallback limited to
+            // a missing versioned endpoint: authentication, decoding, TLS, and
+            // server failures must remain visible to the operator.
+            return try await get("api/services/manifest")
+        }
     }
 
 	func apps() async throws -> [NornAppStatus] { try await get("api/v1/apps") }
@@ -113,6 +121,26 @@ actor NornClient: NornClientProtocol {
             throw NornClientError.invalidResponse
         }
         return try await get("api/v1/operations/\(id.pathComponentEncoded)")
+    }
+
+    func auditMutations(limit: Int) async throws -> [MutationAuditEvent] {
+        var components = URLComponents(url: try url(path: "api/v1/audit/mutations"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 500)))]
+        guard let endpoint = components?.url else {
+            throw NornClientError.invalidBaseURL
+        }
+        let result: MutationAuditList = try await perform(url: endpoint, method: "GET")
+        return result.events
+    }
+
+    func beaconEvents(limit: Int) async throws -> [NornBeaconEvent] {
+        var components = URLComponents(url: try url(path: "api/events"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: String(min(max(limit, 1), 200)))]
+        guard let endpoint = components?.url else {
+            throw NornClientError.invalidBaseURL
+        }
+        let result: NornBeaconList = try await perform(url: endpoint, method: "GET")
+        return result.events
     }
 
     func releases() async throws -> NornReleaseList {
@@ -599,6 +627,16 @@ actor NornClient: NornClientProtocol {
 
     private nonisolated static func transportMessage(_ error: Error) -> String {
         let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch URLError.Code(rawValue: nsError.code) {
+            case .secureConnectionFailed:
+                return "The secure connection failed. Check that this address and port serve HTTPS; an HTTP-only API port cannot accept HTTPS. For a private cluster, use its HTTPS endpoint or an SSH tunnel to localhost."
+            case .serverCertificateUntrusted, .serverCertificateHasUnknownRoot, .serverCertificateHasBadDate, .serverCertificateNotYetValid:
+                return "The server certificate could not be verified. Use the hostname covered by its certificate and check the certificate's trust and expiry."
+            default:
+                break
+            }
+        }
         return nsError.localizedDescription.isEmpty ? "network request failed" : nsError.localizedDescription
     }
 

@@ -9,6 +9,90 @@ final class NornClientTests: XCTestCase {
         super.tearDown()
     }
 
+    func testTLSFailureExplainsHTTPPortMismatchWithoutRetryingInsecurely() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            throw URLError(.secureConnectionFailed)
+        }
+        let client = try await makeClient()
+        do {
+            _ = try await client.capabilities()
+            XCTFail("Expected TLS failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("HTTP-only API port"))
+            XCTAssertEqual(recorder.lastRequest?.url?.scheme, "https")
+        }
+    }
+
+    func testUntrustedCertificateExplainsHostnameAndTrust() async throws {
+        NornURLProtocol.setHandler { _ in throw URLError(.serverCertificateUntrusted) }
+        let client = try await makeClient()
+        do {
+            _ = try await client.capabilities()
+            XCTFail("Expected certificate failure")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("hostname covered by its certificate"))
+        }
+    }
+
+    func testServiceManifestFallsBackToAuthenticatedLegacyRouteOnlyAfterVersioned404() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            switch request.url?.path {
+            case "/api/v1/services/manifest":
+                return Self.response(request, status: 404, body: "{\"error\":\"not found\"}")
+            case "/api/services/manifest":
+                return Self.response(request, status: 200, body: Self.serviceManifestJSON)
+            default:
+                throw URLError(.badURL)
+            }
+        }
+
+        let client = try await makeClient()
+        let manifest = try await client.serviceManifest()
+
+        XCTAssertEqual(manifest.version, 1)
+        XCTAssertEqual(manifest.services.map(\.name), ["norn-ha-toy-web"])
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/services/manifest")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+    }
+
+    func testServiceManifestDoesNotFallBackAfterVersionedServerFailure() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            return Self.response(request, status: 500, body: "{\"error\":\"manifest backend unavailable\"}")
+        }
+
+        let client = try await makeClient()
+        do {
+            _ = try await client.serviceManifest()
+            XCTFail("Expected the versioned manifest server failure")
+        } catch let error as NornClientError {
+            XCTAssertEqual(error, .http(status: 500, message: "manifest backend unavailable", requestID: nil))
+        }
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/services/manifest")
+    }
+
+    func testServiceManifestDoesNotFallBackAfterVersionedAuthenticationFailure() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            return Self.response(request, status: 401, body: "{\"error\":\"token rejected\"}")
+        }
+
+        let client = try await makeClient()
+        do {
+            _ = try await client.serviceManifest()
+            XCTFail("Expected the versioned manifest authentication failure")
+        } catch let error as NornClientError {
+            XCTAssertEqual(error, .http(status: 401, message: "token rejected", requestID: nil))
+        }
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/services/manifest")
+    }
+
     func testHostHistoryUsesBoundedAuthenticatedRangeAndDecodesRetainedSamples() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
@@ -859,6 +943,10 @@ final class NornClientTests: XCTestCase {
         {"id":"op-1","kind":"platform.upgrade","status":"queued","startedAt":"\(timestamp)","updatedAt":"\(timestamp)","payload":{"mode":"proxy","drainMode":"wait"}}
         """
     }
+
+    private static let serviceManifestJSON = """
+    {"version":1,"generatedAt":"2026-09-18T12:00:00Z","networkMode":"tailnet","services":[{"name":"norn-ha-toy-web","app":"norn-ha-toy","process":"web","type":"web","status":"passing","reachability":{"endpointScope":"tailnet","instanceScope":"private","exposure":"internal","routable":true}}]}
+    """
 }
 
 private actor TestCredentialVault: NornCredentialVault {

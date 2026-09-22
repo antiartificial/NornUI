@@ -6,9 +6,11 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
     case delivery
     case operations
     case fleet
+    case fleetBuilder
     case platform
     case host
     case activity
+    case audit
 
     var id: String { rawValue }
 
@@ -19,9 +21,11 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .delivery: "Delivery"
         case .operations: "Operations"
         case .fleet: "Fleet"
+        case .fleetBuilder: "Fleet Builder"
         case .platform: "Releases"
         case .host: "Host"
         case .activity: "Activity"
+        case .audit: "Activity Log"
         }
     }
 
@@ -32,9 +36,11 @@ nonisolated enum NornNavigation: String, CaseIterable, Identifiable, Codable, Se
         case .delivery: "arrow.triangle.branch"
         case .operations: "waveform.path.ecg.rectangle"
         case .fleet: "server.rack"
+        case .fleetBuilder: "point.3.connected.trianglepath.dotted"
         case .platform: "shippingbox.and.arrow.backward"
         case .host: "macmini"
         case .activity: "bolt.horizontal.circle"
+        case .audit: "list.bullet.rectangle"
         }
     }
 }
@@ -47,6 +53,17 @@ nonisolated enum NornConnectionState: Equatable, Sendable {
     case offline(String)
 }
 
+nonisolated enum NornConnectionHue: String, Codable, CaseIterable, Sendable {
+    case blue, teal, green, amber, orange, red, pink, purple
+    var title: String { rawValue.capitalized }
+
+    init(from decoder: any Decoder) throws {
+        // A color from a newer app must never make the saved connection list unreadable.
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: value) ?? .blue
+    }
+}
+
 nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable {
     var id: UUID
     var name: String
@@ -57,6 +74,7 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
     var grantedScopes: [String]?
     var tokenExpiresAt: Date?
     var lastRotatedAt: Date?
+    var connectionHue: NornConnectionHue?
 
     init(
         id: UUID = UUID(),
@@ -67,7 +85,8 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
         tokenID: String? = nil,
         grantedScopes: [String]? = nil,
         tokenExpiresAt: Date? = nil,
-        lastRotatedAt: Date? = nil
+        lastRotatedAt: Date? = nil,
+        connectionHue: NornConnectionHue? = nil
     ) {
         self.id = id
         self.name = name
@@ -78,6 +97,7 @@ nonisolated struct NornServerProfile: Identifiable, Codable, Hashable, Sendable 
         self.grantedScopes = grantedScopes
         self.tokenExpiresAt = tokenExpiresAt
         self.lastRotatedAt = lastRotatedAt
+        self.connectionHue = connectionHue
     }
 
     var isManagedDevice: Bool { deviceID != nil && tokenID != nil }
@@ -1315,6 +1335,97 @@ nonisolated struct NornOperation: Identifiable, Codable, Hashable, Sendable {
 nonisolated struct NornOperationList: Codable, Hashable, Sendable {
     var operations: [NornOperation]
     var count: Int
+}
+
+/// A signed control-plane mutation receipt from GET /api/v1/audit/mutations.
+/// Every mutating /api/ request is recorded by route + outcome; `integrity`
+/// reflects the HMAC signature state at read time.
+nonisolated struct MutationAuditEvent: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var requestID: String? = nil
+    var principalSubject: String
+    var tokenID: String? = nil
+    var deviceID: String? = nil
+    var scopes: [String]? = nil
+    var method: String
+    var path: String
+    var clientIP: String? = nil
+    var userAgent: String? = nil
+    var status: Int
+    var outcome: String
+    var startedAt: Date
+    var finishedAt: Date? = nil
+    var durationMs: Int
+    var keyID: String? = nil
+    var integrity: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, principalSubject, scopes, method, path, status, outcome, startedAt, finishedAt, userAgent, durationMs, integrity
+        case requestID = "requestId"
+        case tokenID = "tokenId"
+        case deviceID = "deviceId"
+        case clientIP = "clientIp"
+        case keyID = "keyId"
+    }
+
+    /// Case-insensitive substring match across the fields an operator searches.
+    static func filter(_ events: [MutationAuditEvent], query: String) -> [MutationAuditEvent] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return events }
+        return events.filter {
+            $0.principalSubject.lowercased().contains(needle)
+                || $0.method.lowercased().contains(needle)
+                || $0.path.lowercased().contains(needle)
+                || $0.outcome.lowercased().contains(needle)
+        }
+    }
+}
+
+nonisolated struct MutationAuditList: Codable, Hashable, Sendable {
+    var schema: String?
+    var events: [MutationAuditEvent]
+    var count: Int
+}
+
+/// An operator-facing beacon event from GET /api/events (api:read) — the
+/// activity ledger of workload (app-scoped) and cell (infra) actions, distinct
+/// from the admin mutation-audit receipts.
+nonisolated struct NornBeaconEvent: Identifiable, Codable, Hashable, Sendable {
+    var id: String
+    var source: String? = nil
+    var app: String? = nil
+    var environment: String? = nil
+    var type: String
+    var severity: String
+    var state: String? = nil
+    var title: String
+    var body: String? = nil
+    var occurredAt: Date
+    var metadata: [String: JSONValue]? = nil
+
+    /// Cell-scoped events have no app; workload (pod) events carry one.
+    var isCellScoped: Bool { (app ?? "").isEmpty }
+
+    /// Who took the action, recorded by emitAppActivity in the metadata.
+    var actor: String? {
+        if case let .string(value)? = metadata?["actor"] { return value }
+        return nil
+    }
+
+    static func filter(_ events: [NornBeaconEvent], query: String) -> [NornBeaconEvent] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return events }
+        return events.filter {
+            $0.title.lowercased().contains(needle)
+                || $0.type.lowercased().contains(needle)
+                || ($0.app ?? "").lowercased().contains(needle)
+                || ($0.actor ?? "").lowercased().contains(needle)
+        }
+    }
+}
+
+nonisolated struct NornBeaconList: Codable, Hashable, Sendable {
+    var events: [NornBeaconEvent]
 }
 
 nonisolated struct NornReleaseList: Codable, Hashable, Sendable {
