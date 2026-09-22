@@ -13,6 +13,9 @@ nonisolated enum FleetDBEngine: String, Sendable, Codable, Hashable, CaseIterabl
     case pg
     case mysql
     var title: String { self == .mysql ? "MySQL" : "PostgreSQL" }
+    /// Provider-neutral spelling used by the canonical Fleet document. Keep the compact
+    /// `pg` raw value for portable draft JSON compatibility with the web builder.
+    var managedDatabaseEngine: String { self == .mysql ? "mysql" : "postgresql" }
 }
 
 nonisolated enum FleetEdgeMode: String, Sendable, Codable, Hashable, CaseIterable {
@@ -135,9 +138,22 @@ extension FleetDraft {
                 message: "\(region) has no DO Spaces — state + WAL backup need it",
                 remediation: "Choose a Spaces region: \(FleetCatalog.spacesRegions.sorted().joined(separator: ", "))."))
 
+        let managedNames = managedDatabaseNames()
+        if !managedNames.isEmpty {
+            if let invalid = managedNames.first(where: { !Self.isDNSName($0) }) {
+                out.append(Finding(severity: "error", code: "managed-database-name", field: "managedDatabases",
+                    message: "Managed database name \(invalid) is not DNS-safe",
+                    remediation: "Use a lowercase cluster name of at most 50 characters, with letters, numbers, and hyphens only."))
+            }
+            if Set(managedNames).count != managedNames.count {
+                out.append(Finding(severity: "error", code: "managed-database-name-unique", field: "managedDatabases",
+                    message: "Managed database names must be unique", remediation: "Rename the cluster before exporting."))
+            }
+        }
+
         if db.mode == .managed {
             out.append(Finding(severity: "info", code: "database", field: "db.mode",
-                message: "Managed \(db.engine.title) — provider-run HA\(db.replica ? " + read replica" : "")", remediation: nil))
+                message: "Managed \(db.engine.title) — VPC-only, TLS required, provider-run HA\(db.replica ? " + read replica" : "")", remediation: nil))
         } else {
             let size = FleetCatalog.node(db.selfSize)
             let ok = (size?.vcpu ?? 0) >= FleetCatalog.dbSelfMinVCPU && (size?.memGB ?? 0) >= FleetCatalog.dbSelfMinMemGB
@@ -162,6 +178,14 @@ extension FleetDraft {
     }
 
     var hasBlockingFindings: Bool { validate().contains { $0.severity == "error" } }
+
+    private static func isDNSName(_ value: String) -> Bool {
+        guard (1...63).contains(value.count), let first = value.first, let last = value.last,
+              first.isASCII && last.isASCII,
+              first.isNumber || first.isLowercase,
+              last.isNumber || last.isLowercase else { return false }
+        return value.allSatisfy { $0.isASCII && ($0.isNumber || $0.isLowercase || $0 == "-") }
+    }
 }
 
 // MARK: - Cost
@@ -220,7 +244,7 @@ extension FleetDraft {
     }
 
     /// The emitted documents: one valid single-region `norn.dev/fleet/v1` Cluster per region,
-    /// plus a `fleet-extras.yaml` sidecar for managed services the contract doesn't model.
+    /// plus a `fleet-extras.yaml` sidecar only for services the canonical contract does not model.
     /// Mirror of the web `fleetDocuments` in v2/ui/src/lib/fleetDraft.ts.
     func fleetDocuments() -> [FleetDocument] {
         var docs: [FleetDocument] = []
@@ -263,6 +287,9 @@ extension FleetDraft {
         out += "apiVersion: norn.dev/fleet/v1\n"
         out += "kind: Cluster\n"
         out += "cluster:\n  name: \(name)\n  provider: digitalocean\n  region: \(regionName)\n"
+        if r == 0 && (db.mode == .managed || extras.contains { $0.mode == .managed }) {
+            out += managedDatabasesYAML()
+        }
         // Object storage + edge are managed separately (see fleet-extras); noted here for context.
         out += "# objectStorage: DO Spaces (terraform state + WAL) in \(region)\(hasSpaces ? "" : " — none available")\n"
         if edge == .cloudflare { out += "# edge: cloudflare in front of the regional load balancer\n" }
@@ -300,27 +327,43 @@ extension FleetDraft {
         return out
     }
 
+    private func managedDatabaseNames() -> [String] {
+        var names: [String] = db.mode == .managed ? ["\(name)-db"] : []
+        names.append(contentsOf: extras.enumerated().compactMap { index, extra in
+            extra.mode == .managed ? "\(name)-test-db-\(index + 1)" : nil
+        })
+        return names
+    }
+
+    private func managedDatabasesYAML() -> String {
+        var out = "managedDatabases:\n"
+        func appendDatabase(name databaseName: String, engine: FleetDBEngine, size: String, replica: Bool = false) {
+            out += "  - name: \(databaseName)\n"
+            out += "    engine: \(engine.managedDatabaseEngine)\n"
+            out += "    size: \(size)\n"
+            out += "    region: \(region)\n"
+            out += "    network:\n      exposure: vpc-only\n      tls: required\n"
+            if replica {
+                out += "    readReplica:\n      name: \(databaseName)-replica\n      region: \(replicaResidesInRegionB ? secondRegion : region)\n"
+            }
+        }
+        if db.mode == .managed {
+            appendDatabase(name: "\(name)-db", engine: db.engine, size: db.managedSize, replica: db.replica)
+        }
+        for (index, extra) in extras.enumerated() where extra.mode == .managed {
+            appendDatabase(name: "\(name)-test-db-\(index + 1)", engine: extra.engine, size: extra.size)
+        }
+        return out
+    }
+
     /// Managed services that are NOT part of norn.dev/fleet/v1 (provisioned separately). Returns nil
     /// when there is nothing managed to record.
     private func extrasDoc() -> String? {
-        let managedExtras = extras.filter { $0.mode == .managed }
-        guard db.mode == .managed || edge == .cloudflare || !managedExtras.isEmpty else { return nil }
+        guard edge == .cloudflare else { return nil }
 
         var out = "# Managed services not modelled by norn.dev/fleet/v1 — provisioned separately.\n"
         out += "apiVersion: norn.dev/fleet-extras/v1\n"
         out += "cluster: \(name)\n"
-        if db.mode == .managed {
-            out += "managedDatabase:\n  engine: \(db.engine.rawValue)\n  size: \(db.managedSize)\n  region: \(region)\n"
-            if db.replica {
-                out += "  readReplica:\n    region: \(replicaResidesInRegionB ? secondRegion : region)\n"
-            }
-        }
-        if !managedExtras.isEmpty {
-            out += "testDatabases:\n"
-            for ex in managedExtras {
-                out += "  - engine: \(ex.engine.rawValue)\n    size: \(ex.size)\n    region: \(region)\n"
-            }
-        }
         if edge == .cloudflare { out += "edge:\n  provider: cloudflare\n" }
         out += "objectStorage:\n  spaces: \(hasSpaces)\n  region: \(region)\n"
         return out
