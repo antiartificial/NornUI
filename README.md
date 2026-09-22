@@ -117,6 +117,11 @@ and comments while preserving selectable text. The topology canvas keeps region
 borders inside its padding and supports zoom buttons, actual size, Fit, and
 trackpad pinch. Scrolling pans the canvas; node dragging accounts for zoom.
 
+Managed PostgreSQL and MySQL selections are emitted directly as canonical
+`managedDatabases` cluster intent. Each entry is VPC-only with TLS required;
+the Builder can describe a read replica but does not create provider resources
+or apply a Fleet plan.
+
 Choose a context color beside a saved server in Manage Connections, or in its
 editor. The active server menu keeps its name and a matching hue visible. Color
 changes save locally without reconnecting or changing credentials.
