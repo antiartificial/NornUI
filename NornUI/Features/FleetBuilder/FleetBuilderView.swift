@@ -287,7 +287,7 @@ struct FleetBuilderView: View {
                     Text("Region B").tag(FleetReplicaRegion.b)
                 }.pickerStyle(.segmented)
             }
-            Text("Provider-run HA, backups & failover. Replicas default to the primary's region.")
+            Text("Emits a canonical managedDatabases entry. Provider-run HA, backups, and failover; VPC-only reachability and TLS are required. Replicas default to the primary's region.")
                 .font(.caption).foregroundStyle(.secondary)
         } else {
             sizePicker("Size", selection: Binding(get: { model.draft.db.selfSize }, set: { model.setSelfDBSize($0) }), sizes: FleetCatalog.nodeSizes)

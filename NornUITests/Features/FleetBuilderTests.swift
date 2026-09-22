@@ -109,17 +109,30 @@ final class FleetBuilderTests: XCTestCase {
         XCTAssertTrue(yaml.contains("drainTimeout: 15m"))
     }
 
-    func testManagedDatabaseGoesToExtrasSidecar() {
+    func testManagedDatabaseIsCanonicalClusterIntent() {
         var draft = FleetDraft()
         draft.db.mode = .managed
+        draft.db.engine = .pg
+        draft.db.replica = true
         let docs = draft.fleetDocuments()
-        XCTAssertEqual(docs.count, 2)
+        XCTAssertEqual(docs.count, 1)
         let cluster = docs[0].yaml
         XCTAssertFalse(cluster.contains("db-nyc3:"))          // managed DB is not a node pool
-        let extras = docs[1]
-        XCTAssertEqual(extras.filename, "norn-prod.fleet-extras.yaml")
-        XCTAssertTrue(extras.yaml.contains("apiVersion: norn.dev/fleet-extras/v1"))
-        XCTAssertTrue(extras.yaml.contains("managedDatabase:"))
+        XCTAssertTrue(cluster.contains("managedDatabases:"))
+        XCTAssertTrue(cluster.contains("name: norn-prod-db"))
+        XCTAssertTrue(cluster.contains("engine: postgresql"))
+        XCTAssertTrue(cluster.contains("exposure: vpc-only"))
+        XCTAssertTrue(cluster.contains("tls: required"))
+        XCTAssertTrue(cluster.contains("name: norn-prod-db-replica"))
+    }
+
+    func testManagedTestDatabaseAlsoUsesCanonicalIntent() {
+        var draft = FleetDraft()
+        draft.extras = [FleetTestDB(mode: .managed, engine: .mysql, size: "db-s-2vcpu-4gb")]
+        let yaml = draft.fleetDocuments().first!.yaml
+        XCTAssertTrue(yaml.contains("name: norn-prod-test-db-1"))
+        XCTAssertTrue(yaml.contains("engine: mysql"))
+        XCTAssertTrue(yaml.contains("exposure: vpc-only"))
     }
 
     func testTwoRegionsEmitOneClusterDocEach() {
