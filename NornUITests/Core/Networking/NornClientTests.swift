@@ -801,7 +801,7 @@ final class NornClientTests: XCTestCase {
         NornURLProtocol.setHandler { request in
             recorder.record(request, body: NornURLProtocol.body(of: request))
             return Self.response(request, status: 200, body: """
-            {"protocolVersion":1,"bounds":{"oldestCursor":80,"latestCursor":120,"retainedEvents":41},"retentionPolicy":"database-retained","retention":{"mode":"unbounded","automaticPruning":false,"replayPageSize":500},"gapDetection":true,"heartbeatMinimumSeconds":10,"heartbeatMaximumSeconds":120,"filters":["types","apps"]}
+            {"protocolVersion":1,"bounds":{"oldestCursor":80,"latestCursor":120,"retainedEvents":41,"prunedThroughCursor":79},"retentionPolicy":"database-retained","retention":{"mode":"unbounded","automaticPruning":false,"replayPageSize":500},"gapDetection":true,"heartbeatMinimumSeconds":10,"heartbeatMaximumSeconds":120,"filters":["types","apps"]}
             """)
         }
 
@@ -811,6 +811,7 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
         XCTAssertEqual(info.bounds.oldestCursor, 80)
         XCTAssertEqual(info.bounds.latestCursor, 120)
+        XCTAssertEqual(info.bounds.prunedThroughCursor, 79)
         XCTAssertTrue(info.gapDetection)
     }
 

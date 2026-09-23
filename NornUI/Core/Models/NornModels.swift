@@ -406,6 +406,7 @@ nonisolated struct NornEventStreamInfo: Decodable, Hashable, Sendable {
         var oldestCursor: Int64
         var latestCursor: Int64
         var retainedEvents: Int64
+        var prunedThroughCursor: Int64? = nil
     }
 
     var protocolVersion: Int
