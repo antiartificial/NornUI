@@ -2126,7 +2126,10 @@ final class NornAppModel {
         guard isCurrentConnection(generation: generation, profileID: profileID) else {
             throw CancellationError()
         }
-        let minimum = max(0, info.bounds.oldestCursor - 1)
+        let prunedThrough = info.bounds.prunedThroughCursor ?? 0
+        guard info.bounds.latestCursor >= 0, prunedThrough >= 0,
+              prunedThrough <= info.bounds.latestCursor else { return cursor }
+        let minimum = max(0, info.bounds.oldestCursor - 1, prunedThrough)
         let maximum = max(0, info.bounds.latestCursor)
         guard cursor < minimum || cursor > maximum else { return cursor }
 

@@ -283,6 +283,30 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(connectedCursor, 42)
     }
 
+    func testLiveListenerResyncsWhenFullyPrunedWindowHasNoOldestEvent() async throws {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Test", baseURL: URL(string: "https://norn.example.test")!)
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        store.saveCursor(20, profileID: profile.id)
+        let recorder = EventCursorRecorder()
+        let client = CursorReconciliationClient(
+            recorder: recorder,
+            metadataAvailable: true,
+            bounds: .init(oldestCursor: 0, latestCursor: 120, retainedEvents: 0, prunedThroughCursor: 80)
+        )
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in client })
+
+        await model.start()
+        let connectedCursor = await recorder.waitForFirstCursor()
+
+        XCTAssertEqual(store.loadCursor(profileID: profile.id), 120)
+        XCTAssertEqual(connectedCursor, 120)
+    }
+
     func testReturningToLiveOverviewRefreshesEventsReceivedWhileHidden() async throws {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
@@ -1906,6 +1930,7 @@ private struct CursorReconciliationClient: NornClientProtocol {
 
     let recorder: EventCursorRecorder
     let metadataAvailable: Bool
+    var bounds: NornEventStreamInfo.Bounds? = nil
 
     func capabilities() async throws -> NornCapabilities { NornFixtures.snapshot.capabilities }
     func hostMetrics() async throws -> NornHostMetrics { NornFixtures.hostMetrics }
@@ -1925,7 +1950,7 @@ private struct CursorReconciliationClient: NornClientProtocol {
         guard metadataAvailable else { throw MetadataError.unavailable }
         return .init(
             protocolVersion: 1,
-            bounds: .init(oldestCursor: 80, latestCursor: 120, retainedEvents: 41),
+            bounds: bounds ?? .init(oldestCursor: 80, latestCursor: 120, retainedEvents: 41),
             gapDetection: true
         )
     }
