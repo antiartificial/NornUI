@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "norn.client-contract-fixture-provenance/v1",
+  "sourceRepository": "https://github.com/antiartificial/norn",
+  "sourceRevision": "4cb0c209dbcfba42dc1287d926e889c1202c8c60",
+  "sourcePath": "v2/api/testdata/client-contract/v1/signed-staging-capabilities.json",
+  "sha256": "d12d8c8c179d8beb903abb298d5cd94143a952591cd517699f486c020559b9d0"
+}
