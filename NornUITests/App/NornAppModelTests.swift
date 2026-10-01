@@ -64,6 +64,30 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot.capabilities.serverVersion, "v2.16.2-control")
     }
 
+    func testFixtureActivationDoesNotRotateAnExpiringSavedCredential() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(
+            name: "Saved live server",
+            baseURL: URL(string: "https://norn.example.test")!,
+            deviceID: "device-1",
+            tokenID: "token-1",
+            tokenExpiresAt: .now.addingTimeInterval(60)
+        )
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let model = NornAppModel(profileStore: store, fixture: NornFixtures.snapshot)
+        await model.start()
+
+        await model.refreshManagedCredentialIfNeeded()
+
+        XCTAssertTrue(model.isFixtureMode)
+        XCTAssertEqual(model.connectionState, .online)
+        XCTAssertEqual(model.selectedProfile?.id, profile.id)
+    }
+
     func testNoConfiguredServerDoesNotPresentFixtureHistoryAsLiveData() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)

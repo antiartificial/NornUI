@@ -1505,6 +1505,7 @@ final class NornAppModel {
     }
 
     func refreshManagedCredentialIfNeeded() async {
+        guard !isFixtureMode else { return }
         guard shouldRotate(selectedProfile, force: false) else { return }
         await connect()
     }
