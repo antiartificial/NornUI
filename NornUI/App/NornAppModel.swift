@@ -1736,6 +1736,17 @@ final class NornAppModel {
         eventMutatedOperationIDs.subtract(eventOperationIDs)
         reconcileNavigationSelections()
 
+        // These lists are only meaningful while the freshly returned
+        // capability document advertises their feature and route. Keeping
+        // them through a same-profile refresh would present results from a
+        // surface the server has withdrawn.
+        if !capabilities.supportsFleet || !capabilities.supportsFleetReconciliation {
+            fleetReconciliations = [:]
+        }
+        if !capabilities.supportsFleet || !capabilities.supportsFleetRunnerAttempts {
+            fleetRunnerAttempts = [:]
+        }
+
         switch result.6 {
         case let .value(inventory): fleetInventory = inventory
         case .failure:
