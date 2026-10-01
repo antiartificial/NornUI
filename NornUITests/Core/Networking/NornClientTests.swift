@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import XCTest
 @testable import NornUI
 
@@ -192,34 +193,65 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
     }
 
-    func testSourceDerivedNorn8ASignedCapabilitiesRequireCompleteReleaseContract() throws {
-        // Source-derived, configuration-shaped fixture from Norn
-        // v2/api/main.go at 8a291142; it is not a captured capabilities
-        // response. It models the normal non-read-only staging branch with
-        // norn-signed-private trust: release binding, workflow/ref/event/
-        // environment allowlists, OIDC audience/default branch, a valid
-        // attested admission mode, and a staging signing key.
-        // External Fleet admission remains absent because its bridge and
-        // verifier have a separate complete-configuration gate. The version
-        // is the observed Mini signed-shadow candidate, not a value inferred
-        // from this source branch.
-        let fixture = URL(fileURLWithPath: #filePath)
+    func testCanonicalSignedStagingCapabilitiesUseV1TransportAndCompleteReleaseContract() async throws {
+        let fixtures = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
-            .appendingPathComponent("Fixtures/norn-v2-8a-signed-capabilities.json")
-        let capabilities = try JSONDecoder().decode(NornCapabilities.self, from: Data(contentsOf: fixture))
+            .appendingPathComponent("Fixtures")
+        let fixture = fixtures.appendingPathComponent("signed-staging-capabilities.json")
+        let provenanceFile = fixtures.appendingPathComponent("signed-staging-capabilities.provenance.json")
+        let fixtureData = try Data(contentsOf: fixture)
+        let provenance = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: provenanceFile)) as? [String: String]
+        )
+        let digest = SHA256.hash(data: fixtureData).map { String(format: "%02x", $0) }.joined()
 
-        XCTAssertEqual(capabilities.serverVersion, "v2.20.0-platform-58-g8a291142")
+        XCTAssertEqual(provenance["schemaVersion"], "norn.client-contract-fixture-provenance/v1")
+        XCTAssertEqual(provenance["sourceRepository"], "https://github.com/antiartificial/norn")
+        XCTAssertEqual(provenance["sourceRevision"], "4cb0c209dbcfba42dc1287d926e889c1202c8c60")
+        XCTAssertEqual(provenance["sourcePath"], "v2/api/testdata/client-contract/v1/signed-staging-capabilities.json")
+        XCTAssertEqual(provenance["sha256"], "d12d8c8c179d8beb903abb298d5cd94143a952591cd517699f486c020559b9d0")
+        XCTAssertEqual(digest, provenance["sha256"], "The vendored fixture must remain byte-identical to Norn's canonical corpus entry")
+
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return (
+                HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 200,
+                    httpVersion: "HTTP/1.1",
+                    headerFields: ["Content-Type": "application/json"]
+                )!,
+                fixtureData
+            )
+        }
+        let capabilities = try await makeClient().capabilities()
+
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/capabilities")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
+        XCTAssertEqual(capabilities.serverVersion, "client-contract-fixture")
         XCTAssertEqual(capabilities.environment?.id, "staging")
+        XCTAssertEqual(capabilities.environment?.profile, "norn-client-fixture")
+        XCTAssertEqual(capabilities.auth.principal?.subject, "norn-client-fixture-operator")
+        XCTAssertEqual(capabilities.auth.principal?.deviceID, "client-fixture-device")
+        XCTAssertEqual(capabilities.auth.principal?.legacy, false)
+        XCTAssertTrue(capabilities.auth.scopes.contains("fleet:external-admission"))
         XCTAssertTrue(capabilities.features.contains("norn-signed-private-v1"))
         XCTAssertTrue(capabilities.supportsReleasePipeline)
         XCTAssertTrue(capabilities.supportsEventStream)
+        XCTAssertTrue(capabilities.supportsFleet)
 
-        var missingReleaseRoute = capabilities
-        missingReleaseRoute.endpoints.removeValue(forKey: "releasePromotions")
-        XCTAssertFalse(missingReleaseRoute.supportsReleasePipeline)
-        var missingReleaseFeature = capabilities
-        missingReleaseFeature.features.removeAll { $0 == "release-promotions-v1" }
-        XCTAssertFalse(missingReleaseFeature.supportsReleasePipeline)
+        for route in ["releasePreflight", "releaseDeployments", "releaseQualifications", "releasePromotions", "releaseRollbacks"] {
+            var incomplete = capabilities
+            incomplete.endpoints.removeValue(forKey: route)
+            XCTAssertFalse(incomplete.supportsReleasePipeline, "Missing \(route) must disable release controls")
+        }
+        for feature in ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"] {
+            var incomplete = capabilities
+            incomplete.features.removeAll { $0 == feature }
+            XCTAssertFalse(incomplete.supportsReleasePipeline, "Missing \(feature) must disable release controls")
+        }
         var missingEventRoute = capabilities
         missingEventRoute.endpoints.removeValue(forKey: "events")
         XCTAssertFalse(missingEventRoute.supportsEventStream)
