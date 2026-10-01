@@ -192,6 +192,44 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Accept"), "application/json")
     }
 
+    func testSourceDerivedNorn8ASignedCapabilitiesRequireCompleteReleaseContract() throws {
+        // Source-derived, configuration-shaped fixture from Norn
+        // v2/api/main.go at 8a291142; it is not a captured capabilities
+        // response. It models the normal non-read-only staging branch with
+        // norn-signed-private trust: release binding, workflow/ref/event/
+        // environment allowlists, OIDC audience/default branch, a valid
+        // attested admission mode, and a staging signing key.
+        // External Fleet admission remains absent because its bridge and
+        // verifier have a separate complete-configuration gate. The version
+        // is the observed Mini signed-shadow candidate, not a value inferred
+        // from this source branch.
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/norn-v2-8a-signed-capabilities.json")
+        let capabilities = try JSONDecoder().decode(NornCapabilities.self, from: Data(contentsOf: fixture))
+
+        XCTAssertEqual(capabilities.serverVersion, "v2.20.0-platform-58-g8a291142")
+        XCTAssertEqual(capabilities.environment?.id, "staging")
+        XCTAssertTrue(capabilities.features.contains("norn-signed-private-v1"))
+        XCTAssertTrue(capabilities.supportsReleasePipeline)
+        XCTAssertTrue(capabilities.supportsEventStream)
+
+        var missingReleaseRoute = capabilities
+        missingReleaseRoute.endpoints.removeValue(forKey: "releasePromotions")
+        XCTAssertFalse(missingReleaseRoute.supportsReleasePipeline)
+        var missingReleaseFeature = capabilities
+        missingReleaseFeature.features.removeAll { $0 == "release-promotions-v1" }
+        XCTAssertFalse(missingReleaseFeature.supportsReleasePipeline)
+        var missingEventRoute = capabilities
+        missingEventRoute.endpoints.removeValue(forKey: "events")
+        XCTAssertFalse(missingEventRoute.supportsEventStream)
+
+        let olderCapabilities = try JSONDecoder().decode(NornCapabilities.self, from: Data("""
+        {"protocolVersion":1,"serverVersion":"v2.16.2-control","features":["event-cursor-replay"],"auth":{"scopes":["api:read"],"websocketBearerHeader":true,"websocketQueryToken":false},"endpoints":{"events":"/api/v1/events"}}
+        """.utf8))
+        XCTAssertTrue(olderCapabilities.supportsEventStream, "eventInfo is optional during reconnects for older v2.16.2 control planes")
+    }
+
     func testFleetControlsUseHumanAPIWriteInsteadOfRunnerOperateScope() {
         var capabilities = NornFixtures.snapshot.capabilities
         capabilities.auth.principal?.scopes = ["api:read", "fleet:operate"]

@@ -64,6 +64,30 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(model.snapshot.capabilities.serverVersion, "v2.16.2-control")
     }
 
+    func testFixtureActivationDoesNotRotateAnExpiringSavedCredential() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(
+            name: "Saved live server",
+            baseURL: URL(string: "https://norn.example.test")!,
+            deviceID: "device-1",
+            tokenID: "token-1",
+            tokenExpiresAt: .now.addingTimeInterval(60)
+        )
+        store.saveProfiles([profile])
+        store.saveSelection(profile.id)
+        let model = NornAppModel(profileStore: store, fixture: NornFixtures.snapshot)
+        await model.start()
+
+        await model.refreshManagedCredentialIfNeeded()
+
+        XCTAssertTrue(model.isFixtureMode)
+        XCTAssertEqual(model.connectionState, .online)
+        XCTAssertEqual(model.selectedProfile?.id, profile.id)
+    }
+
     func testNoConfiguredServerDoesNotPresentFixtureHistoryAsLiveData() async {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
@@ -1201,6 +1225,31 @@ final class NornAppModelTests: XCTestCase {
         XCTAssertEqual(capabilities.assertedEnvironmentProfile, "managed")
     }
 
+    func testRefreshClearsFleetGatedCachesWhenCapabilitiesWithdrawTheirContracts() async {
+        let suite = #function
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let store = NornProfileStore(defaults: defaults)
+        let profile = NornServerProfile(name: "Capability refresh", baseURL: URL(string: "https://capabilities.example.test")!)
+        store.saveProfiles([profile]); store.saveSelection(profile.id)
+        let model = NornAppModel(profileStore: store, clientFactory: { _ in CapabilityWithdrawalClient() })
+        await model.start()
+
+        model.fleetReconciliations = ["plan-1": []]
+        model.fleetRunnerAttempts = ["plan-1": []]
+        model.fleetGitHubStatus = .init(schemaVersion: "norn.fleet-github-status/v1", configured: true, connected: true, repository: "antiartificial/norn-fleet")
+        XCTAssertTrue(model.fleetReconciliationSupported)
+        XCTAssertTrue(model.fleetRunnerAttemptsSupported)
+
+        await model.refresh()
+
+        XCTAssertFalse(model.fleetReconciliationSupported)
+        XCTAssertFalse(model.fleetRunnerAttemptsSupported)
+        XCTAssertEqual(model.fleetReconciliations, [:])
+        XCTAssertEqual(model.fleetRunnerAttempts, [:])
+        XCTAssertEqual(model.fleetGitHubStatus, .unconfigured)
+    }
+
     func testProfileBoundaryClearsPriorErrorBeforeTheNextProfileConnects() async {
         let suite = #function
         let defaults = UserDefaults(suiteName: suite)!
@@ -2204,6 +2253,13 @@ private struct ScopeProbeClient: NornClientProtocol {
         }
         if supportsReleasePipeline {
             capabilities.features.append(contentsOf: ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"])
+            capabilities.endpoints.merge([
+                "releasePreflight": "/api/v1/apps/{id}/releases/preflight",
+                "releaseDeployments": "/api/v1/apps/{id}/releases/deployments",
+                "releaseQualifications": "/api/v1/apps/{id}/qualifications",
+                "releasePromotions": "/api/v1/apps/{id}/promotions",
+                "releaseRollbacks": "/api/v1/apps/{id}/releases/rollbacks"
+            ]) { _, endpoint in endpoint }
         }
         return capabilities
     }
@@ -2431,6 +2487,38 @@ private struct EventReconnectFailureClient: NornClientProtocol {
     func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> {
         AsyncThrowingStream { $0.finish(throwing: DeferredResponseError.unavailable) }
     }
+}
+
+private actor CapabilityWithdrawalCounter {
+    private var calls = 0
+
+    func nextCapabilities() -> NornCapabilities {
+        calls += 1
+        var capabilities = NornFixtures.snapshot.capabilities
+        guard calls > 1 else { return capabilities }
+        capabilities.features.removeAll {
+            ["fleet-reconciliation-v1", "fleet-runner-attempts-v1", "fleet-github-app-v1"].contains($0)
+        }
+        for endpoint in ["fleetReconciliations", "fleetRunnerAttempts", "fleetGitHub", "fleetGitHubPullRequest", "fleetGitHubDispatch", "fleetGitHubReconcile"] {
+            capabilities.endpoints.removeValue(forKey: endpoint)
+        }
+        return capabilities
+    }
+}
+
+private struct CapabilityWithdrawalClient: NornClientProtocol {
+    private let counter = CapabilityWithdrawalCounter()
+    private let base = MockNornClient()
+
+    func capabilities() async throws -> NornCapabilities { await counter.nextCapabilities() }
+    func hostMetrics() async throws -> NornHostMetrics { try await base.hostMetrics() }
+    func health() async throws -> NornHealth { try await base.health() }
+    func serviceManifest() async throws -> NornServiceManifest { try await base.serviceManifest() }
+    func operations(activeOnly: Bool, limit: Int) async throws -> [NornOperation] { try await base.operations(activeOnly: activeOnly, limit: limit) }
+    func operation(id: String) async throws -> NornOperation { try await base.operation(id: id) }
+    func releases() async throws -> NornReleaseList { try await base.releases() }
+    func queue(_ request: NornMaintenanceRequest, idempotencyKey: String) async throws -> NornOperation { try await base.queue(request, idempotencyKey: idempotencyKey) }
+    func events(after cursor: Int64?) -> AsyncThrowingStream<NornControlEvent, Error> { base.events(after: cursor) }
 }
 
 private struct PartialDashboardClient: NornClientProtocol {
