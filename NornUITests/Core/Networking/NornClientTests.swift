@@ -471,6 +471,85 @@ final class NornClientTests: XCTestCase {
         XCTAssertEqual(checkpoints.reconciliations.first?.payload?["phase"], .string("readiness_verified"))
     }
 
+    func testFleetResourcesDecodeListAndFollowPagination() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: nil)
+            let hasAfter = request.url?.query?.contains("after=staging") == true
+            let item = FleetResourceFixture.json(executionMode: "controller")
+            let body = hasAfter
+                ? "{\"items\":[],\"controller\":{\"state\":\"running\"}}"
+                : "{\"items\":[\(item)],\"next\":\"staging\",\"controller\":{\"state\":\"running\"}}"
+            return Self.response(request, status: 200, body: body)
+        }
+        let client = try await makeClient()
+        let resources = try await client.fleetResources()
+        XCTAssertEqual(resources.map(\.name), ["staging"])
+        let resource = try XCTUnwrap(resources.first)
+        XCTAssertEqual(resource.status.nextAction, "approve_converge")
+        XCTAssertEqual(resource.desired.planID, "plan-1")
+        XCTAssertEqual(resource.desired.converge?.requiresApproval, true)
+        XCTAssertEqual(resource.executionMode, "controller")
+        XCTAssertEqual(resource.controller.state, "running")
+        XCTAssertEqual(resource.approvalPolicy.environmentReviewers, "not_enforced")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/resources")
+        XCTAssertEqual(recorder.lastRequest?.httpMethod, "GET")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer scoped-test-token")
+    }
+
+    func testFleetConvergeApproveSendsIdempotencyKeyAndResumeBody() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            return Self.response(request, status: 201, body: """
+            {"id":"op-1","kind":"fleet.converge.approve","status":"succeeded","startedAt":"2026-10-05T10:00:00Z","updatedAt":"2026-10-05T10:00:00Z"}
+            """)
+        }
+        let client = try await makeClient()
+        let sha = String(repeating: "a", count: 40)
+        let operation = try await client.approveFleetConverge(
+            planID: "plan-1",
+            request: .init(commitSha: sha, resume: true, sourceAttemptID: "att-2"),
+            idempotencyKey: "approve-1"
+        )
+        XCTAssertEqual(operation.id, "op-1")
+        XCTAssertEqual(recorder.lastRequest?.httpMethod, "POST")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/plans/plan-1/converge/approve")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "approve-1")
+        let body = try XCTUnwrap(recorder.lastBody)
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(payload["commitSha"] as? String, sha)
+        XCTAssertEqual(payload["resume"] as? Bool, true)
+        XCTAssertEqual(payload["sourceAttemptId"] as? String, "att-2")
+
+        _ = try await client.approveFleetConverge(planID: "plan-1", request: .init(commitSha: sha, resume: nil, sourceAttemptID: nil), idempotencyKey: "approve-2")
+        let plain = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(recorder.lastBody)) as? [String: Any])
+        XCTAssertNil(plain["resume"])
+        XCTAssertNil(plain["sourceAttemptId"])
+    }
+
+    func testFleetRescanPostsWithoutBodyAndIgnoresDecisionBody() async throws {
+        let recorder = RequestRecorder()
+        NornURLProtocol.setHandler { request in
+            recorder.record(request, body: NornURLProtocol.body(of: request))
+            // The handler writes the watcher decision, not the documented FleetResource.
+            return Self.response(request, status: 200, body: #"{"resource":"staging","tipSha":"\#(String(repeating: "a", count: 40))","action":"recorded"}"#)
+        }
+        let client = try await makeClient()
+        try await client.rescanFleetResource(name: "staging", idempotencyKey: "rescan-1")
+        XCTAssertEqual(recorder.lastRequest?.httpMethod, "POST")
+        XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/resources/staging/converge")
+        XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "rescan-1")
+        XCTAssertTrue(recorder.lastBody?.isEmpty ?? true)
+
+        do {
+            _ = try await client.rescanFleetResource(name: "staging", idempotencyKey: " ")
+            XCTFail("Expected an invalid idempotency key")
+        } catch let error as NornClientError {
+            XCTAssertEqual(error, .invalidIdempotencyKey)
+        }
+    }
+
     func testFleetReconciliationsRejectsUnexpectedSchema() async throws {
         NornURLProtocol.setHandler { request in
             Self.response(request, status: 200, body: """
