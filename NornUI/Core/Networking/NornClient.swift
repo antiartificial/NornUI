@@ -253,14 +253,13 @@ actor NornClient: NornClientProtocol {
 		return items
 	}
 
-	/// The 200 body is not read: control-v1 documents a FleetResource but the
-	/// handler writes the watcher's decision. Callers re-read the resource view.
-	func rescanFleetResource(name: String, idempotencyKey: String) async throws {
+	/// The 200 body is the watcher's `FleetWatchDecision`. Callers re-read the resource view.
+	func rescanFleetResource(name: String, idempotencyKey: String) async throws -> NornFleetWatchDecision {
 		let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
 		let key = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
 		guard !value.isEmpty else { throw NornClientError.invalidResponse }
 		guard !key.isEmpty, key.count <= 200 else { throw NornClientError.invalidIdempotencyKey }
-		try await performEmpty(path: "api/v1/fleet/resources/\(value.pathComponentEncoded)/converge", method: "POST", idempotencyKey: key)
+		return try await perform(path: "api/v1/fleet/resources/\(value.pathComponentEncoded)/converge", method: "POST", idempotencyKey: key)
 	}
 
 	func approveFleetConverge(planID: String, request: NornFleetConvergeApproveRequest, idempotencyKey: String) async throws -> NornOperation {

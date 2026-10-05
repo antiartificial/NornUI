@@ -129,6 +129,7 @@ final class NornAppModel {
     var fleetGitHubStatus: NornFleetGitHubStatus
     var fleetResources: [NornFleetResource] = []
     var fleetResourcesError: String?
+    var fleetRescanNotice: String?
     var isFleetResourceBusy = false
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
@@ -1253,12 +1254,14 @@ final class NornAppModel {
         let generation = context.connectionGeneration; let profileID = context.profileID
         isFleetResourceBusy = true
         lastError = nil
+        fleetRescanNotice = nil
         defer { isFleetResourceBusy = false }
         do {
             // A fresh key per click: a replayed key returns the first rescan result,
             // and the server's rescan is idempotent per tip anyway.
-            try await client.rescanFleetResource(name: name, idempotencyKey: "fleet-rescan-\(UUID().uuidString)")
+            let decision = try await client.rescanFleetResource(name: name, idempotencyKey: "fleet-rescan-\(UUID().uuidString)")
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            fleetRescanNotice = "Rescan \(decision.resource): \(decision.summary)"
             await refreshFleetResources(using: client, generation: generation, profileID: profileID)
         } catch is CancellationError {
             return
@@ -2349,6 +2352,7 @@ final class NornAppModel {
         fleetGitHubStatus = .unconfigured
         fleetResources = []
         fleetResourcesError = nil
+        fleetRescanNotice = nil
         deployments = []
         deploymentSteps = [:]
     }

@@ -528,15 +528,33 @@ final class NornClientTests: XCTestCase {
         XCTAssertNil(plain["sourceAttemptId"])
     }
 
-    func testFleetRescanPostsWithoutBodyAndIgnoresDecisionBody() async throws {
+    func testFleetActiveDecodesResumeNeededAttemptAndCommit() throws {
+        let sha = String(repeating: "e", count: 40)
+        let json = #"{"planId":"plan-1","attemptIds":["att-1"],"fenceGeneration":3,"occupancy":"Uncertain","resumeNeededAttemptId":"att-1","commitSha":"\#(sha)"}"#
+        let active = try JSONDecoder().decode(NornFleetActive.self, from: Data(json.utf8))
+        XCTAssertEqual(active.resumeNeededAttemptID, "att-1")
+        XCTAssertEqual(active.commitSha, sha)
+        let bare = try JSONDecoder().decode(NornFleetActive.self, from: Data(#"{"planId":"p","attemptIds":[],"fenceGeneration":1,"occupancy":"Held"}"#.utf8))
+        XCTAssertNil(bare.resumeNeededAttemptID)
+        XCTAssertNil(bare.commitSha)
+        let minimal = try JSONDecoder().decode(NornFleetWatchDecision.self, from: Data(#"{"resource":"r","tipSha":"t","action":"noop"}"#.utf8))
+        XCTAssertEqual(minimal.summary, "noop")
+    }
+
+    func testFleetRescanPostsWithoutBodyAndDecodesWatchDecision() async throws {
         let recorder = RequestRecorder()
         NornURLProtocol.setHandler { request in
             recorder.record(request, body: NornURLProtocol.body(of: request))
-            // The handler writes the watcher decision, not the documented FleetResource.
-            return Self.response(request, status: 200, body: #"{"resource":"staging","tipSha":"\#(String(repeating: "a", count: 40))","action":"recorded"}"#)
+            return Self.response(request, status: 200, body: #"{"resource":"staging","tipSha":"\#(String(repeating: "a", count: 40))","action":"recorded","pathClass":"converge","planId":"plan-1","code":"ok","reason":"plan recorded"}"#)
         }
         let client = try await makeClient()
-        try await client.rescanFleetResource(name: "staging", idempotencyKey: "rescan-1")
+        let decision = try await client.rescanFleetResource(name: "staging", idempotencyKey: "rescan-1")
+        XCTAssertEqual(decision.resource, "staging")
+        XCTAssertEqual(decision.action, "recorded")
+        XCTAssertEqual(decision.planID, "plan-1")
+        XCTAssertEqual(decision.pathClass, "converge")
+        XCTAssertEqual(decision.code, "ok")
+        XCTAssertEqual(decision.summary, "plan recorded")
         XCTAssertEqual(recorder.lastRequest?.httpMethod, "POST")
         XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/fleet/resources/staging/converge")
         XCTAssertEqual(recorder.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"), "rescan-1")

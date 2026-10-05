@@ -115,13 +115,9 @@ nonisolated struct FleetResourcePresentation: Equatable, Sendable {
 
         var approval: Approval?
         if let active = resumeActive {
-            // The resume-needed attempt is the holder plan's latest attempt
-            // (attemptIds last); the view has no structured field for it, so
-            // also require the server's blocker to name it.
-            let b = resource.blocker
-            if b?.kind == "approval", b?.reason == "approval_required", b?.planID == active.planID,
-               let attempt = active.attemptIDs.last, b?.message.map({ $0.contains(attempt) }) ?? true,
-               let commit = Self.commit(of: active.planID, in: resource) {
+            // The server names the resume-needed attempt and the holder commit.
+            if let attempt = active.resumeNeededAttemptID, !attempt.isEmpty,
+               let commit = active.commitSha, !commit.isEmpty {
                 approval = .resume(planID: active.planID, commitSha: commit, sourceAttemptID: attempt)
             }
         } else if approveNext, let planID = desired.planID, let commit = desired.commitSha {
@@ -132,10 +128,8 @@ nonisolated struct FleetResourcePresentation: Equatable, Sendable {
         let n = resource.name
         let plan = resource.status.active?.planID ?? desired.planID ?? "<plan-id>"
         var hints: [String] = []
-        if let active = resumeActive {
-            hints.append(resource.desired.planID == active.planID
-                ? "norn fleet converge \(n) --resume"
-                : "norn fleet approve \(active.planID) --resume --source-attempt \(active.attemptIDs.last ?? "<attempt-id>") --commit <sha>")
+        if resumeActive != nil {
+            hints.append("norn fleet converge \(n) --resume")
         } else if approveNext, let planID = desired.planID {
             hints.append("norn fleet approve \(planID)")
         }
@@ -146,12 +140,6 @@ nonisolated struct FleetResourcePresentation: Equatable, Sendable {
             "norn fleet abandon \(plan) [--provider-evidence <file>]"
         ]
         cliHints = hints
-    }
-
-    /// The commit of plan `planID`: the desired revision's, or a retained
-    /// history entry's (a holder plan the desired revision has moved past).
-    private static func commit(of planID: String, in resource: NornFleetResource) -> String? {
-        ([resource.desired] + resource.desiredHistory).first { $0.planID == planID }?.commitSha
     }
 
     static func shortSHA(_ value: String?) -> String {

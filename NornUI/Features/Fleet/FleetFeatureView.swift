@@ -20,6 +20,7 @@ struct FleetFeatureView: View {
     var isConnectionVerified: Bool = true
     var resources: [NornFleetResource] = []
     var resourcesError: String? = nil
+    var rescanNotice: String? = nil
     var canOperateResources: Bool = false
     var isResourceBusy: Bool = false
     var onRescanResource: (String, NornMutationContext) async -> Void = { _, _ in }
@@ -222,6 +223,9 @@ struct FleetFeatureView: View {
                     Label("Fleet resources could not be loaded: \(resourcesError)", systemImage: "exclamationmark.triangle.fill")
                         .font(.callout)
                         .foregroundStyle(.orange)
+                }
+                if let rescanNotice {
+                    Text(rescanNotice).font(.callout).foregroundStyle(.secondary)
                 }
                 ForEach(resources) { resource in
                     FleetResourceCard(

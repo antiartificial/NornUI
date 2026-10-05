@@ -91,9 +91,12 @@ nonisolated struct NornFleetActive: Codable, Hashable, Sendable {
     var occupancy: String
     var occupancyReason: String?
     var resumeApproved: Bool?
+    var resumeNeededAttemptID: String?
+    var commitSha: String?
 
     enum CodingKeys: String, CodingKey {
-        case fenceGeneration, occupancy, occupancyReason, resumeApproved
+        case fenceGeneration, occupancy, occupancyReason, resumeApproved, commitSha
+        case resumeNeededAttemptID = "resumeNeededAttemptId"
         case planID = "planId"
         case dispatchRunID = "dispatchRunId"
         case attemptIDs = "attemptIds"
@@ -150,6 +153,25 @@ nonisolated struct NornFleetControllerLiveness: Codable, Hashable, Sendable {
     var state: String
     var lastRescanAt: Date?
     var rescanIntervalSeconds: Int64?
+}
+
+/// 200 body of the rescan route (`FleetWatchDecision`).
+nonisolated struct NornFleetWatchDecision: Codable, Hashable, Sendable {
+    var resource: String
+    var tipSha: String
+    var action: String
+    var pathClass: String?
+    var planID: String?
+    var code: String?
+    var reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case resource, tipSha, action, pathClass, code, reason
+        case planID = "planId"
+    }
+
+    /// Short text for the UI: the reason when present, else the action.
+    var summary: String { (reason?.isEmpty == false ? reason : nil) ?? action }
 }
 
 /// Body of `POST /api/v1/fleet/plans/{planID}/converge/approve`.

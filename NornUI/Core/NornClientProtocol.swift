@@ -25,7 +25,7 @@ nonisolated protocol NornClientProtocol: Sendable {
 	func createFleetPullRequest(planID: String) async throws -> NornOperation
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation
 	func fleetResources() async throws -> [NornFleetResource]
-	func rescanFleetResource(name: String, idempotencyKey: String) async throws
+	func rescanFleetResource(name: String, idempotencyKey: String) async throws -> NornFleetWatchDecision
 	func approveFleetConverge(planID: String, request: NornFleetConvergeApproveRequest, idempotencyKey: String) async throws -> NornOperation
 	func deployments() async throws -> [NornDeployment]
 	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep]
@@ -70,7 +70,7 @@ extension NornClientProtocol {
 	func createFleetPullRequest(planID: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func dispatchFleetApply(planID: String, allowDestructive: Bool) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func fleetResources() async throws -> [NornFleetResource] { [] }
-	func rescanFleetResource(name: String, idempotencyKey: String) async throws { throw NornClientError.invalidResponse }
+	func rescanFleetResource(name: String, idempotencyKey: String) async throws -> NornFleetWatchDecision { throw NornClientError.invalidResponse }
 	func approveFleetConverge(planID: String, request: NornFleetConvergeApproveRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func deployments() async throws -> [NornDeployment] { [] }
 	func deploymentSteps(deploymentID: String) async throws -> [NornDeploymentStep] { [] }

@@ -21,11 +21,11 @@ final class FleetResourcePresentationTests: XCTestCase {
         XCTAssertTrue(model.canRescan)
     }
 
-    func testResumeFollowsServerApproveConvergeWhileFenceHeld() throws {
-        let active = #"{"planId":"plan-1","attemptIds":["att-1","att-2"],"fenceGeneration":3,"occupancy":"Uncertain","occupancyReason":"NoLiveAttempt"}"#
-        let blocker = #"{"kind":"approval","reason":"approval_required","planId":"plan-1","message":"attempt att-2 stopped and its resume approval is spent or absent; run: norn fleet converge staging --resume"}"#
-        let model = FleetResourcePresentation(try resource(nextAction: "approve_converge", executionMode: "controller", blocker: blocker, active: active))
-        XCTAssertEqual(model.approval, .resume(planID: "plan-1", commitSha: String(repeating: "a", count: 40), sourceAttemptID: "att-2"))
+    func testResumeUsesStructuredAttemptAndCommit() throws {
+        let commit = String(repeating: "e", count: 40)
+        let active = #"{"planId":"plan-1","attemptIds":["att-1","att-2"],"fenceGeneration":3,"occupancy":"Uncertain","occupancyReason":"NoLiveAttempt","resumeNeededAttemptId":"att-1","commitSha":"\#(commit)"}"#
+        let model = FleetResourcePresentation(try resource(nextAction: "approve_converge", executionMode: "controller", active: active))
+        XCTAssertEqual(model.approval, .resume(planID: "plan-1", commitSha: commit, sourceAttemptID: "att-1"))
         XCTAssertEqual(model.nextActionTitle, "Approve resume")
         XCTAssertEqual(model.cliHints.first, "norn fleet converge staging --resume")
         XCTAssertTrue(model.running.contains("attempt 2"))
@@ -40,24 +40,15 @@ final class FleetResourcePresentationTests: XCTestCase {
         XCTAssertNil(FleetResourcePresentation(try resource(nextAction: "resolve_uncertain_outcome", executionMode: "controller", active: approved)).approval)
     }
 
-    func testResumeNeedsTheServerBlockerToNameTheAttempt() throws {
-        let active = #"{"planId":"plan-1","attemptIds":["att-1","att-2"],"fenceGeneration":3,"occupancy":"Uncertain"}"#
-        let other = #"{"kind":"approval","reason":"approval_required","planId":"plan-1","message":"attempt att-9 stopped"}"#
-        XCTAssertNil(FleetResourcePresentation(try resource(nextAction: "approve_converge", blocker: other, active: active)).approval)
-        let lock = #"{"kind":"execution","reason":"state_lock_foreign","planId":"plan-1"}"#
-        XCTAssertNil(FleetResourcePresentation(try resource(nextAction: "approve_converge", blocker: lock, active: active)).approval)
-    }
-
-    func testResumeOfHolderPlanBehindDesiredUsesHistoryCommit() throws {
-        let active = #"{"planId":"plan-0","attemptIds":["att-5"],"fenceGeneration":3,"occupancy":"Uncertain"}"#
-        let blocker = #"{"kind":"approval","reason":"approval_required","planId":"plan-0","message":"attempt att-5 stopped"}"#
-        var value = try resource(nextAction: "approve_converge", blocker: blocker, active: active)
-        XCTAssertNil(FleetResourcePresentation(value).approval, "no known commit for the holder plan")
-        let old = String(repeating: "d", count: 40)
-        value.desiredHistory = [.init(generation: 1, planID: "plan-0", commitSha: old)]
-        let model = FleetResourcePresentation(value)
-        XCTAssertEqual(model.approval, .resume(planID: "plan-0", commitSha: old, sourceAttemptID: "att-5"))
-        XCTAssertEqual(model.cliHints.first, "norn fleet approve plan-0 --resume --source-attempt att-5 --commit <sha>")
+    func testResumeWithoutStructuredFieldsShowsHintOnly() throws {
+        let sha = String(repeating: "e", count: 40)
+        let noAttempt = #"{"planId":"plan-1","attemptIds":["att-2"],"fenceGeneration":3,"occupancy":"Uncertain","commitSha":"\#(sha)"}"#
+        let noCommit = #"{"planId":"plan-1","attemptIds":["att-2"],"fenceGeneration":3,"occupancy":"Uncertain","resumeNeededAttemptId":"att-2"}"#
+        for active in [noAttempt, noCommit] {
+            let model = FleetResourcePresentation(try resource(nextAction: "approve_converge", executionMode: "controller", active: active))
+            XCTAssertNil(model.approval)
+            XCTAssertEqual(model.cliHints.first, "norn fleet converge staging --resume")
+        }
     }
 
     func testApproveKeyChangesWithEachStoppedAttempt() {
