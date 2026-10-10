@@ -286,6 +286,13 @@ struct ContentView: View {
                 isStale: appModel.hasStaleCachedConnectionState,
                 isRefreshing: appModel.isFleetRefreshing,
                 isConnectionVerified: appModel.isFixtureMode || appModel.isServerReadReachable,
+                resources: appModel.fleetResources,
+                resourcesError: appModel.fleetResourcesError,
+                rescanNotice: appModel.fleetRescanNotice,
+                canOperateResources: appModel.canOperateFleetResources,
+                isResourceBusy: appModel.isFleetResourceBusy,
+                onRescanResource: { name, context in await appModel.rescanFleetResource(name: name, context: context) },
+                onApproveResource: { approval, context in await appModel.approveFleetConverge(approval, context: context) },
                 onRefresh: refreshFleet,
                 issueMutationContext: { appModel.issueMutationContext() },
                 onPlan: { pool, desired, size, reason, context in

@@ -18,6 +18,13 @@ struct FleetFeatureView: View {
     let isStale: Bool
     let isRefreshing: Bool
     var isConnectionVerified: Bool = true
+    var resources: [NornFleetResource] = []
+    var resourcesError: String? = nil
+    var rescanNotice: String? = nil
+    var canOperateResources: Bool = false
+    var isResourceBusy: Bool = false
+    var onRescanResource: (String, NornMutationContext) async -> Void = { _, _ in }
+    var onApproveResource: (FleetResourcePresentation.Approval, NornMutationContext) async -> Void = { _, _ in }
     let onRefresh: () -> Void
 	let issueMutationContext: () -> NornMutationContext?
     let onPlan: (String, Int, String, String, NornMutationContext) async -> Bool
@@ -69,6 +76,7 @@ struct FleetFeatureView: View {
                         if isStale { staleBanner }
                         fleetHeader
                         findings
+                        resourceCards
                         InfrastructureTopologyView(
                             inventory: inventory,
                             services: snapshot.services,
@@ -202,6 +210,38 @@ struct FleetFeatureView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var resourceCards: some View {
+        if !resources.isEmpty || resourcesError != nil {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Fleet Resources").font(.title2.weight(.semibold))
+                if let resourcesError {
+                    Label("Fleet resources could not be loaded: \(resourcesError)", systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
+                if let rescanNotice {
+                    Text(rescanNotice).font(.callout).foregroundStyle(.secondary)
+                }
+                ForEach(resources) { resource in
+                    FleetResourceCard(
+                        resource: resource,
+                        canOperate: canOperateResources && !isStale,
+                        isBusy: isResourceBusy,
+                        onRescan: {
+                            guard let context = issueMutationContext() else { return }
+                            Task { await onRescanResource(resource.name, context) }
+                        },
+                        onApprove: { approval in
+                            guard let context = issueMutationContext() else { return }
+                            Task { await onApproveResource(approval, context) }
+                        }
+                    )
+                }
             }
         }
     }

@@ -127,6 +127,10 @@ final class NornAppModel {
     var fleetReconciliations: [String: [NornOperation]] = [:]
     var fleetRunnerAttempts: [String: [NornFleetRunnerAttempt]] = [:]
     var fleetGitHubStatus: NornFleetGitHubStatus
+    var fleetResources: [NornFleetResource] = []
+    var fleetResourcesError: String?
+    var fleetRescanNotice: String?
+    var isFleetResourceBusy = false
     var deployments: [NornDeployment]
     var deploymentSteps: [String: [NornDeploymentStep]]
     var selectedDeploymentID: String?
@@ -595,6 +599,12 @@ final class NornAppModel {
     var canOperateFleet: Bool {
         guard canPerformOperations, isServerAuthenticated else { return false }
         return hasScope("api:write")
+    }
+    var fleetResourcesSupported: Bool { snapshot.capabilities.supportsFleetResources }
+    /// Converge approve and rescan need platform:operate (not api:write).
+    var canOperateFleetResources: Bool {
+        guard canPerformOperations, isServerAuthenticated else { return false }
+        return snapshot.capabilities.canOperateFleetResources
     }
 
 	@discardableResult
@@ -1109,6 +1119,7 @@ final class NornAppModel {
             fleetInventory = refreshedInventory
             fleetPlans = refreshedPlans
             fleetGitHubStatus = refreshedGitHubStatus
+            await refreshFleetResources(using: client, generation: generation, profileID: profileID)
             for plan in fleetPlans where fleetReconciliationSupported {
                 if let result = try? await client.fleetReconciliations(planID: plan.id) {
                     guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
@@ -1213,6 +1224,78 @@ final class NornAppModel {
             guard isCurrentConnection(generation: generation, profileID: profileID) else { return nil }
             lastError = error.localizedDescription
             return nil
+        }
+    }
+
+    /// Reads the resource view when the server advertises it. Failures stay
+    /// visible on the Fleet resources section instead of being swallowed.
+    private func refreshFleetResources(using client: any NornClientProtocol, generation: UInt64, profileID: UUID?) async {
+        guard fleetResourcesSupported else {
+            fleetResources = []
+            fleetResourcesError = nil
+            return
+        }
+        do {
+            let resources = try await client.fleetResources()
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            fleetResources = resources
+            fleetResourcesError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            fleetResources = []
+            fleetResourcesError = error.localizedDescription
+        }
+    }
+
+    func rescanFleetResource(name: String, context: NornMutationContext) async {
+        guard let client, !isFleetResourceBusy, isValidMutationContext(context, permits: canOperateFleetResources) else { return }
+        let generation = context.connectionGeneration; let profileID = context.profileID
+        isFleetResourceBusy = true
+        lastError = nil
+        fleetRescanNotice = nil
+        defer { isFleetResourceBusy = false }
+        do {
+            // A fresh key per click: a replayed key returns the first rescan result,
+            // and the server's rescan is idempotent per tip anyway.
+            let decision = try await client.rescanFleetResource(name: name, idempotencyKey: "fleet-rescan-\(UUID().uuidString)")
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            fleetRescanNotice = "Rescan \(decision.resource): \(decision.summary)"
+            await refreshFleetResources(using: client, generation: generation, profileID: profileID)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            lastError = error.localizedDescription
+        }
+    }
+
+    func approveFleetConverge(_ approval: FleetResourcePresentation.Approval, context: NornMutationContext) async {
+        guard let client, !isFleetResourceBusy, isValidMutationContext(context, permits: canOperateFleetResources) else { return }
+        let generation = context.connectionGeneration; let profileID = context.profileID
+        let planID: String, request: NornFleetConvergeApproveRequest
+        switch approval {
+        case let .approve(plan, commit):
+            planID = plan
+            request = .init(commitSha: commit, resume: nil, sourceAttemptID: nil)
+        case let .resume(plan, commit, attempt):
+            planID = plan
+            request = .init(commitSha: commit, resume: true, sourceAttemptID: attempt)
+        }
+        isFleetResourceBusy = true
+        lastError = nil
+        defer { isFleetResourceBusy = false }
+        do {
+            let operation = try await client.approveFleetConverge(planID: planID, request: request, idempotencyKey: approval.idempotencyKey)
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            upsert(operation)
+            await refreshFleetResources(using: client, generation: generation, profileID: profileID)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard isCurrentConnection(generation: generation, profileID: profileID) else { return }
+            lastError = error.localizedDescription
         }
     }
 
@@ -2267,6 +2350,9 @@ final class NornAppModel {
         fleetReconciliations = [:]
         fleetRunnerAttempts = [:]
         fleetGitHubStatus = .unconfigured
+        fleetResources = []
+        fleetResourcesError = nil
+        fleetRescanNotice = nil
         deployments = []
         deploymentSteps = [:]
     }

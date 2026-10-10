@@ -236,6 +236,45 @@ actor NornClient: NornClientProtocol {
 		return try await perform(path: "api/v1/fleet/plans/\(value.pathComponentEncoded)/github/dispatch", method: "POST", body: Self.encoder.encode(Body(allowDestructive: allowDestructive)))
 	}
 
+	func fleetResources() async throws -> [NornFleetResource] {
+		var items: [NornFleetResource] = []
+		var after: String?
+		for _ in 0 ..< 10 {
+			var components = URLComponents(url: try url(path: "api/v1/fleet/resources"), resolvingAgainstBaseURL: false)
+			var query = [URLQueryItem(name: "limit", value: "100")]
+			if let after { query.append(URLQueryItem(name: "after", value: after)) }
+			components?.queryItems = query
+			guard let endpoint = components?.url else { throw NornClientError.invalidBaseURL }
+			let page: NornFleetResourceList = try await perform(url: endpoint, method: "GET")
+			items += page.items
+			guard let next = page.next, !next.isEmpty else { break }
+			after = next
+		}
+		return items
+	}
+
+	/// The 200 body is the watcher's `FleetWatchDecision`. Callers re-read the resource view.
+	func rescanFleetResource(name: String, idempotencyKey: String) async throws -> NornFleetWatchDecision {
+		let value = name.trimmingCharacters(in: .whitespacesAndNewlines)
+		let key = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		guard !key.isEmpty, key.count <= 200 else { throw NornClientError.invalidIdempotencyKey }
+		return try await perform(path: "api/v1/fleet/resources/\(value.pathComponentEncoded)/converge", method: "POST", idempotencyKey: key)
+	}
+
+	func approveFleetConverge(planID: String, request: NornFleetConvergeApproveRequest, idempotencyKey: String) async throws -> NornOperation {
+		let value = planID.trimmingCharacters(in: .whitespacesAndNewlines)
+		let key = idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		guard !key.isEmpty, key.count <= 200 else { throw NornClientError.invalidIdempotencyKey }
+		return try await perform(
+			path: "api/v1/fleet/plans/\(value.pathComponentEncoded)/converge/approve",
+			method: "POST",
+			body: Self.encoder.encode(request),
+			idempotencyKey: key
+		)
+	}
+
 	func deployments() async throws -> [NornDeployment] {
         var components = URLComponents(url: try url(path: "api/v1/deployments"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "limit", value: "100")]
@@ -481,11 +520,14 @@ actor NornClient: NornClientProtocol {
         }
     }
 
-    private func performEmpty(path: String, method: String, body: Data? = nil) async throws {
+    private func performEmpty(path: String, method: String, body: Data? = nil, idempotencyKey: String? = nil) async throws {
         var request = try await authorizedRequest(url: url(path: path), method: method)
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        if let idempotencyKey {
+            request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
         }
         _ = try await responseData(for: request)
     }
