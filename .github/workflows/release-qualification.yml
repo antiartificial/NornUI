@@ -1,0 +1,149 @@
+name: NornUI release qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact protected-main commit to sign and notarize
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nornui-release-qualification
+  cancel-in-progress: false
+
+jobs:
+  protected-main:
+    name: Verify protected-main candidate
+    runs-on: macos-26
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: candidate
+        name: Require the current protected-main SHA
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
+          echo "sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+
+  sign-and-notarize:
+    name: Sign and notarize exact candidate
+    needs: protected-main
+    runs-on: macos-26
+    environment: release-qualification
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.0.2
+        with:
+          ref: ${{ needs.protected-main.outputs.candidate_sha }}
+          fetch-depth: 0
+      - name: Recheck protected-main after approval
+        env:
+          CANDIDATE_SHA: ${{ needs.protected-main.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git rev-parse origin/main)" = "$CANDIDATE_SHA"
+      - name: Build, sign, notarize, and verify
+        env:
+          CANDIDATE_SHA: ${{ needs.protected-main.outputs.candidate_sha }}
+          CERTIFICATE_P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          DEVELOPMENT_TEAM: ${{ vars.APPLE_DEVELOPMENT_TEAM }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -n "$CERTIFICATE_P12_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+          test -n "$APPLE_API_KEY_P8_BASE64"
+          test -n "$APPLE_API_KEY_ID"
+          test -n "$APPLE_API_ISSUER_ID"
+          test -n "$DEVELOPMENT_TEAM"
+
+          work="$RUNNER_TEMP/nornui-release-$CANDIDATE_SHA"
+          archive="$work/NornUI.xcarchive"
+          app="$archive/Products/Applications/NornUI.app"
+          submission="$work/NornUI-notarization.zip"
+          artifact="$work/NornUI-$CANDIDATE_SHA.zip"
+          keychain="$work/release-signing.keychain-db"
+          api_key="$work/AuthKey_$APPLE_API_KEY_ID.p8"
+          keychain_password="$(openssl rand -hex 24)"
+          mkdir -p "$work"
+          cleanup() {
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+            rm -f "$api_key" "$work/certificate.p12"
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 -D > "$work/certificate.p12"
+          printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 -D > "$api_key"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$work/certificate.p12" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          rm -f "$work/certificate.p12"
+
+          xcodebuild -project NornUI.xcodeproj -scheme NornUI \
+            -configuration Release -destination 'generic/platform=macOS' \
+            -archivePath "$archive" archive \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Developer ID Application' \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            ARCHS='arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            OTHER_CODE_SIGN_FLAGS="--keychain $keychain --timestamp"
+
+          binary="$app/Contents/MacOS/NornUI"
+          architectures="$(lipo -archs "$binary")"
+          test "$(wc -w <<< "$architectures" | tr -d ' ')" = 2
+          [[ " $architectures " == *' arm64 '* ]]
+          [[ " $architectures " == *' x86_64 '* ]]
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign -dv --verbose=4 "$app" 2>&1 | tee "$work/codesign.txt"
+          grep -q '^Authority=Developer ID Application:' "$work/codesign.txt"
+          grep -q "^TeamIdentifier=$DEVELOPMENT_TEAM$" "$work/codesign.txt"
+          ditto -c -k --keepParent "$app" "$submission"
+          xcrun notarytool submit "$submission" --wait \
+            --key "$api_key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          spctl --assess --type execute --verbose=2 "$app"
+          ditto -c -k --keepParent "$app" "$artifact"
+          shasum -a 256 "$artifact" | tee "$work/SHA256SUMS"
+          {
+            echo "### Qualified NornUI candidate"
+            echo
+            echo "- Commit: \`$CANDIDATE_SHA\`"
+            echo "- Bundle: \`com.antiartificial.NornUI\`"
+            echo "- Developer ID signature: verified"
+            echo "- Apple notarization ticket: stapled and validated"
+            echo "- Gatekeeper assessment: accepted"
+            echo
+            echo '```text'
+            cat "$work/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain the exact qualified artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: NornUI-${{ needs.protected-main.outputs.candidate_sha }}
+          path: |
+            ${{ runner.temp }}/nornui-release-${{ needs.protected-main.outputs.candidate_sha }}/NornUI-${{ needs.protected-main.outputs.candidate_sha }}.zip
+            ${{ runner.temp }}/nornui-release-${{ needs.protected-main.outputs.candidate_sha }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
