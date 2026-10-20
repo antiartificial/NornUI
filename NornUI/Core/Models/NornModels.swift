@@ -238,7 +238,9 @@ nonisolated struct NornCapabilities: Codable, Hashable, Sendable {
     }
 
     var supportsReleasePipeline: Bool {
-        !isFleetAuthorityOnly && ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"].allSatisfy(features.contains)
+        !isFleetAuthorityOnly &&
+        ["release-provenance-v1", "release-qualifications-v2", "release-promotions-v1"].allSatisfy(features.contains) &&
+        ["releasePreflight", "releaseDeployments", "releaseQualifications", "releasePromotions", "releaseRollbacks"].allSatisfy { endpoints[$0] != nil }
     }
 
     var supportsEventStream: Bool {
