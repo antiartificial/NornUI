@@ -46,9 +46,6 @@ struct HostFeatureView: View {
     @State private var isShowingAllServices = false
     @State private var selectedReadinessCheck: HostReadinessCheck?
     @State private var selectedLogService: NornService?
-    @State private var serviceLogs = ""
-    @State private var isLoadingServiceLogs = false
-    @State private var serviceLogRequestID: UUID?
 	@State private var restartGate = NornProfileBoundMutationGate<NornService>()
 	@State private var restartContext: NornMutationContext?
     @State private var isRestartingApp = false
@@ -222,16 +219,8 @@ struct HostFeatureView: View {
                 onLoadLogs: onLoadServiceLogs
             )
         }
-        .sheet(item: $selectedLogService, onDismiss: {
-            serviceLogRequestID = nil
-            isLoadingServiceLogs = false
-        }) { service in
-            HostServiceLogsView(
-                service: service,
-                logs: serviceLogs,
-                isLoading: isLoadingServiceLogs,
-                reload: { loadServiceLogs(service) }
-            )
+        .sheet(item: $selectedLogService) { service in
+            AppObservabilityView(service: service, loadCompatibilityLogs: onLoadServiceLogs)
         }
         .confirmationDialog(
             "Restart all active allocations for \(restartGate.pending?.intent.app ?? "this app")?",
@@ -250,7 +239,6 @@ struct HostFeatureView: View {
 			restartGate.invalidate()
 			restartContext = nil
 			selectedLogService = nil
-			serviceLogRequestID = nil
 		}
     }
 
@@ -483,7 +471,7 @@ struct HostFeatureView: View {
                             Menu {
                                 Button("Open Service") { onOpenService(service) }
                                 if canReadRuntime {
-                                    Button("View App Logs") { loadServiceLogs(service) }
+                                    Button("View App Logs & Traces") { selectedLogService = service }
                                 }
                                 if canWriteRuntime && supportsDirectRuntimeControl(for: service) {
                                     Divider()
@@ -495,14 +483,14 @@ struct HostFeatureView: View {
                             }
                             .menuStyle(.borderlessButton)
                             .fixedSize()
-                            .disabled(isLoadingServiceLogs || isRestartingApp)
+                            .disabled(isRestartingApp)
                             .help("Inspect or control \(service.app)")
                         }
                     }
                     .contextMenu {
                         Button("Open \(service.name)") { onOpenService(service) }
                         if canReadRuntime {
-                            Button("View App Logs") { loadServiceLogs(service) }
+                            Button("View App Logs & Traces") { selectedLogService = service }
                         }
                         if canWriteRuntime && supportsDirectRuntimeControl(for: service) {
                             Divider()
@@ -608,21 +596,6 @@ struct HostFeatureView: View {
         !service.isExpectedIdle
             && !["cron", "function"].contains(service.type.lowercased())
             && !service.app.isEmpty
-    }
-
-    private func loadServiceLogs(_ service: NornService) {
-        let requestID = UUID()
-        serviceLogRequestID = requestID
-        selectedLogService = service
-        serviceLogs = ""
-        isLoadingServiceLogs = true
-        Task {
-            let loaded = await onLoadServiceLogs(service)
-            guard serviceLogRequestID == requestID, selectedLogService?.id == service.id else { return }
-            serviceLogs = loaded ?? "No app logs were returned. The app may not have a running allocation, or this credential may not have read access."
-            isLoadingServiceLogs = false
-            serviceLogRequestID = nil
-        }
     }
 
     private func presentRestart(for service: NornService) {
@@ -744,9 +717,6 @@ private struct HostReadinessInspector: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedLogService: NornService?
-    @State private var logs = ""
-    @State private var isLoadingLogs = false
-    @State private var logRequestID: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -768,16 +738,8 @@ private struct HostReadinessInspector: View {
             .padding(16)
         }
         .frame(minWidth: 520, idealWidth: 600, minHeight: 460, idealHeight: 620)
-        .sheet(item: $selectedLogService, onDismiss: {
-            logRequestID = nil
-            isLoadingLogs = false
-        }) { service in
-            HostServiceLogsView(
-                service: service,
-                logs: logs,
-                isLoading: isLoadingLogs,
-                reload: { loadLogs(for: service) }
-            )
+        .sheet(item: $selectedLogService) { service in
+            AppObservabilityView(service: service, loadCompatibilityLogs: onLoadLogs)
         }
     }
 
@@ -880,9 +842,9 @@ private struct HostReadinessInspector: View {
                 }
                 .buttonStyle(.bordered)
 
-                Button("View App Logs") { loadLogs(for: service) }
+                Button("View App Logs & Traces") { selectedLogService = service }
                     .buttonStyle(.bordered)
-                    .disabled(!isConnected || !canReadRuntime || isLoadingLogs)
+                    .disabled(!isConnected || !canReadRuntime)
 
             }
             .controlSize(.small)
@@ -908,74 +870,6 @@ private struct HostReadinessInspector: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    private func loadLogs(for service: NornService) {
-        let requestID = UUID()
-        logRequestID = requestID
-        selectedLogService = service
-        logs = ""
-        isLoadingLogs = true
-        Task {
-            let loadedLogs = await onLoadLogs(service)
-            await MainActor.run {
-                guard logRequestID == requestID, selectedLogService?.id == service.id else { return }
-                logs = loadedLogs ?? "No logs were returned. The service may not expose runtime logs or the request may have failed."
-                isLoadingLogs = false
-                logRequestID = nil
-            }
-        }
-    }
-
-}
-
-private struct HostServiceLogsView: View {
-    let service: NornService
-    let logs: String
-    let isLoading: Bool
-    let reload: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(service.app) app logs")
-                        .font(.headline)
-                    Text("Latest allocation, first task · up to first 256 KB · not a durable archive")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button("Reload", action: reload)
-                    .disabled(isLoading)
-            }
-            .padding(16)
-            Divider()
-            Group {
-                if isLoading {
-                    ProgressView("Loading logs…")
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ScrollView([.horizontal, .vertical]) {
-                        Text(logs.isEmpty ? "No log output." : logs)
-                            .font(.system(.caption, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                            .padding(16)
-                    }
-                }
-            }
-            .background(Color(nsColor: .textBackgroundColor))
-            Divider()
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-            }
-            .padding(16)
-        }
-        .frame(minWidth: 640, idealWidth: 780, minHeight: 420, idealHeight: 560)
-    }
 }
 
 private struct HostMetricValue: View {

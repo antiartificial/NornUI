@@ -265,6 +265,11 @@ struct ContentView: View {
                 onRequestMetricsHistory: { window, end in await appModel.requestMetricsHistory(window: window, endingAt: end) },
                 onRefresh: refreshHost
             )
+			.environment(\.observabilityActions, NornObservabilityActions(
+				queryLogs: { try await appModel.queryAppLogs(app: $0, filter: $1) },
+				searchTraces: { try await appModel.searchAppTraces(app: $0, since: $1, until: $2, limit: $3, minDurationMs: $4) },
+				trace: { try await appModel.appTrace(app: $0, traceId: $1) }
+			))
 			.id(appModel.selectedProfileID)
             .onAppear { appModel.setHostVisible(true, profileID: hostProfileID) }
             .onDisappear { appModel.setHostVisible(false, profileID: hostProfileID) }
