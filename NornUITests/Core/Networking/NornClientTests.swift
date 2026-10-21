@@ -715,11 +715,12 @@ final class NornClientTests: XCTestCase {
 		}
 
 		let client = try await makeClient()
-		let result = try await client.queryAppLogs(app: "orders api", filter: NornLogFilter(contains: "a&b", direction: .forward))
+		let result = try await client.queryAppLogs(app: "orders api", filter: NornLogFilter(contains: "a&b+c", direction: .forward))
 
 		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders%20api/logs/query")
 		let query = URLComponents(url: try XCTUnwrap(recorder.lastRequest?.url), resolvingAgainstBaseURL: false)?.queryItems
-		XCTAssertEqual(query?.first { $0.name == "contains" }?.value, "a&b")
+		XCTAssertEqual(query?.first { $0.name == "contains" }?.value, "a&b+c")
+		XCTAssertTrue(recorder.lastRequest?.url?.query?.contains("a%26b%2Bc") == true)
 		XCTAssertEqual(query?.first { $0.name == "direction" }?.value, "forward")
 		XCTAssertEqual(result.entries.first?.time, "2026-10-21T10:00:00.123456789Z")
 		XCTAssertTrue(result.truncated)
@@ -760,7 +761,7 @@ final class NornClientTests: XCTestCase {
 		}
 		let query = URLComponents(url: try XCTUnwrap(recorder.lastRequest?.url), resolvingAgainstBaseURL: false)?.queryItems
 		XCTAssertEqual(query?.first { $0.name == "limit" }?.value, "100")
-		XCTAssertEqual(query?.first { $0.name == "minDurationMs" }?.value, "25.0")
+		XCTAssertEqual(query?.first { $0.name == "minDurationMs" }?.value, "25")
 	}
 
 	func testDurableAppRecoveryUsesTypedSnapshotAndMigrationRoutes() async throws {
