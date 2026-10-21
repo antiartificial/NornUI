@@ -342,6 +342,34 @@ actor NornClient: NornClientProtocol {
 		return isTruncated ? "[Showing first 256 KB of app output]\n\(logs)" : logs
 	}
 
+	func queryAppLogs(app: String, filter: NornLogFilter) async throws -> NornLogQueryResult {
+		try await observabilityGet(app: app, path: "logs/query", query: filter.queryItems)
+	}
+
+	func searchAppTraces(app: String, since: Date?, until: Date?, limit: Int, minDurationMs: Double?) async throws -> NornTraceList {
+		var query: [URLQueryItem] = []
+		if let since { query.append(URLQueryItem(name: "since", value: NornTimestamp.format(since))) }
+		if let until { query.append(URLQueryItem(name: "until", value: NornTimestamp.format(until))) }
+		query.append(URLQueryItem(name: "limit", value: String(min(max(limit, 1), 100))))
+		if let minDurationMs, minDurationMs > 0 { query.append(URLQueryItem(name: "minDurationMs", value: String(minDurationMs))) }
+		return try await observabilityGet(app: app, path: "traces", query: query)
+	}
+
+	func appTrace(app: String, traceId: String) async throws -> NornTraceDetail {
+		let trace = traceId.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !trace.isEmpty else { throw NornClientError.invalidResponse }
+		return try await observabilityGet(app: app, path: "traces/\(trace.pathComponentEncoded)", query: [])
+	}
+
+	private func observabilityGet<Value: Decodable>(app: String, path: String, query: [URLQueryItem]) async throws -> Value {
+		let value = app.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !value.isEmpty else { throw NornClientError.invalidResponse }
+		var components = URLComponents(url: try url(path: "api/v1/apps/\(value.pathComponentEncoded)/\(path)"), resolvingAgainstBaseURL: false)
+		if !query.isEmpty { components?.queryItems = query }
+		guard let endpoint = components?.url else { throw NornClientError.invalidBaseURL }
+		return try await perform(url: endpoint, method: "GET")
+	}
+
 	/// Restarts active Nomad allocations using Norn's compatibility control
 	/// surface. This direct action deliberately has no durable operation receipt.
 	func restartApp(app: String) async throws {
@@ -659,7 +687,8 @@ actor NornClient: NornClientProtocol {
     }()
 
     private nonisolated static func httpError(response: HTTPURLResponse, body: Data) -> NornClientError {
-        let message = (try? decoder.decode(ErrorPayload.self, from: body))?.error
+        let payload = try? decoder.decode(ErrorPayload.self, from: body)
+        let message = payload?.error ?? payload?.detail
         return .http(
             status: response.statusCode,
             message: message,
@@ -692,6 +721,7 @@ actor NornClient: NornClientProtocol {
 
 nonisolated private struct ErrorPayload: Decodable {
     let error: String?
+    let detail: String?
 }
 
 nonisolated private struct PlatformRequest: Encodable {

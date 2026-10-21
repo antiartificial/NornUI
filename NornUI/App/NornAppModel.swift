@@ -422,6 +422,21 @@ final class NornAppModel {
         }
     }
 
+    func queryAppLogs(app: String, filter: NornLogFilter) async throws -> NornLogQueryResult {
+        guard let client, canReadRuntime else { throw NornClientError.missingCredential }
+        return try await client.queryAppLogs(app: app, filter: filter)
+    }
+
+    func searchAppTraces(app: String, since: Date?, until: Date?, limit: Int, minDurationMs: Double?) async throws -> NornTraceList {
+        guard let client, canReadRuntime else { throw NornClientError.missingCredential }
+        return try await client.searchAppTraces(app: app, since: since, until: until, limit: limit, minDurationMs: minDurationMs)
+    }
+
+    func appTrace(app: String, traceId: String) async throws -> NornTraceDetail {
+        guard let client, canReadRuntime else { throw NornClientError.missingCredential }
+        return try await client.appTrace(app: app, traceId: traceId)
+    }
+
     func scaleAppRuntime(app appName: String, targets: [NornRuntimeScaleTarget], context: NornMutationContext) async {
         guard let client, isValidMutationContext(context, permits: canWriteRuntime),
               !scalingRuntimeApps.contains(appName),

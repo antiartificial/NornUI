@@ -705,6 +705,64 @@ final class NornClientTests: XCTestCase {
 		XCTAssertLessThanOrEqual(logs.utf8.count, 256 * 1_024 + 64)
 	}
 
+	func testLogQueryRequestsV1RouteWithEncodedFilterAndDecodesEntries() async throws {
+		let recorder = RequestRecorder()
+		NornURLProtocol.setHandler { request in
+			recorder.record(request, body: nil)
+			return Self.response(request, status: 200, body: """
+			{"app":"orders api","source":"spool","truncated":true,"entries":[{"time":"2026-10-21T10:00:00.123456789Z","allocId":"abcdef0123","task":"web","stream":"stderr","line":"boom"}]}
+			""")
+		}
+
+		let client = try await makeClient()
+		let result = try await client.queryAppLogs(app: "orders api", filter: NornLogFilter(contains: "a&b", direction: .forward))
+
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/orders%20api/logs/query")
+		let query = URLComponents(url: try XCTUnwrap(recorder.lastRequest?.url), resolvingAgainstBaseURL: false)?.queryItems
+		XCTAssertEqual(query?.first { $0.name == "contains" }?.value, "a&b")
+		XCTAssertEqual(query?.first { $0.name == "direction" }?.value, "forward")
+		XCTAssertEqual(result.entries.first?.time, "2026-10-21T10:00:00.123456789Z")
+		XCTAssertTrue(result.truncated)
+	}
+
+	func testTraceRoutesAndObservabilityErrorMapping() async throws {
+		let recorder = RequestRecorder()
+		NornURLProtocol.setHandler { request in
+			recorder.record(request, body: nil)
+			if request.url?.path.hasSuffix("/traces/missing") == true {
+				return Self.response(request, status: 404, headers: ["Content-Type": "application/problem+json"], body: #"{"title":"Not found","detail":"trace_not_found"}"#)
+			}
+			if request.url?.path.hasSuffix("/traces") == true {
+				return Self.response(request, status: 503, body: #"{"error":"tracing_unavailable"}"#)
+			}
+			return Self.response(request, status: 200, body: #"{"traceId":"t","app":"web","omittedSpans":2,"spans":[]}"#)
+		}
+
+		let client = try await makeClient()
+		let detail = try await client.appTrace(app: "web", traceId: "4bf92f3577b34da6a3ce929d0e0e4736")
+		XCTAssertEqual(detail.omittedSpans, 2)
+		XCTAssertEqual(recorder.lastRequest?.url?.path, "/api/v1/apps/web/traces/4bf92f3577b34da6a3ce929d0e0e4736")
+
+		do {
+			_ = try await client.appTrace(app: "web", traceId: "missing")
+			XCTFail("Expected 404")
+		} catch {
+			XCTAssertEqual(NornObservabilityIssue(error, feature: .traceDetail), .notFound)
+			XCTAssertEqual(NornObservabilityIssue(error, feature: .logs), .unsupported)
+			XCTAssertTrue(error.localizedDescription.contains("trace_not_found"))
+		}
+
+		do {
+			_ = try await client.searchAppTraces(app: "web", since: nil, until: nil, limit: 500, minDurationMs: 25)
+			XCTFail("Expected 503")
+		} catch {
+			XCTAssertEqual(NornObservabilityIssue(error, feature: .traces), .notConfigured("NORN_TEMPO_URL"))
+		}
+		let query = URLComponents(url: try XCTUnwrap(recorder.lastRequest?.url), resolvingAgainstBaseURL: false)?.queryItems
+		XCTAssertEqual(query?.first { $0.name == "limit" }?.value, "100")
+		XCTAssertEqual(query?.first { $0.name == "minDurationMs" }?.value, "25.0")
+	}
+
 	func testDurableAppRecoveryUsesTypedSnapshotAndMigrationRoutes() async throws {
 		let recorder = RequestRecorder()
 		NornURLProtocol.setHandler { request in
