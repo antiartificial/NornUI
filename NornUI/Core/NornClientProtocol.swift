@@ -39,6 +39,9 @@ nonisolated protocol NornClientProtocol: Sendable {
 	/// Compatibility runtime observability. This is intentionally separate from
 	/// durable app operations because the server streams the current Nomad logs.
 	func appLogs(app: String) async throws -> String
+	func queryAppLogs(app: String, filter: NornLogFilter) async throws -> NornLogQueryResult
+	func searchAppTraces(app: String, since: Date?, until: Date?, limit: Int, minDurationMs: Double?) async throws -> NornTraceList
+	func appTrace(app: String, traceId: String) async throws -> NornTraceDetail
 	/// Compatibility runtime control. Restarts active Nomad allocations directly
 	/// and does not create a durable operation receipt.
 	func restartApp(app: String) async throws
@@ -82,6 +85,9 @@ extension NornClientProtocol {
 	func qualifyRelease(app: String, deploymentID: String, idempotencyKey: String) async throws -> NornReleaseQualification { throw NornClientError.invalidResponse }
 	func promoteRelease(app: String, request: NornReleasePromotionRequest, idempotencyKey: String) async throws -> NornOperation { throw NornClientError.invalidResponse }
 	func appLogs(app: String) async throws -> String { throw NornClientError.invalidResponse }
+	func queryAppLogs(app: String, filter: NornLogFilter) async throws -> NornLogQueryResult { throw NornClientError.invalidResponse }
+	func searchAppTraces(app: String, since: Date?, until: Date?, limit: Int, minDurationMs: Double?) async throws -> NornTraceList { throw NornClientError.invalidResponse }
+	func appTrace(app: String, traceId: String) async throws -> NornTraceDetail { throw NornClientError.invalidResponse }
 	func restartApp(app: String) async throws { throw NornClientError.invalidResponse }
     func scaleApp(app: String, process: String, count: Int) async throws { throw NornClientError.invalidResponse }
 	func appSnapshots(app: String) async throws -> [NornAppSnapshot] { [] }
